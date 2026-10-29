@@ -15,8 +15,8 @@ from backend.coreml.fast_gmm import fast_gmm_predict_proba
 def test_fast_gmm_mathematical_parity_and_benchmark():
     """
     Test mathematical parity (under 1e-5 epsilon tolerance) between
-    scikit-learn GMM predictions and Numba-optimized GMM predictor,
-    and assert sub-10-microsecond execution time.
+    scikit-learn GMM predictions and Numba-optimized GMM predictor.
+    The sub-10-microsecond budget lives in test_fast_gmm_microbenchmark.
     """
     # 1. Generate representative synthetic data
     np.random.seed(42)
@@ -62,23 +62,33 @@ def test_fast_gmm_mathematical_parity_and_benchmark():
         
         # Assert within 1e-5 tolerance
         np.testing.assert_allclose(numba_prob, sklearn_prob, rtol=1e-5, atol=1e-5)
-        
-    # 3. Microsecond Benchmarking
-    # We run 10,000 iterations to get a stable, high-precision timing baseline
+
+
+@pytest.mark.performance
+def test_fast_gmm_microbenchmark():
+    """10,000 predictions must stay under 10 microseconds each, on a quiet core."""
+    np.random.seed(42)
+    X = np.random.randn(200, 2)
+    X[:100] += 3.0
+    X[100:] -= 3.0
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    gmm = GaussianMixture(n_components=3, covariance_type="full", random_state=42)
+    gmm.fit(X_scaled)
+    test_points = np.array([[0.0, 0.0], [3.0, 3.0], [-3.0, -3.0], [1.0, -1.0]])
+    for _ in range(10):
+        fast_gmm_predict_proba(
+            test_points[0], gmm.weights_, gmm.means_, gmm.precisions_cholesky_, scaler.mean_, scaler.var_
+        )
     n_iterations = 10000
     start_time = time.perf_counter()
     for i in range(n_iterations):
-        # Rotate input to prevent cache optimization from over-simplifying prediction
         idx = i % len(test_points)
-        _ = fast_gmm_predict_proba(
-            test_points[idx], weights, means, precisions_cholesky, scaler_mean, scaler_var
+        fast_gmm_predict_proba(
+            test_points[idx], gmm.weights_, gmm.means_, gmm.precisions_cholesky_, scaler.mean_, scaler.var_
         )
-    end_time = time.perf_counter()
-    
-    total_time_seconds = end_time - start_time
-    avg_time_per_prediction_us = (total_time_seconds / n_iterations) * 1e6
-    
+    avg_time_per_prediction_us = ((time.perf_counter() - start_time) / n_iterations) * 1e6
     print(f"\nAverage prediction time (Numba): {avg_time_per_prediction_us:.4f} microseconds")
-    
-    # Assert execution duration is strictly < 10 microseconds
-    assert avg_time_per_prediction_us < 10.0, f"Inference engine exceeded latency limit: {avg_time_per_prediction_us:.2f}us >= 10us"
+    assert avg_time_per_prediction_us < 10.0, (
+        f"Inference engine exceeded latency limit: {avg_time_per_prediction_us:.2f}us >= 10us"
+    )

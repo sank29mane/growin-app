@@ -1179,38 +1179,41 @@ def test_counter_store_exceptions_carry_no_detail(tmp_path):
 
 
 class SlowBars(FakeTransport):
-    """A Breeze bars call that takes one second, like a slow upstream."""
+    """A Breeze bars call that blocks until the test releases it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
 
     def request(self, method, url, *, headers, body, timeouts, max_bytes):
         if urlsplit(url).hostname == "breezeapi.icicidirect.com":
-            time.sleep(1.0)
+            self.entered.set()
+            assert self.release.wait(timeout=5), "test did not release the bars call"
         return super().request(method, url, headers=headers, body=body, timeouts=timeouts, max_bytes=max_bytes)
 
 
 def test_a_slow_breeze_call_does_not_stall_the_event_loop():
-    stack = Stack()
-    stack.transport = SlowBars()  # type: ignore[assignment]
     stack = _restack_with(SlowBars())
+    transport = stack.transport
+    assert isinstance(transport, SlowBars)
     token = stack.login()
     with live_server(stack.app) as port:
         bars_headers = {**CONTRACT_HDR, **auth(token)}
         pool = ThreadPoolExecutor(max_workers=21)
-        started = time.monotonic()
         bars = pool.submit(http_get, port, BARS_QUERY, bars_headers)
-        time.sleep(0.2)  # let the bars request reach the blocked upstream call
+        assert transport.entered.wait(timeout=5), "the bars call never reached the upstream"
 
         def health():
-            t = time.monotonic()
             status, _h, _b = http_get(port, "/v1/health", dict(CONTRACT_HDR))
-            return status, time.monotonic() - t
+            return status
 
         results = [f.result() for f in [pool.submit(health) for _ in range(20)]]
-        assert not bars.done(), "the bars call should still be blocked"
-        assert all(status == 200 for status, _ in results)
-        assert max(elapsed for _, elapsed in results) < 0.5
+        assert not bars.done(), "health waited for the blocked bars call"
+        assert results == [200] * 20
+        transport.release.set()
         status, _headers, _body = bars.result()
         assert status == 200
-        assert time.monotonic() - started >= 1.0
         pool.shutdown()
 
 

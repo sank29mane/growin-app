@@ -1,14 +1,24 @@
 import pytest
-import asyncio
-import time
 from unittest.mock import AsyncMock
 from resilience import CircuitBreaker, CircuitBreakerOpenError, CircuitState
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
 
 @pytest.mark.asyncio
 async def test_circuit_breaker_states():
     # Setup
     # Create a circuit that fails after 2 attempts and recovers in 2 seconds
-    circuit = CircuitBreaker(name="test", failure_threshold=2, recovery_timeout=2.0)
+    clock = _Clock()
+    circuit = CircuitBreaker(name="test", failure_threshold=2, recovery_timeout=2.0, clock=clock)
 
     # Mock function that fails
     mock_func = AsyncMock(side_effect=ValueError("Failed!"))
@@ -31,8 +41,8 @@ async def test_circuit_breaker_states():
     with pytest.raises(CircuitBreakerOpenError):
         await circuit.call(mock_func)
 
-    # 4. Wait for Recovery Timeout (Simulate time passing)
-    await asyncio.sleep(2.1)
+    # 4. Recovery timeout elapses on the injected clock, not the wall clock.
+    clock.advance(2.0)
 
     # 5. Verify HALF-OPEN transition via state access
     assert circuit.state == CircuitState.HALF_OPEN or str(circuit.state) == 'CircuitState.HALF_OPEN'

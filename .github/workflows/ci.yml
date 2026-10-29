@@ -38,8 +38,12 @@ jobs:
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)/backend
           mkdir -p pr-impact
+          # Wall-clock and microbenchmark budgets live on the performance marker.
+          # They have no slack once this job adds coverage and xdist on a 3-core runner.
           uv run --project backend pytest tests/backend/ \
             -n auto \
+            --dist worksteal \
+            -m "not performance" \
             --junitxml=pr-impact/tests-junit.xml \
             --cov --cov-config=.github/pr-impact.coveragerc \
             --cov-report=json:pr-impact/coverage.json
@@ -48,7 +52,9 @@ jobs:
         timeout-minutes: 5
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)/backend
-          uv run --project backend pytest tests/backend/test_performance_benchmarks.py \
+          # Serial, no coverage: the budgets below are only meaningful on a quiet core.
+          uv run --project backend pytest tests/backend/ \
+            -m performance \
             --junitxml=pr-impact/bench-junit.xml
 
       # Reduce the raw reports to one small metrics.json. The PR Impact

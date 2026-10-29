@@ -72,6 +72,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 markers = [
     "live_local: runs against a local model runtime named by environment variables; skipped unless they are set and always skipped in CI",
+    "performance: wall-clock or microbenchmark budget; excluded from the main CI suite and run by the performance step, without coverage or xdist",
 ]
 filterwarnings = [
     "ignore:The 'app' shortcut is now deprecated:DeprecationWarning",

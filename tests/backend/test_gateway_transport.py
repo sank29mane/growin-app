@@ -52,16 +52,17 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/server-error":
                 self._send(500, b"oops")
             elif path == "/slow":
-                time.sleep(3)
+                self.server.held.set()  # type: ignore[attr-defined]
+                self.server.release.wait(timeout=5)  # type: ignore[attr-defined]
                 self._send(200, b"late")
             elif path == "/trickle":
                 self.send_response(200)
                 self.send_header("Content-Length", "25")
                 self.end_headers()
-                for _ in range(25):
-                    self.wfile.write(b"x")
-                    self.wfile.flush()
-                    time.sleep(0.2)
+                self.wfile.write(b"x")
+                self.wfile.flush()
+                self.server.held.set()  # type: ignore[attr-defined]
+                self.server.release.wait(timeout=5)  # type: ignore[attr-defined]
             elif path == "/big":
                 self._send(200, b"z" * (2 * 1024 * 1024))
             elif path == "/bigstream":
@@ -93,6 +94,8 @@ class QuietServer(ThreadingHTTPServer):
 def server():
     srv = QuietServer(("127.0.0.1", 0), Handler)
     srv.paths = []  # type: ignore[attr-defined]
+    srv.held = threading.Event()  # type: ignore[attr-defined]
+    srv.release = threading.Event()  # type: ignore[attr-defined]
     thread = threading.Thread(
         target=lambda: srv.serve_forever(poll_interval=0.02), daemon=True
     )
@@ -152,19 +155,31 @@ def test_redirect_to_another_host_is_refused(server):
 def test_read_timeout(server):
     transport, base = make(server)
     start = time.monotonic()
-    with pytest.raises(tr.TransportError) as err:
-        call(transport, base + "/slow", timeouts=tr.Timeouts(2.0, 0.5, 10.0))
-    assert err.value.kind == "timeout"
-    assert time.monotonic() - start < 2.0
+    try:
+        with pytest.raises(tr.TransportError) as err:
+            call(transport, base + "/slow", timeouts=tr.Timeouts(2.0, 0.3, 10.0))
+        assert err.value.kind == "timeout"
+        assert server.held.is_set()
+        assert not server.release.is_set()
+        # Returned on the read budget. The handler is still blocked, so this is
+        # not "the slow body eventually finished".
+        assert time.monotonic() - start < 2.0
+    finally:
+        server.release.set()
 
 
 def test_total_deadline_stops_a_trickling_body(server):
     transport, base = make(server)
     start = time.monotonic()
-    with pytest.raises(tr.TransportError) as err:
-        call(transport, base + "/trickle", timeouts=tr.Timeouts(2.0, 5.0, 1.0))
-    assert err.value.kind == "timeout"
-    assert time.monotonic() - start < 2.5
+    try:
+        with pytest.raises(tr.TransportError) as err:
+            call(transport, base + "/trickle", timeouts=tr.Timeouts(2.0, 5.0, 0.3))
+        assert err.value.kind == "timeout"
+        assert server.held.is_set()
+        assert not server.release.is_set()
+        assert time.monotonic() - start < 2.0
+    finally:
+        server.release.set()
 
 
 def test_declared_oversize_body_is_rejected(server):

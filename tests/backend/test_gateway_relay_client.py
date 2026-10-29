@@ -1026,7 +1026,15 @@ def test_the_client_is_bounded_to_four_requests_in_flight():
     for thread in threads:
         thread.start()
     assert four_in.wait(timeout=10)
-    time.sleep(0.3)  # a fifth and sixth call would have arrived by now
+    # The other two calls are blocked on the semaphore. If they were admitted,
+    # active would climb past 4 while we watch. A fixed sleep made that check
+    # depend on the scheduler.
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        with lock:
+            if active > 4:
+                break
+        time.sleep(0.01)
     with lock:
         assert active == 4
     release.set()

@@ -29,7 +29,9 @@ class Fake(ThreadingHTTPServer):
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), Handler)
-        self.mode = {"status": 200, "body": b"enabled", "delay": 0.0, "headers": {}}
+        self.mode = {"status": 200, "body": b"enabled", "delay": 0.0, "headers": {}, "hold": False}
+        self.entered = threading.Event()
+        self.release = threading.Event()
         self.project = (200, b"enabled")
         self.requests: list[tuple[str, dict[str, str]]] = []
 
@@ -50,7 +52,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == PROJECT_PATH:
             status, body = server.project
         elif self.path == INSTANCE_PATH:
-            if server.mode["delay"]:
+            if server.mode["hold"]:
+                server.entered.set()
+                server.release.wait(timeout=5)
+            elif server.mode["delay"]:
                 time.sleep(server.mode["delay"])
             status, body = server.mode["status"], server.mode["body"]
         else:
@@ -69,7 +74,7 @@ class Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def fake():
     server = Fake()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02), daemon=True)
     thread.start()
     yield server
     server.shutdown()
@@ -115,11 +120,23 @@ def test_anything_but_the_exact_body_blocks(fake, status, body):
 
 
 def test_slow_metadata_server_blocks_on_the_timeout(fake):
-    fake.mode["delay"] = 1.5
+    # The production budget stays 1s. The behaviour under test is that a server
+    # which never answers is unreadable, and the reader returns while that
+    # server is still blocked. A 1.45s stopwatch around a 1s socket timeout
+    # failed whenever the runner was simply late.
+    assert kill.TIMEOUT_SECONDS == 1.0
+    assert kill.MetadataKillReader("http://127.0.0.1")._timeout == kill.TIMEOUT_SECONDS
+    fake.mode["hold"] = True
     started = time.monotonic()
-    state = read(fake)
-    assert state.enabled is False and state.label == "unreadable"
-    assert time.monotonic() - started < 1.45  # 1 s timeout, not the 1.5 s reply
+    state = kill.MetadataKillReader(fake.base, timeout=0.3).read()
+    elapsed = time.monotonic() - started
+    try:
+        assert fake.entered.is_set(), "the reader timed out before the request arrived"
+        assert not fake.release.is_set()
+        assert state.enabled is False and state.label == "unreadable"
+        assert elapsed < 2.0
+    finally:
+        fake.release.set()
 
 
 def test_redirect_is_not_followed(fake):

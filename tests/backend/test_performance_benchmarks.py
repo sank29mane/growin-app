@@ -4,37 +4,17 @@ import asyncio
 from utils.rstitch_engine import RStitchEngine
 
 @pytest.mark.asyncio
-async def test_rstitch_speedup_benchmark():
-    """Verify R-Stitch achieves >3x speedup over full LLM trajectories."""
+async def test_rstitch_routes_high_entropy_prompts_to_the_llm():
+    """Delegation is a property of the prompt, not of how long the step slept."""
     engine = RStitchEngine(slm_model="slm-id", llm_model="llm-id", entropy_threshold=0.7)
-    
-    # Simulate Full LLM (always high entropy)
-    start_llm = time.time()
-    for _ in range(5):
-        # Triggering mock "risk" to force LLM
-        # Add a small deterministic sleep to simulate LLM latency for the benchmark
-        await asyncio.sleep(0.01)
-        await engine.generate_step("High risk analysis", {})
-    end_llm = time.time()
-    llm_total = end_llm - start_llm
-    
-    # Simulate R-Stitch (mix of SLM and LLM)
-    start_stitch = time.time()
-    # 4 SLM steps (no sleep), 1 LLM step (0.01s sleep)
-    for _ in range(4):
-        await engine.generate_step("Simple summary", {})
-    
-    await asyncio.sleep(0.01)
-    await engine.generate_step("High risk analysis", {})
-    end_stitch = time.time()
-    stitch_total = end_stitch - start_stitch
-    
-    # Calculation: In our mock, SLM is instantaneous, LLM has 0.01s sleep.
-    # Full LLM = 5 * 0.01 = 0.05s
-    # R-Stitch = 4 * 0 + 1 * 0.01 = 0.01s
-    # In a real system, the speedup would be measurable in seconds.
-    assert stitch_total < llm_total
+    high = await engine.generate_step("High risk analysis", {})
+    low = await engine.generate_step("Simple summary", {})
+    assert high["model"] == "llm-id"
+    assert low["model"] == "slm-id"
+    assert high["stitched"] is True
+    assert low["stitched"] is False
 
+@pytest.mark.performance
 @pytest.mark.asyncio
 async def test_sse_latency_benchmark():
     """Verify SSE time-to-first-token."""
@@ -56,6 +36,7 @@ async def test_sse_latency_benchmark():
     assert latency_ms < threshold
     assert first_event["event"] in ["status_update", "reasoning_step", "error", "final_result"]
 
+@pytest.mark.performance
 @pytest.mark.asyncio
 async def test_cdc_sync_latency():
     """Verify CDC delta sync latency is <500ms."""

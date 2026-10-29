@@ -250,3 +250,8 @@ def pytest_configure(config):
         "live_local: runs against a local model runtime named by environment variables; "
         "skipped unless they are set and always skipped in CI",
     )
+    config.addinivalue_line(
+        "markers",
+        "performance: wall-clock or microbenchmark budget; excluded from the main CI "
+        "suite and run by the performance step, without coverage or xdist",
+    )

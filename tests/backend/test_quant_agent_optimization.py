@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from agents.quant_agent import QuantAgent
 
+@pytest.mark.performance
 @pytest.mark.asyncio
 async def test_quant_agent_full_performance():
     """Test performance of the full agent flow."""
