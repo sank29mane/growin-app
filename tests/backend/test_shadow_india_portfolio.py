@@ -198,10 +198,19 @@ class Fake:
         self.account.sell(symbol, quantity, price, proposal_id=self.exit_id(ISINS[symbol], attempt))
 
 
+def write_inputs_line(portfolio: ShadowPortfolio, session: date) -> None:
+    """The explicit, empty ``evaluation_inputs`` line ``mark_session`` writes before the latch moves. Without any such
+    line a latch session is refused (``evaluation_inputs_missing``), so a row that writes the latch itself says so."""
+    portfolio._record_evaluation_inputs(session, [])
+
+
 def latch_evaluate(portfolio: ShadowPortfolio, latch: LatchStore, *args: Any, **kwargs: Any):
-    """An evaluation as the portfolio runs it for a halve: the sell booking boundary is persisted, then the latch
-    moves. Rows that write the latch with no boundary (an outside writer) call ``latch.evaluate_session`` directly."""
+    """An evaluation as the portfolio runs it for a halve: the explicit ``evaluation_inputs`` line (empty here: these
+    rows read no ``position_mark``) and the sell booking boundary are persisted, then the latch moves. Rows that write
+    the latch with no boundary (an outside writer) call ``latch.evaluate_session`` directly, after
+    ``write_inputs_line``."""
     session = args[1]
+    write_inputs_line(portfolio, session)
     portfolio._record_sell_boundaries(session, portfolio.snapshot())
     return latch.evaluate_session(*args, **kwargs)
 
@@ -1506,6 +1515,45 @@ def test_a_commit_the_crash_lost_is_repaired_before_the_carry_reads_the_marks(tm
     assert result.equity == Decimal("60000")
 
 
+def test_a_latch_session_with_no_evaluation_inputs_line_is_refused_not_committed_as_empty(tmp_path):
+    """codex-r4-3: a latch written outside the portfolio leaves no ``evaluation_inputs`` line. The commit used to
+    default to ``[]`` and claim the evaluation read no marks. It aborts ``state_corrupt`` and writes no commit."""
+    world = at_peak(tmp_path)
+    world.latch.evaluate_session(
+        {A: Decimal("500")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
+    )
+    assert world.records("evaluation_inputs") == []
+    again = world.restart()
+    with pytest.raises(PortfolioAborted) as caught:
+        again.mark(D2, AAA="500")
+    assert caught.value.code == "state_corrupt"
+    assert policy.run_state(again.store).abort_events == ("state_corrupt",)
+    assert [r["reason"] for r in again.records("abort")] == ["evaluation_inputs_missing"]
+    assert again.records("evaluation_commit") == [] and again.records("position_mark") == []
+    with pytest.raises(policy.RunAborted):
+        again.restart().mark(D2, AAA="500")
+
+
+def test_an_explicit_empty_evaluation_inputs_line_still_commits_an_empty_input_list(tmp_path):
+    """A session with no holding reads no ``position_mark``: ``mark_session`` says so with an explicit empty line, and
+    the commit copies it. A latch written outside the portfolio with that same explicit line commits the same way."""
+    world = Fake(tmp_path / "flat")
+    world.mark(D1)
+    (inputs,) = world.records("evaluation_inputs")
+    (commit,) = world.records("evaluation_commit")
+    assert inputs["position_mark_seqs"] == [] and commit["position_mark_seqs"] == []
+    assert commit["as_of_date"] == D1.isoformat() and policy.run_state(world.store).abort_events == ()
+
+    outside = at_peak(tmp_path / "outside")
+    write_inputs_line(outside.portfolio, D1)
+    outside.latch.evaluate_session(
+        {A: Decimal("500")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
+    )
+    outside.restart().mark(D2, AAA="500")
+    (outside_commit,) = [r for r in outside.records("evaluation_commit") if r["as_of_date"] == D1.isoformat()]
+    assert outside_commit["position_mark_seqs"] == []
+
+
 # --- review r2 P2: a reconciled quantity cannot create a phantom peak while paused -----------------------------------------------------------
 
 
@@ -2061,6 +2109,7 @@ def test_codex_r4_1_a_halve_with_no_recorded_boundary_is_never_sized_from_curren
     """A latch written outside the portfolio leaves no boundary line. The old code counted the bookings it saw at first
     sight, which hid every sell booked after the halve opened."""
     world = at_peak(tmp_path)
+    write_inputs_line(world.portfolio, D1)  # the inputs line is present; only the sell boundary is absent
     world.latch.evaluate_session(
         {A: Decimal("460")}, D1, cash=Decimal(0), positions=[exits.Position(A, "AAA", 100, Decimal("50000"))]
     )
