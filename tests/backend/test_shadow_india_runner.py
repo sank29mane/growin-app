@@ -1487,6 +1487,96 @@ def test_two_refused_exits_raise_one_pause_naming_both_reasons(world, monkeypatc
     assert reasons == ["exit_body_invalid:stock_code,quantity"]
 
 
+def quote_error_for(world: World, monkeypatch, symbol: str, error: Exception) -> None:
+    """The quote read raises ``error`` for the one name ``symbol`` and answers normally for every other."""
+
+    real = world.quotes.samples
+
+    def samples(instrument):
+        if instrument.symbol == symbol:
+            raise error
+        return real(instrument)
+
+    monkeypatch.setattr(world.quotes, "samples", samples)
+
+
+def all_scope_pauses(world: World) -> list[str]:
+    """The run-stopping (scope all) open pauses, in the order they were written. A stop past -12% also halts entries."""
+    return [p.event for p in policy.run_state(world.evidence).open_pauses if p.scope == policy.SCOPE_ALL]
+
+
+def test_a_refused_exit_still_pauses_when_a_relay_pause_ends_the_exit_loop_early(world, monkeypatch):
+    """Break-proof: drop the ``_pause_refused_exits`` call on the early-stop path and no ``contract_mismatch`` is written,
+    so the refused exit is only a skip once the relay pause is resumed."""
+    for symbol in ("AAA", "BBB", "CCC"):
+        own(world, symbol, 160)
+    premark(world)
+    set_closes(world, AAA="85", BBB="85", CCC="85")
+    world.script.result = evaluated("CCC", entries=False)
+    refuse_body_for(world, monkeypatch, ISINS["AAA"], MintMismatch("stock_code"))
+    quote_error_for(world, monkeypatch, "BBB", NoSession(http_status=503))  # the relay pause: CCC is never reached
+    report = world.decide()
+    assert (report.status, report.stopped) == ("paused", "pause")
+    assert [r["symbol"] for r in intents_of(world, "SELL")] == []
+    assert all_scope_pauses(world) == ["relay_no_session", "contract_mismatch"]  # the relay pause first
+    assert [r["reason"] for r in world.records("pause") if r.get("event") == "contract_mismatch"] == [
+        "exit_body_invalid:stock_code"
+    ]
+    assert report.refused_exits == []
+
+
+def test_a_refused_exit_writes_no_contract_mismatch_pause_when_the_pass_aborts(world, monkeypatch):
+    """Abort is the only skip: the run is over and the abort is the record."""
+    for symbol in ("AAA", "BBB", "CCC"):
+        own(world, symbol, 160)
+    premark(world)
+    set_closes(world, AAA="85", BBB="85", CCC="85")
+    world.script.result = evaluated("CCC", entries=False)
+    refuse_body_for(world, monkeypatch, ISINS["AAA"], MintMismatch("stock_code"))
+    quote_error_for(world, monkeypatch, "BBB", OrdersUnavailable(http_status=503, reason="audit_broken"))
+    report = world.decide()
+    assert (report.status, report.stopped) == ("aborted", "abort")
+    state = policy.run_state(world.evidence)
+    assert list(state.abort_events) == ["vm_audit_broken"]
+    assert [r for r in world.records("pause") if r.get("event") == "contract_mismatch"] == []
+    assert pauses_of(world, "contract_mismatch") == [] and all_scope_pauses(world) == []
+
+
+def test_the_refused_exit_pause_is_skipped_when_the_run_is_already_aborted(world):
+    """Break-proof: drop the abort check in ``_pause_refused_exits`` and a ``contract_mismatch`` follows the abort when
+    the loop ends on an abort state that raised nothing."""
+    policy.raise_event(world.evidence, "vm_audit_broken", "audit_broken")
+    report = DecideReport(S)
+    report.refused_exits.append("stock_code")
+    world.runner._pause_refused_exits(report)
+    assert report.refused_exits == []
+    assert [r for r in world.records("pause") if r.get("event") == "contract_mismatch"] == []
+    assert list(policy.run_state(world.evidence).abort_events) == ["vm_audit_broken"]
+
+
+def test_a_refused_flatten_still_pauses_when_a_relay_pause_ends_the_hand_flatten_early(world, monkeypatch):
+    for symbol in ("AAA", "BBB", "CCC"):
+        own(world, symbol, 100)
+    premark(world)
+    refuse_body_for(world, monkeypatch, ISINS["AAA"], MintMismatch("stock_code"))
+    quote_error_for(world, monkeypatch, "BBB", NoSession(http_status=503))
+    report = world.runner.hand_flatten(S, "operator flattens by hand")
+    assert (report.status, report.stopped) == ("paused", "pause")
+    assert all_scope_pauses(world) == ["relay_no_session", "contract_mismatch"]
+
+
+def test_a_refused_flatten_writes_no_contract_mismatch_pause_when_the_hand_flatten_aborts(world, monkeypatch):
+    for symbol in ("AAA", "BBB", "CCC"):
+        own(world, symbol, 100)
+    premark(world)
+    refuse_body_for(world, monkeypatch, ISINS["AAA"], MintMismatch("stock_code"))
+    quote_error_for(world, monkeypatch, "BBB", OrdersUnavailable(http_status=503, reason="audit_broken"))
+    report = world.runner.hand_flatten(S, "operator flattens by hand")
+    assert (report.status, report.stopped) == ("aborted", "abort")
+    assert list(policy.run_state(world.evidence).abort_events) == ["vm_audit_broken"]
+    assert pauses_of(world, "contract_mismatch") == []
+
+
 def test_an_entry_the_vm_body_refuses_stays_a_skip_and_records_no_pause(world, monkeypatch):
     refuse_body(world, monkeypatch, "BUY", MintMismatch("quantity"))
     report = world.decide()

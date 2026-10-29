@@ -656,7 +656,7 @@ class ShadowRunner:
         self._resolve_exit_bands(result, plan.proposals, as_of, session)
         for proposal in plan.proposals:
             if self._stopped_all():
-                return
+                break  # a relay pause ended the loop: the refused exits below are still owed their pause
             await self._place_exit(session, as_of, result, proposal, report)
         self._pause_refused_exits(report)
         if self._stopped_all():
@@ -844,9 +844,15 @@ class ShadowRunner:
         return outcome
 
     def _pause_refused_exits(self, report: DecideReport) -> None:
-        """One ``contract_mismatch`` pause (scope all) for every exit body refused in the loop that just ended."""
+        """One ``contract_mismatch`` pause (scope all) for every exit body refused in the loop that just ended.
+
+        The loop may have ended early on a relay pause: the refused exits are still owed their pause, written after the
+        relay's own. Only an abort skips it (the run is over and the abort is the record)."""
 
         if not report.refused_exits:
+            return
+        if self._state().aborted:
+            report.refused_exits.clear()
             return
         reasons = ",".join(dict.fromkeys(report.refused_exits))
         report.refused_exits.clear()
@@ -1020,7 +1026,7 @@ class ShadowRunner:
         frozen = set() if include_corporate_action else self._open_pause_isins(CORPORATE_ACTION_PAUSE)
         for holding in self._portfolio.snapshot().holdings:
             if self._stopped_all():
-                return
+                break  # a relay pause ended the loop: the refused exits below are still owed their pause
             isin = holding.instrument.isin
             if isin in frozen:
                 report.skipped.append((isin, "flatten_skipped_corporate_action_pause"))

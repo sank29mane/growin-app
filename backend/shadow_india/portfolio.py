@@ -460,10 +460,15 @@ class ShadowPortfolio:
         records = self._records()
         if any(r.get("kind") == EVALUATION_COMMIT and r.get("as_of_date") == tag for r in records):
             return
-        seqs: list[int] = []
+        seqs: list[int] | None = None
         for record in records:
             if record.get("kind") == EVALUATION_INPUTS and record.get("as_of_date") == tag:
                 seqs = sorted(int(s) for s in record["position_mark_seqs"])
+        if seqs is None:
+            # A latch session no ``evaluation_inputs`` line names (a latch written outside the portfolio, or a lost
+            # line). Committing ``[]`` would claim the evaluation read no marks; an EXPLICIT empty line (a session
+            # with no holding) is the only way to say that. Fail closed, as every other integrity break here does.
+            self._abort("state_corrupt", "evaluation_inputs_missing")
         payload: dict[str, Any] = {"as_of_date": tag, "position_mark_seqs": seqs}
         if state.last_equity is not None:
             payload["equity"] = _dec(state.last_equity)
