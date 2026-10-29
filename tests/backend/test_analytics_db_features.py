@@ -44,10 +44,8 @@ def test_vectorized_feature_calculation():
     
     latency_ms = (end_time - start_time) * 1000
     print(f"\n⚡ Vectorized feature calculation latency: {latency_ms:.4f}ms")
-    
-    # Assert latency is extremely fast (within 10ms threshold)
-    # To prevent transient failures on resource-constrained CI agents, we check < 50ms, but target < 10ms.
-    assert latency_ms < 50.0, f"Vectorized calculation took too long: {latency_ms:.2f}ms"
+    # The 50ms budget is test_vectorized_feature_calculation_latency. Coverage
+    # and xdist blow a wall-clock cap that says nothing about the numbers below.
     assert rows_processed > 0, "No rows processed or ingested"
     
     # 4. Assert calculations in market_features
@@ -73,3 +71,29 @@ def test_vectorized_feature_calculation():
     assert payload["rows_processed"] == rows_processed
     assert "latency_ms" in payload
     assert "latest_volatility" in payload
+
+
+@pytest.mark.performance
+def test_vectorized_feature_calculation_latency():
+    """DuckDB feature ingest stays under 50ms without coverage or xdist."""
+    db = AnalyticsDB(":memory:")
+    ticker = "AAPL"
+    base_time = datetime(2026, 1, 1)
+    ohlcv_data = []
+    for i in range(100):
+        close_price = 150.0 + (i * 0.5) if i % 2 == 0 else 150.0 - (i * 0.3)
+        ohlcv_data.append({
+            "ticker": ticker,
+            "timestamp": base_time + timedelta(days=i),
+            "open": close_price - 1.0,
+            "high": close_price + 2.0,
+            "low": close_price - 1.5,
+            "close": close_price,
+            "volume": 100000 + (i * 1000),
+        })
+    db.bulk_insert_ohlcv(ticker, ohlcv_data)
+    start_time = time.perf_counter()
+    rows_processed = db.calculate_and_ingest_features(ticker, window=14)
+    latency_ms = (time.perf_counter() - start_time) * 1000
+    assert rows_processed > 0
+    assert latency_ms < 50.0, f"Vectorized calculation took too long: {latency_ms:.2f}ms"

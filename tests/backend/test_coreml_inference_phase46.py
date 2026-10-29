@@ -108,6 +108,7 @@ CPU_BUDGET_MS: float = 150.0  # Hard upper limit for CPU-only fallback
 MEMORY_GROWTH_THRESHOLD_MB: float = 50.0   # RSS growth across steady-state runs
 
 
+@pytest.mark.performance
 def test_coreml_ane_latency_benchmark():
     """
     1,000-iteration ANE latency benchmark.
@@ -167,6 +168,7 @@ def test_coreml_ane_latency_benchmark():
     )
 
 
+@pytest.mark.performance
 def test_coreml_ane_memory_stability():
     """
     Verify that running 1,000 CoreML predictions does not trigger reference leaks

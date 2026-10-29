@@ -103,7 +103,3 @@ async def test_concurrent_strategy_challenges():
     for r in results:
         assert r.status_code == 200
         assert r.json()["status"] == "revision_triggered"
-
-def test_rule_based_precedence_placeholder():
-    """SOTA: Verify Rule-Based Precedence (Human > AI) Architecture."""
-    pass

@@ -64,40 +64,15 @@ async def test_goal_planner():
     ]
     
     for scenario in scenarios:
-        print(f"\n--- Testing Scenario: {scenario['name']} ---")
-        try:
-            response = await agent.analyze(scenario["context"])
-            
-            if response.success:
-                data = response.data
-                print(f"✅ Success! (Latency: {response.latency_ms:.2f}ms)")
-                print(f"   Risk Profile: {data.get('risk_profile')}")
-                print(f"   Expected Return: {data.get('expected_annual_return'):.2%}")
-                
-                # Verify Pie Implementation
-                impl = data.get('implementation')
-                if impl:
-                    print(f"   🥧 Pie Action: {impl.get('action')} - {impl.get('type')}")
-                    print(f"   🥧 Pie Name: {impl.get('name')}")
-                else:
-                    print("❌ Error: Missing Pie Implementation details!")
-
-                if data.get('risk_profile') == 'AGGRESSIVE_PLUS':
-                    print(f"   Rebalancing: {data.get('rebalancing_strategy')}")
-                    
-                # Basic validation
-                if len(data.get('optimal_weights', {})) == 0:
-                    print("❌ Error: No weights generated!")
-                else:
-                    print(f"   Weights: {data.get('optimal_weights')}")
-                    
-            else:
-                print(f"❌ Failed: {response.error}")
-                
-        except Exception as e:
-            print(f"❌ Exception: {e}")
-            import traceback
-            traceback.print_exc()
+        response = await agent.analyze(scenario["context"])
+        assert response.success, response.error
+        data = response.data
+        assert data.get("risk_profile") == scenario["context"]["risk_profile"]
+        impl = data.get("implementation")
+        assert impl and impl.get("action") and impl.get("name")
+        assert data.get("optimal_weights"), scenario["name"]
+        if data.get("risk_profile") == "AGGRESSIVE_PLUS":
+            assert data.get("rebalancing_strategy")
 
 if __name__ == "__main__":
     asyncio.run(test_goal_planner())

@@ -32,11 +32,12 @@ class MockMLXModel(nn.Module):
         if 'w2' in params:
             self.w2 = params['w2']
 
-def test_live_trading_loop_integration():
+def _run_loop():
     """
     Simulates 10k iterations of live market ticks, running them through:
     tick -> Online Features -> Welford standardization -> Numba GMM -> MLX Swap + Risk Scale
-    Asserts end-to-end processing latency stays strictly under 2.5ms.
+    Asserts the loop's correctness and returns (avg, p95) latency in ms. The
+    2.5ms tick budget is asserted by the performance test below.
     """
     # 1. Load the real GMM parameters
     gmm_params = load_gmm_params()
@@ -133,9 +134,9 @@ def test_live_trading_loop_integration():
     assert all(r["regime_valid"] for r in results), "the fixture produced ticks the loop refused"
     all_prices = np.concatenate([mid_prices, asks, bids])
     assert all_prices.min() >= _MIN_TICK_PRICE and all_prices.max() < _MAX_TICK_PRICE
-    # Latency constraint: strictly under 2.5ms
-    assert avg_latency < 2.5, f"Average end-to-end latency {avg_latency:.2f}ms exceeds the 2.5ms budget"
-    assert p95_latency < 2.5, f"95th percentile end-to-end latency {p95_latency:.2f}ms exceeds the 2.5ms budget"
+    # The 2.5ms tick budget is enforced by test_live_trading_loop_latency_budget,
+    # which runs outside the covered xdist suite. These 10k ticks still have to
+    # classify, swap regime, and scale risk.
     
     # Assert we observed regime switches during the simulation
     assert regime_swaps > 0, "No regime swaps were triggered during the simulation"
@@ -149,3 +150,16 @@ def test_live_trading_loop_integration():
         assert 0.05 <= coef <= 1.0, f"Leverage coefficient {coef} out of bounds"
         
     print("✅ All integration assertions passed successfully!")
+    return avg_latency, p95_latency
+
+
+def test_live_trading_loop_integration():
+    _run_loop()
+
+
+@pytest.mark.performance
+def test_live_trading_loop_latency_budget():
+    """The per-tick budget, on a quiet core and without coverage."""
+    avg_latency, p95_latency = _run_loop()
+    assert avg_latency < 2.5, f"Average end-to-end latency {avg_latency:.2f}ms exceeds the 2.5ms budget"
+    assert p95_latency < 2.5, f"95th percentile end-to-end latency {p95_latency:.2f}ms exceeds the 2.5ms budget"

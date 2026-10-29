@@ -150,6 +150,7 @@ def generate_50_sequences() -> List[Dict[str, Any]]:
             
     return sequences
 
+@pytest.mark.performance
 @pytest.mark.asyncio
 async def test_preflight_latency(mock_db):
     simulator = PreFlightSimulator()

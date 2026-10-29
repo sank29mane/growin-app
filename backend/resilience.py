@@ -13,7 +13,7 @@ import logging
 import random
 import time
 from enum import Enum
-from typing import Any, Callable, Optional, TypeVar, Dict
+from typing import Any, Awaitable, Callable, Optional, TypeVar, Dict
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,8 @@ class CircuitBreaker:
     failure_threshold: int = 3
     recovery_timeout: float = 30.0
     half_open_max_calls: int = 1
+    # Tests pass a fake clock. None means the wall clock, looked up per call.
+    clock: Optional[Callable[[], float]] = None
     
     # Internal state
     _state: CircuitState = field(default=CircuitState.CLOSED, init=False)
@@ -51,11 +53,14 @@ class CircuitBreaker:
     _last_failure_time: float = field(default=0.0, init=False)
     _half_open_calls: int = field(default=0, init=False)
 
+    def _now(self) -> float:
+        return (self.clock or time.time)()
+
     @property
     def state(self) -> CircuitState:
         """Get current state, auto-transitioning from OPEN to HALF_OPEN if timeout passed."""
         if self._state == CircuitState.OPEN:
-            if time.time() - self._last_failure_time >= self.recovery_timeout:
+            if self._now() - self._last_failure_time >= self.recovery_timeout:
                 self._state = CircuitState.HALF_OPEN
                 self._half_open_calls = 0
                 logger.info(f"CircuitBreaker[{self.name}]: OPEN -> HALF_OPEN (recovery timeout passed)")
@@ -74,7 +79,7 @@ class CircuitBreaker:
     def record_failure(self, error: Exception):
         """Record failed call, potentially opening the circuit."""
         self._failure_count += 1
-        self._last_failure_time = time.time()
+        self._last_failure_time = self._now()
         
         if self._state == CircuitState.HALF_OPEN:
             # Failure during testing reopens immediately
@@ -148,6 +153,7 @@ def retry_with_backoff(
     exponential_base: float = 2.0,
     jitter: float = 0.5,
     retryable_exceptions: tuple = (Exception,),
+    sleeper: Optional[Callable[[float], Awaitable[None]]] = None,
 ):
     """
     Decorator for automatic retry with exponential backoff and jitter.
@@ -186,7 +192,7 @@ def retry_with_backoff(
                     delay = max(0.1, delay)  # Ensure positive delay
                     
                     logger.warning(f"Retry {attempt + 1}/{max_retries} for {func.__name__} in {delay:.2f}s: {e}")
-                    await asyncio.sleep(delay)
+                    await (sleeper or asyncio.sleep)(delay)
             
             raise last_exception
         

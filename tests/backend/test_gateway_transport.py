@@ -23,6 +23,8 @@ if str(ROOT / "gateway" / "vm") not in sys.path:
 from gateway_vm import transport as tr  # noqa: E402
 
 FAKE_TOKEN = "FAKE-session-token-abc123"
+_TRICKLE_BYTES = 100
+_TRICKLE_GAP_S = 0.05  # full trickle takes about 5s
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -52,16 +54,23 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/server-error":
                 self._send(500, b"oops")
             elif path == "/slow":
-                time.sleep(3)
+                self.server.held.set()  # type: ignore[attr-defined]
+                self.server.release.wait(timeout=5)  # type: ignore[attr-defined]
+                self.server.done.set()  # type: ignore[attr-defined]
                 self._send(200, b"late")
             elif path == "/trickle":
+                # One byte every 50ms for ~5s. Each gap is far under the read
+                # timeout, so only the total deadline can stop the client.
                 self.send_response(200)
-                self.send_header("Content-Length", "25")
+                self.send_header("Content-Length", str(_TRICKLE_BYTES))
                 self.end_headers()
-                for _ in range(25):
+                for _ in range(_TRICKLE_BYTES):
                     self.wfile.write(b"x")
                     self.wfile.flush()
-                    time.sleep(0.2)
+                    self.server.held.set()  # type: ignore[attr-defined]
+                    if self.server.release.wait(timeout=_TRICKLE_GAP_S):  # type: ignore[attr-defined]
+                        return
+                self.server.done.set()  # type: ignore[attr-defined]  # the whole body was delivered
             elif path == "/big":
                 self._send(200, b"z" * (2 * 1024 * 1024))
             elif path == "/bigstream":
@@ -93,6 +102,9 @@ class QuietServer(ThreadingHTTPServer):
 def server():
     srv = QuietServer(("127.0.0.1", 0), Handler)
     srv.paths = []  # type: ignore[attr-defined]
+    srv.held = threading.Event()  # type: ignore[attr-defined]
+    srv.release = threading.Event()  # type: ignore[attr-defined]
+    srv.done = threading.Event()  # type: ignore[attr-defined]  # set by a handler that got past release
     thread = threading.Thread(
         target=lambda: srv.serve_forever(poll_interval=0.02), daemon=True
     )
@@ -152,19 +164,32 @@ def test_redirect_to_another_host_is_refused(server):
 def test_read_timeout(server):
     transport, base = make(server)
     start = time.monotonic()
-    with pytest.raises(tr.TransportError) as err:
-        call(transport, base + "/slow", timeouts=tr.Timeouts(2.0, 0.5, 10.0))
-    assert err.value.kind == "timeout"
-    assert time.monotonic() - start < 2.0
+    try:
+        with pytest.raises(tr.TransportError) as err:
+            call(transport, base + "/slow", timeouts=tr.Timeouts(2.0, 0.3, 10.0))
+        assert err.value.kind == "timeout"
+        assert server.held.is_set()
+        assert not server.done.is_set()  # the handler is still blocked
+        # Returned on the read budget. The handler is still blocked, so this is
+        # not "the slow body eventually finished".
+        assert time.monotonic() - start < 2.0
+    finally:
+        server.release.set()
 
 
 def test_total_deadline_stops_a_trickling_body(server):
     transport, base = make(server)
     start = time.monotonic()
-    with pytest.raises(tr.TransportError) as err:
-        call(transport, base + "/trickle", timeouts=tr.Timeouts(2.0, 5.0, 1.0))
-    assert err.value.kind == "timeout"
-    assert time.monotonic() - start < 2.5
+    try:
+        with pytest.raises(tr.TransportError) as err:
+            call(transport, base + "/trickle", timeouts=tr.Timeouts(2.0, 5.0, 0.3))
+        assert err.value.kind == "timeout"
+        assert server.held.is_set()
+        assert not server.done.is_set()  # the body had not finished arriving
+        # Well under the ~5s the body needs. A blocking read(n) waits for it all.
+        assert time.monotonic() - start < 2.0
+    finally:
+        server.release.set()
 
 
 def test_declared_oversize_body_is_rejected(server):

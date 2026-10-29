@@ -1087,7 +1087,7 @@ def metadata_server():
     from test_gateway_orders_kill import Fake  # loopback fake, 127.0.0.1 only
 
     server = Fake()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02), daemon=True)
     thread.start()
     yield server
     server.shutdown()

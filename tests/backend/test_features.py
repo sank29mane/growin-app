@@ -65,6 +65,7 @@ def test_welford_initialization():
     # Check that Z-scoring uses the initialized state
     assert pytest.approx(w.zscore(12.0), abs=1e-6) == 1.0
 
+@pytest.mark.performance
 def test_performance_microbenchmarks():
     vol = OnlineVolatility(alpha=0.1)
     rs = RelativeSpread()

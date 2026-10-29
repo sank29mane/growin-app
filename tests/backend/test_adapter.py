@@ -73,6 +73,7 @@ def test_adapter_manager_preload_and_swap():
     assert np.allclose(np.array(model.w1), 3.0)
     assert np.allclose(np.array(model.w2), 3.0)
 
+@pytest.mark.performance
 def test_adapter_manager_latency_benchmark():
     model = MockMLXModel()
     manager = MLXAdapterManager(model=model)
