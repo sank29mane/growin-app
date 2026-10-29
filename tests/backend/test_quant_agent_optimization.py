@@ -32,8 +32,3 @@ async def test_quant_agent_full_performance():
     # Should be fast (MLX/Rust optimized)
     assert duration < 500 # ms
     print(f"QuantAgent execution for {N} bars: {duration:.2f}ms")
-
-def test_decimal_return_types():
-    """Ensure QuantAgent returns data in a structure that supports Decimal serialization."""
-    # This is a placeholder for actual return type verification if needed
-    pass

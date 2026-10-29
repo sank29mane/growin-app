@@ -1,6 +1,5 @@
 import pytest
 import time
-import asyncio
 from utils.rstitch_engine import RStitchEngine
 
 @pytest.mark.asyncio
@@ -35,15 +34,3 @@ async def test_sse_latency_benchmark():
 
     assert latency_ms < threshold
     assert first_event["event"] in ["status_update", "reasoning_step", "error", "final_result"]
-
-@pytest.mark.performance
-@pytest.mark.asyncio
-async def test_cdc_sync_latency():
-    """Verify CDC delta sync latency is <500ms."""
-    # This mock verifies the architecture supports sub-second delta sync
-    start_time = time.time()
-    # Simulate delta fetch
-    await asyncio.sleep(0.1) 
-    latency_ms = (time.time() - start_time) * 1000
-    
-    assert latency_ms < 500
