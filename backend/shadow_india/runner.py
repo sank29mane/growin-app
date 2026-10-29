@@ -1086,10 +1086,18 @@ class ShadowRunner:
 
     # -- resume and status ---------------------------------------------------------------------------------------
 
-    def resume(self, reason: str) -> Mapping[str, Any]:
-        """The only way to clear a pause. An abort, a run end, a halt and a corporate-action pause are refused."""
+    def resume(self, reason: str, pause_seqs: Optional[Sequence[int]] = None) -> Mapping[str, Any]:
+        """The only way to clear a pause. An abort, a run end, a halt and a corporate-action pause are refused, and so is
+        an ``ambiguous_exit_fill`` pause while the portfolio still holds the ambiguity."""
 
-        return policy.resume(self._evidence, reason)
+        return policy.resume(self._evidence, reason, pause_seqs=pause_seqs, ambiguous_isins=self.ambiguous_exit_isins())
+
+    def ambiguous_exit_isins(self) -> frozenset[str]:
+        """The names whose exit fill is still ambiguous in the portfolio (empty unless such a pause is open)."""
+
+        if not any(p.event == policy.AMBIGUOUS_EXIT_FILL for p in self._state().open_pauses):
+            return frozenset()
+        return self._portfolio.ambiguous_exit_isins()
 
     def status(self) -> dict[str, Any]:
         state = self._state()

@@ -411,6 +411,38 @@ def test_a_corporate_action_pause_does_not_hide_behind_another_pause_in_the_same
     assert [p.seq for p in run_state(store).open_pauses] == [action["seq"]]
 
 
+def test_resume_refuses_an_ambiguous_exit_fill_while_the_portfolio_still_holds_it_and_writes_nothing(tmp_path):
+    """Break-proof: drop the ``ambiguous_exit_refusal`` check in ``resume`` and every row here clears the pause."""
+    store = make_store(tmp_path)
+    pause = raise_event(store, "ambiguous_exit_fill", "sell under a foreign id", isin=ISIN)
+    before = store.records()
+    for seqs in (None, [pause["seq"]]):
+        for known, code in ((None, "ambiguous_exit_resume_requires_portfolio"), ({ISIN}, "ambiguous_exit_still_open")):
+            with pytest.raises(PolicyError) as caught:
+                resume(store, "operator reviewed", pause_seqs=seqs, ambiguous_isins=known)
+            assert caught.value.code == code
+    assert store.records() == before
+    assert blocked_steps(store, isin=ISIN) == {"admit", "mint"}  # the pause still blocks a buy of the name
+
+
+def test_resume_clears_an_ambiguous_exit_fill_once_the_portfolio_no_longer_lists_the_name(tmp_path):
+    store = make_store(tmp_path)
+    pause = raise_event(store, "ambiguous_exit_fill", "sell under a foreign id", isin=ISIN)
+    resume(store, "operator flattened the name", ambiguous_isins=frozenset({CLEAR_ISIN}))  # another name's ambiguity
+    assert run_state(store).open_pauses == () and pause["seq"] not in {p.seq for p in run_state(store).open_pauses}
+
+
+def test_an_open_ambiguous_exit_fill_does_not_stop_a_named_resume_of_another_pause(tmp_path):
+    store = make_store(tmp_path)
+    ambiguous = raise_event(store, "ambiguous_exit_fill", "sell under a foreign id", isin=ISIN)
+    stale = raise_event(store, "stale_data", "old bars")
+    with pytest.raises(PolicyError) as caught:
+        resume(store, "bars fixed", ambiguous_isins={ISIN})  # the default sweeps it, so it is refused whole
+    assert caught.value.code == "ambiguous_exit_still_open"
+    resume(store, "bars fixed", pause_seqs=[stale["seq"]], ambiguous_isins={ISIN})
+    assert [p.seq for p in run_state(store).open_pauses] == [ambiguous["seq"]]
+
+
 @pytest.mark.parametrize("event", ["divergence_breach", "stale_data", "relay_no_session"])
 def test_other_entry_and_all_pauses_stay_resumable(tmp_path, event):
     store = make_store(tmp_path)

@@ -15,7 +15,7 @@ import argparse
 import json
 import sys
 from datetime import date, datetime
-from typing import Any, Callable, Optional, Sequence, TextIO
+from typing import Any, Callable, Collection, Optional, Sequence, TextIO
 
 from brokers.breeze_gateway.errors import RelayError
 
@@ -74,24 +74,47 @@ _NOT_RESUMABLE = {
 }
 
 
-def _resume(store: EvidenceStore, reason: str, pause_seqs: Optional[Sequence[int]]) -> dict[str, Any]:
+def _resume(
+    store: EvidenceStore, reason: str, pause_seqs: Optional[Sequence[int]], ambiguous_isins: Optional[Collection[str]] = None
+) -> dict[str, Any]:
+    """``ambiguous_isins`` is the portfolio's still-ambiguous set; ``None`` (no runtime) keeps an ambiguous pause open."""
+
     if pause_seqs:
-        record = policy.resume(store, reason, pause_seqs=pause_seqs)  # a named pause is cleared or refused, never skipped
+        record = policy.resume(  # a named pause is cleared or refused, never skipped
+            store, reason, pause_seqs=pause_seqs, ambiguous_isins=ambiguous_isins
+        )
         return {"resumed": record["cleared_pause_seqs"], "seq": record["seq"], "skipped": []}
     state = policy.run_state(store)
-    clearable = [p.seq for p in state.open_pauses if p.event not in _NOT_RESUMABLE]
-    skipped = [
-        {"seq": p.seq, "event": p.event, "why": _NOT_RESUMABLE[p.event]}
-        for p in state.open_pauses
-        if p.event in _NOT_RESUMABLE
-    ]
+
+    def why(pause: policy.OpenPause) -> Optional[str]:
+        return _NOT_RESUMABLE.get(pause.event) or policy.ambiguous_exit_refusal(pause, ambiguous_isins)
+
+    clearable = [p.seq for p in state.open_pauses if why(p) is None]
+    skipped = [{"seq": p.seq, "event": p.event, "why": why(p)} for p in state.open_pauses if why(p) is not None]
     if not clearable:
         if skipped and not state.aborted and isinstance(reason, str) and reason.strip():
             raise policy.PolicyError(str(skipped[0]["why"]))
         record = policy.resume(store, reason)  # the typed refusal: abort, blank reason, run end, nothing open
         return {"resumed": record["cleared_pause_seqs"], "seq": record["seq"], "skipped": []}
-    record = policy.resume(store, reason, pause_seqs=clearable)
+    record = policy.resume(store, reason, pause_seqs=clearable, ambiguous_isins=ambiguous_isins)
     return {"resumed": record["cleared_pause_seqs"], "seq": record["seq"], "skipped": skipped}
+
+
+def _ambiguous_isins(
+    args: argparse.Namespace, store: EvidenceStore, runtime_factory: Optional[Callable[[argparse.Namespace], Any]]
+) -> Optional[frozenset[str]]:
+    """The portfolio's still-ambiguous exit names, asked only when an ``ambiguous_exit_fill`` pause is open.
+
+    No wired runtime means nobody can say the fill was resolved: ``None``, and that pause stays open."""
+
+    if not any(p.event == policy.AMBIGUOUS_EXIT_FILL for p in policy.run_state(store).open_pauses):
+        return frozenset()
+    try:
+        runtime = (runtime_factory or _default_runtime)(args)
+    except RuntimeNotWired:
+        return None
+    runner: ShadowRunner = runtime.runner if hasattr(runtime, "runner") else runtime
+    return runner.ambiguous_exit_isins()
 
 
 def _print(out: TextIO, payload: dict[str, Any]) -> None:
@@ -125,7 +148,7 @@ def main(
                     "records": seq, "head": head,
                 })
                 return EXIT_OK
-            _print(out, _resume(store, args.reason, args.pause_seq))
+            _print(out, _resume(store, args.reason, args.pause_seq, _ambiguous_isins(args, store, runtime_factory)))
             return EXIT_OK
         runtime = (runtime_factory or _default_runtime)(args)
         runner: ShadowRunner = runtime.runner if hasattr(runtime, "runner") else runtime
