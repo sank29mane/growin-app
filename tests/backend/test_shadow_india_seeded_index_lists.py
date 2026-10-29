@@ -6,12 +6,14 @@ real seed, then the real ``open_run`` precondition and the real small-cap classi
 
 import shutil
 import socket
+from datetime import date
 from types import SimpleNamespace
 
 import duckdb
 import pytest
 
 from pilot_data.constituents import latest_index_list
+from pilot_data.core import PilotDataError
 from pilot_data.store import DB_FILE_NAME, PilotDataStore
 from pilot_data.universe import classify_smallcap
 from shadow_india.runner import OpenRunRefused, open_run
@@ -83,3 +85,19 @@ def test_the_small_cap_classification_on_the_seeded_store_reads_the_lists_fetche
         assert classify_smallcap(research, targets) != on_window_start  # research "latest" would have looked ahead
         before_any_list = classify_smallcap(seeded, targets, as_of=ss.D1.replace(month=2, day=1))
         assert set(before_any_list.values()) == {"unclassified"}
+
+
+def test_a_member_dropped_from_the_seeded_older_list_would_flip_the_classification_and_the_seed_refuses_it(
+        world, tmp_path, monkeypatch):
+    """CANBK is in the early nifty500 list, so on 2025-02-28 it is "not_small". Dropping it from the seeded copy makes
+    that day "unclassified". The newest lists are untouched, so only a parity check over every snapshot sees it."""
+    day = date(2025, 2, 28)
+    ss.tamper_seeded_lists(monkeypatch, ss.drop_canbk("n_old"))
+    with pytest.raises(PilotDataError) as caught:
+        ss.seed(world, tmp_path / "session")
+    assert caught.value.code == "seed_parity_failed"
+    # the store the failed seed left behind really does classify differently, which is the harm the parity check stops
+    with PilotDataStore(tmp_path / "session", workspace="india", read_only=True) as seeded, \
+            PilotDataStore(world["root"], workspace="india", read_only=True) as research:
+        assert classify_smallcap(research, world["targets"], as_of=day)[cc.NEW] == "not_small"
+        assert classify_smallcap(seeded, world["targets"], as_of=day)[cc.NEW] == "unclassified"

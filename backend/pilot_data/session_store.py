@@ -37,10 +37,7 @@ from .breeze_bars import breeze_bars_for, ingest_breeze_response, parse_breeze_v
 from .core import (
     CaveatedResult, PilotDataError, SourceDescriptor, canonical_sha256, standard_caveats, utc_naive,
 )
-from .constituents import (
-    EXPECTED_MEMBERS, ListName, ensure_constituent_tables, fetched_by_cutoff_utc, index_members, ingest_index_list,
-    latest_index_list,
-)
+from .constituents import EXPECTED_MEMBERS, ListName, ensure_constituent_tables, fetched_by_cutoff_utc, ingest_index_list
 from .corporate_actions import EVENTS_TABLE, SIGHTINGS_TABLE, derive_corporate_actions, events_for_symbol
 from .dataset import verify_dataset
 from .models import CrossCheckTolerances, DailyBarConvention, QuarantineRecord  # noqa: F401
@@ -518,16 +515,26 @@ def _parity(research: PilotDataStore, session: PilotDataStore, *, targets: Targe
         out.append(ParityRow(reader="band_on", compared=count, detail=f"targets x sessions from {floor.isoformat()}"))
     if optional["index_lists"]:
         cutoff = fetched_by_cutoff_utc(window[0])
-        count_query = "SELECT count(*) FROM index_list_snapshots WHERE fetched_at_utc < ?"
-        if session.query("SELECT count(*) FROM index_list_snapshots")[0][0] != research.query(count_query, [cutoff])[0][0]:
-            raise _fail("latest_index_list", "the seeded snapshot count differs from the research count fetched by window_start")
-        for name in sorted(EXPECTED_MEMBERS):
-            mine = latest_index_list(session, name)  # type: ignore[arg-type]  # unbounded: the store holds nothing later
-            theirs = latest_index_list(research, name, fetched_by=window[0])  # type: ignore[arg-type]
-            if mine != theirs or (mine is not None and index_members(session, mine) != index_members(research, theirs)):
-                raise _fail("latest_index_list", f"{name} newest snapshot or its members differ")
-        out.append(ParityRow(reader="latest_index_list", compared=len(EXPECTED_MEMBERS),
-                             detail="newest list per name fetched by window_start, and the snapshot count"))
+        snapshots = ("SELECT source_sha256, list_name, fetched_at_utc, member_count, placeholders_json, row_sha256 "
+                     "FROM index_list_snapshots{where} ORDER BY source_sha256, list_name")
+        members = ("SELECT m.source_sha256, m.list_name, m.isin, m.nse_symbol, m.series, m.company_name, m.industry, "
+                   "m.row_sha256 FROM index_list_members m{join} ORDER BY m.source_sha256, m.list_name, m.isin")
+        # every eligible snapshot, not only the newest per name: an older one is what an earlier decision day reads
+        want_snapshots = research.query(snapshots.format(where=" WHERE fetched_at_utc < ?"), [cutoff])
+        got_snapshots = session.query(snapshots.format(where=""))  # unbounded: the store holds nothing later
+        if got_snapshots != want_snapshots:
+            raise _fail("latest_index_list", f"the seeded snapshots ({len(got_snapshots)}) differ from the research "
+                                              f"snapshots fetched by window_start ({len(want_snapshots)}): hash, list, "
+                                              "fetch time, member count, placeholders or row hash")
+        want_members = research.query(members.format(join=" JOIN index_list_snapshots s ON s.source_sha256 = "
+                                                          "m.source_sha256 AND s.list_name = m.list_name "
+                                                          "WHERE s.fetched_at_utc < ?"), [cutoff])
+        got_members = session.query(members.format(join=""))
+        if got_members != want_members:
+            raise _fail("latest_index_list", f"the seeded index list members ({len(got_members)}) differ from the "
+                                              f"research members of those snapshots ({len(want_members)})")
+        out.append(ParityRow(reader="latest_index_list", compared=len(want_snapshots) + len(want_members),
+                             detail="every snapshot fetched by window_start with its metadata, and every member row"))
     a, b = latest_snapshot(session, on_or_before=window[1]), latest_snapshot(research, on_or_before=window[1])
     if a != b or (a is not None and master_rows(session, a) != master_rows(research, b)):
         raise _fail("latest_snapshot", "the newest master snapshot or its rows differ")

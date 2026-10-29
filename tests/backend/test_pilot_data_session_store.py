@@ -493,3 +493,80 @@ def test_a_snapshot_whose_fetch_time_its_source_row_does_not_carry_is_refused(re
     with pytest.raises(PilotDataError) as caught:
         seed(research, tmp_path / "session")
     assert caught.value.code == "seed_index_list_fetch_time"
+
+
+# --------------------------------------------------------------------------- index list parity covers every snapshot
+def tamper_seeded_lists(monkeypatch, *statements):
+    """Run the real index list seed, then change the seeded store behind the seed's back with ``(sql, params)``."""
+    real = session_store._seed_index_lists
+
+    def seed_then_tamper(research, session, window):
+        shas = real(research, session, window)
+        for sql, params in statements:
+            session._con.execute(sql, params)
+        return shas
+
+    monkeypatch.setattr(session_store, "_seed_index_lists", seed_then_tamper)
+
+
+def drop_canbk(key):
+    return ("DELETE FROM index_list_members WHERE source_sha256 = ? AND isin = ?", [blob_sha(key), cc.NEW])
+
+
+def bump_count(key):
+    return ("UPDATE index_list_snapshots SET member_count = member_count - 1 WHERE source_sha256 = ?", [blob_sha(key)])
+
+
+SEEDED_SIDE_TAMPERS = {
+    "member of the newest snapshot": drop_canbk("n_on"),
+    "member of an older snapshot": drop_canbk("n_old"),
+    "member of the only smallcap snapshot": ("DELETE FROM index_list_members WHERE source_sha256 = ?",
+                                              [blob_sha("s_old")]),
+    "member_count of the newest snapshot": bump_count("n_on"),
+    "member_count of an older snapshot": bump_count("n_old"),
+    "fetch time of an older snapshot": ("UPDATE index_list_snapshots SET fetched_at_utc = fetched_at_utc + "
+                                        "INTERVAL 1 MINUTE WHERE source_sha256 = ?", [blob_sha("n_old")]),
+    "a whole older snapshot": ("DELETE FROM index_list_snapshots WHERE source_sha256 = ?", [blob_sha("n_old")]),
+}
+
+
+@pytest.mark.parametrize("what", sorted(SEEDED_SIDE_TAMPERS))
+def test_a_seeded_index_list_changed_after_the_seed_fails_the_parity_table(world, tmp_path, monkeypatch, what):
+    tamper_seeded_lists(monkeypatch, SEEDED_SIDE_TAMPERS[what])
+    with pytest.raises(PilotDataError) as caught:
+        seed(world, tmp_path / "session")
+    assert caught.value.code == "seed_parity_failed" and "reader latest_index_list" in str(caught.value), what
+
+
+def test_a_member_deleted_from_a_seeded_older_snapshot_alone_is_refused_though_the_newest_lists_match(world, tmp_path,
+                                                                                                    monkeypatch):
+    tamper_seeded_lists(monkeypatch, drop_canbk("n_old"))
+    real = session_store._parity
+    seen = {}
+
+    def newest_only_equal(research, session, **kwargs):
+        # the research store and the seeded one still agree on every name's newest snapshot and its members
+        for name in ("nifty500", "smallcap250"):
+            mine, theirs = latest_index_list(session, name), latest_index_list(research, name, fetched_by=WINDOW[0])
+            seen[name] = mine == theirs and index_members(session, mine) == index_members(research, theirs)
+        return real(research, session, **kwargs)
+
+    monkeypatch.setattr(session_store, "_parity", newest_only_equal)
+    with pytest.raises(PilotDataError) as caught:
+        seed(world, tmp_path / "session")
+    assert seen == {"nifty500": True, "smallcap250": True}  # only the older snapshot differed
+    assert caught.value.code == "seed_parity_failed"
+
+
+@pytest.mark.parametrize("sql", [
+    "DELETE FROM index_list_members WHERE source_sha256 = '{sha}' AND isin = '{isin}'",
+    "UPDATE index_list_snapshots SET member_count = member_count + 1 WHERE source_sha256 = '{sha}'",
+], ids=["member", "member_count"])
+@pytest.mark.parametrize("key", ["n_old", "n_on"])
+def test_a_research_index_list_row_the_blob_does_not_explain_fails_the_parity_table(research, tmp_path, key, sql):
+    connection = duckdb.connect(str(research["root"] / DB_FILE_NAME))
+    connection.execute(sql.format(sha=blob_sha(key), isin=cc.NEW))
+    connection.close()
+    with pytest.raises(PilotDataError) as caught:
+        seed(research, tmp_path / "session")
+    assert caught.value.code == "seed_parity_failed" and "reader latest_index_list" in str(caught.value)
