@@ -29,6 +29,7 @@ from .schemas import (
     IndiaExecution,
     IndiaLimits,
     IndiaStrategy,
+    ShadowForbidden,
     UkLimits,
     UkManifest,
     WorkspaceExecution,
@@ -480,3 +481,34 @@ def load_workspace_config(
         uk_limits=uk_limits,
         india_execution=execution if isinstance(execution, IndiaExecution) else None,
     )
+
+
+SHADOW_FORBIDDEN_FILE = "shadow_forbidden.json"
+
+
+def load_shadow_forbidden_literals(private_dir: str | os.PathLike[str] | None) -> tuple[str, ...]:
+    """The literals the India shadow evidence store refuses to record, from ``private/india/shadow_forbidden.json``.
+
+    Same checks as every private file (no symlinks, regular file, permissions, size, duplicate keys, floats, unknown
+    fields, bound workspace). A missing directory or file is an error, never an empty list: an empty list would open
+    the store with no literal layer. No literal is ever placed in an error.
+    """
+
+    if private_dir is None:
+        raise PrivateConfigError("PRIVATE_DIR_MISSING", "private_dir")
+    private_path = Path(private_dir)
+    if not os.path.lexists(private_path):
+        raise PrivateConfigError("PRIVATE_DIR_MISSING", "private_dir")
+    _lstat_checked(private_path, directory=True, field="private_dir")
+    workspace_dir = private_path / "india"
+    if not os.path.lexists(workspace_dir):
+        raise PrivateConfigError("WORKSPACE_DIR_MISSING", "india")
+    _lstat_checked(workspace_dir, directory=True, field="india")
+    path = workspace_dir / SHADOW_FORBIDDEN_FILE
+    if not os.path.lexists(path):
+        raise PrivateConfigError("FORBIDDEN_LITERALS_MISSING", SHADOW_FORBIDDEN_FILE)
+    data = _parse_object(_read_config_file(path, SHADOW_FORBIDDEN_FILE), SHADOW_FORBIDDEN_FILE)
+    _check_identity(data, "india")
+    parsed = _validate_model(ShadowForbidden, data)
+    _check_bound_identity(parsed, "india")
+    return parsed.literals

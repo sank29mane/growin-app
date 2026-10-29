@@ -29,7 +29,7 @@ import pytest
 import shadow_india.runner as runner_module
 from brokers.breeze_gateway.client import RelayClient
 from brokers.breeze_gateway.errors import NoSession, OrdersUnavailable, RelayError
-from brokers.breeze_gateway.orders import OrdersClient
+from brokers.breeze_gateway.orders import MintMismatch, OrdersClient
 from brokers.breeze_gateway.token_store import MemoryTokenStore
 from india_limits_support import india_private_dir, make_evidence, make_guard
 from relay_orders_support import RecordingHttp
@@ -1375,6 +1375,74 @@ def test_a_stop_is_minted_only_under_the_exit_intent_id_of_its_obligation(world)
     assert report.status == "done"
 
 
+def refuse_body(world: World, monkeypatch, side: str, error: Exception) -> None:
+    """``_vm_body`` raises ``error`` for ``side`` and builds the real body for the other side."""
+
+    real = world.runner._vm_body
+
+    def body(proposal_id, instrument, body_side, *rest):
+        if body_side == side:
+            raise error
+        return real(proposal_id, instrument, body_side, *rest)
+
+    monkeypatch.setattr(world.runner, "_vm_body", body)
+
+
+def pauses_of(world: World, event: str) -> list[Any]:
+    return [p for p in policy.run_state(world.evidence).open_pauses if p.event == event]
+
+
+def test_a_stop_exit_the_vm_body_refuses_records_a_pause_for_everything_not_just_a_skip(world, monkeypatch):
+    """Break-proof (D-08): put the broad ``except Exception: skip`` back and no pause is recorded."""
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA="85")  # past the -12% stop
+    world.script.result = evaluated("BBB", entries=False)
+    refuse_body(world, monkeypatch, "SELL", MintMismatch("quantity"))
+    posts = list(world.order_posts())
+    report = world.decide()
+    assert [p.scope for p in pauses_of(world, "contract_mismatch")] == [policy.SCOPE_ALL]
+    assert (ISINS["AAA"], "exit_body_invalid:quantity") in report.skipped
+    assert intents_of(world, "SELL") == [] and world.order_posts() == posts
+    assert world.decide().stopped == "open_pause"  # the pause holds until `resume`
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "body bug fixed"))
+    assert code == 0 and open_events(world) == []
+
+
+def test_a_hand_flatten_exit_the_vm_body_refuses_records_a_pause(world, monkeypatch):
+    own(world, "AAA", 100)
+    premark(world)
+    refuse_body(world, monkeypatch, "SELL", MintMismatch("quantity"))
+    report = world.runner.hand_flatten(S, "operator flattens by hand")
+    assert [p.scope for p in pauses_of(world, "contract_mismatch")] == [policy.SCOPE_ALL]
+    assert intents_of(world, "SELL") == [] and (ISINS["AAA"], "exit_body_invalid:quantity") in report.skipped
+
+
+def test_an_entry_the_vm_body_refuses_stays_a_skip_and_records_no_pause(world, monkeypatch):
+    refuse_body(world, monkeypatch, "BUY", MintMismatch("quantity"))
+    report = world.decide()
+    assert {reason for _isin, reason in report.skipped} == {"body_invalid:quantity"} and len(report.skipped) == 3
+    assert report.intents == [] and open_events(world) == []
+
+
+def test_an_unexpected_error_building_an_exit_body_propagates_and_is_not_swallowed(world, monkeypatch):
+    own(world, "AAA", 160)
+    premark(world)
+    set_closes(world, AAA="85")
+    world.script.result = evaluated("BBB", entries=False)
+    refuse_body(world, monkeypatch, "SELL", RuntimeError("bug"))
+    with pytest.raises(RuntimeError, match="bug"):
+        world.decide()
+    assert open_events(world) == [] and intents_of(world, "SELL") == []
+
+
+def test_an_unexpected_error_building_an_entry_body_propagates_and_is_not_swallowed(world, monkeypatch):
+    refuse_body(world, monkeypatch, "BUY", RuntimeError("bug"))
+    with pytest.raises(RuntimeError, match="bug"):
+        world.decide()
+    assert intents_of(world, "BUY") == []
+
+
 def test_a_second_decide_does_not_mint_the_same_exit_twice(world):
     own(world, "AAA", 160)
     premark(world)
@@ -1927,8 +1995,14 @@ def cli_args(world: World, command: str, *extra: str) -> list[str]:
     return [command, "--root", str(world.root), "--run-id", RUN, "--session", S.isoformat(), *extra]
 
 
+CLI_CANARY_TOKEN = "CANARY-SESSION-TOKEN-4417"
+CLI_CANARY_ACCOUNT = "CANARY-ACCT-90210"
+CLI_FORBIDDEN = (CLI_CANARY_TOKEN, CLI_CANARY_ACCOUNT)
+
+
 def run_cli(argv: list[str], **kwargs: Any) -> tuple[int, dict[str, Any]]:
     out = io.StringIO()
+    kwargs.setdefault("forbidden_source", lambda args: CLI_FORBIDDEN)  # the explicit seam; the default source is its own test
     code = cli.main(argv, out=out, **kwargs)
     lines = [line for line in out.getvalue().splitlines() if line]
     return code, (json.loads(lines[-1]) if lines else {})
@@ -2012,6 +2086,58 @@ def test_the_cli_resume_refuses_the_run_end(world):
     policy.raise_event(world.evidence, "drawdown_flatten_15", "flatten")
     code, refused = run_cli(cli_args(world, "resume", "--reason", "x"))
     assert (code, refused) == (1, {"refused": "resume_refused_run_ended"})
+
+
+def log_bytes(world: World) -> bytes:
+    return (world.root / RUN / "evidence.jsonl").read_bytes() if (world.root / RUN / "evidence.jsonl").exists() else b""
+
+
+def test_the_cli_resume_refuses_a_canary_in_the_reason_and_the_store_bytes_do_not_change(world):
+    """Break-proof (T-64-15): open the store without ``forbidden=`` and the canary is chained into the log."""
+    policy.raise_event(world.evidence, "untyped_response", "relay did not answer")
+    files = {p: p.read_bytes() for p in (world.root / RUN).rglob("*") if p.is_file()}
+    assert files
+    for literal in (CLI_CANARY_TOKEN, CLI_CANARY_ACCOUNT.lower()):
+        code, refused = run_cli(cli_args(world, "resume", "--reason", f"token was {literal} sorry"))
+        assert (code, refused) == (1, {"refused": "canary_refused"}), literal
+    assert {p: p.read_bytes() for p in (world.root / RUN).rglob("*") if p.is_file()} == files
+    assert open_events(world) == ["untyped_response"]
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "the relay is back"))
+    assert code == 0 and ok["resumed"]
+
+
+def test_the_cli_refuses_to_open_the_store_without_registered_literals_and_touches_nothing(world, tmp_path):
+    files = {p: p.read_bytes() for p in (world.root / RUN).rglob("*") if p.is_file()}
+    private = tmp_path / "no-private"
+    cases = [
+        ({"forbidden_source": None}, [], "forbidden_literals_not_registered"),
+        ({"forbidden_source": lambda args: ()}, [], "forbidden_literals_empty"),
+        ({"forbidden_source": lambda args: ("",)}, [], "forbidden_literals_empty"),
+        ({"forbidden_source": None}, ["--private-dir", str(private)], "forbidden_literals_refused:PRIVATE_DIR_MISSING"),
+    ]
+    for kwargs, extra, expected in cases:
+        for command, more in (("status", ()), ("resume", ("--reason", "x"))):
+            code, refused = run_cli(cli_args(world, command, *more, *extra), **kwargs)
+            assert (code, refused) == (1, {"refused": expected}), (command, expected)
+    assert {p: p.read_bytes() for p in (world.root / RUN).rglob("*") if p.is_file()} == files
+
+
+def test_the_cli_default_source_reads_the_private_dir_and_refuses_a_canary(world, tmp_path):
+    private = tmp_path / "private-forbidden"
+    (private / "india").mkdir(parents=True, mode=0o700)
+    private.chmod(0o700)
+    (private / "india" / "shadow_forbidden.json").write_text(
+        json.dumps({"schema_version": 1, "workspace": "india", "literals": [CLI_CANARY_ACCOUNT]}), encoding="utf-8"
+    )
+    (private / "india" / "shadow_forbidden.json").chmod(0o600)
+    policy.raise_event(world.evidence, "untyped_response", "relay did not answer")
+    before = log_bytes(world)
+    out = io.StringIO()
+    code = cli.main(cli_args(world, "resume", "--reason", f"acct {CLI_CANARY_ACCOUNT}", "--private-dir", str(private)), out=out)
+    assert (code, json.loads(out.getvalue())) == (1, {"refused": "canary_refused"})
+    assert log_bytes(world) == before
+    out = io.StringIO()
+    assert cli.main(cli_args(world, "status", "--private-dir", str(private)), out=out) == 0
 
 
 def test_the_cli_commands_that_need_a_runtime_refuse_when_none_is_wired_and_touch_nothing(world):

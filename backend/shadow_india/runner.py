@@ -38,7 +38,7 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from brokers.breeze_gateway.errors import RelayError
-from brokers.breeze_gateway.orders import OrdersClient, VmAuditEntry, intent_body, intent_sha256
+from brokers.breeze_gateway.orders import MintMismatch, OrdersClient, VmAuditEntry, intent_body, intent_sha256
 from costs.core import Side
 from costs.fills import load_fill_scenarios
 from costs.schedule import load_schedule_set
@@ -814,8 +814,14 @@ class ShadowRunner:
             return None
         try:
             body = self._vm_body(proposal_id, instrument, side, quantity, limit, reason, batch_id)
-        except Exception as exc:  # MintMismatch: a body the VM would refuse is refused here, before anything is written
-            report.skipped.append((instrument.isin, f"body_invalid:{getattr(exc, 'reason', 'unknown')}"))
+        except MintMismatch as exc:  # a body the VM would refuse is refused here, before anything is written
+            if leg == LEG_EXIT:
+                # A stop or flatten exit that cannot be minted is never retried by anyone else: pause everything (D-08)
+                # so it cannot be dropped as one more skipped line. An entry may stay a skip.
+                policy.raise_event(self._evidence, "contract_mismatch", f"exit_body_invalid:{exc.reason}")
+                report.skipped.append((instrument.isin, f"exit_body_invalid:{exc.reason}"))
+                return None
+            report.skipped.append((instrument.isin, f"body_invalid:{exc.reason}"))
             return None
         try:
             samples = self._ports.quotes.samples(instrument)
