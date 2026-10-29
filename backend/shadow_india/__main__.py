@@ -5,6 +5,12 @@
 the production runtime is deliberately not wired here, so run as shipped they refuse with ``production_runtime_not_wired``
 and touch nothing. A test or the operator's own wrapper passes ``runtime_factory`` to ``main``.
 
+Every command that opens the evidence store (``resume``, ``status``) opens it with the registered forbidden literals
+(``_forbidden_literals``): an operator-typed ``--reason`` is the one free-text field that reaches a hash-chained record, and
+a literal that slips past the pattern layer is kept forever. With no registered source the command refuses
+(``forbidden_literals_not_registered``) and opens nothing. The future production runtime must call the same helper for
+its own ``EvidenceStore.open`` and ``EvidenceStore.create`` and pass the result as ``forbidden=``.
+
 No command authorizes, signs or sends an order. There is no ``release-halt`` here: a halt is released through the
 portfolio's latch-backed path, never through ``resume``.
 """
@@ -18,6 +24,9 @@ from datetime import date, datetime
 from typing import Any, Callable, Collection, Optional, Sequence, TextIO
 
 from brokers.breeze_gateway.errors import RelayError
+
+from private_config.errors import PrivateConfigError
+from private_config.loader import load_shadow_forbidden_literals
 
 from . import policy, vm_codes
 from .evidence import EvidenceCorrupt, EvidenceError, EvidenceStore
@@ -33,10 +42,19 @@ EXIT_REFUSED = 1
 EXIT_USAGE = 2
 EXIT_ABORTED = 3
 NOT_WIRED = "production_runtime_not_wired"
+NO_FORBIDDEN_SOURCE = "forbidden_literals_not_registered"
 
 
 class RuntimeNotWired(Exception):
     pass
+
+
+class ForbiddenLiteralsRefused(Exception):
+    """No usable registered forbidden literals: the evidence store is not opened."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 def _day(text: str) -> date:
@@ -51,6 +69,11 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--root", required=True, help="evidence root (outside the repository)")
         command.add_argument("--run-id", required=True)
         command.add_argument("--session", required=True, type=_day, help="session date, YYYY-MM-DD")
+        if name in ("resume", "status"):
+            command.add_argument(
+                "--private-dir", default=None,
+                help="private/ directory holding india/shadow_forbidden.json (the registered forbidden literals)",
+            )
         if name in ("resume", "hand-flatten"):
             command.add_argument("--reason", required=True)
         if name == "hand-flatten":
@@ -117,6 +140,32 @@ def _ambiguous_isins(
     return runner.ambiguous_exit_isins()
 
 
+def _default_forbidden_literals(args: argparse.Namespace) -> Sequence[str]:
+    """The registered literals from ``<private-dir>/india/shadow_forbidden.json`` through the fail-closed loader."""
+
+    private_dir = getattr(args, "private_dir", None)
+    if private_dir is None:
+        raise ForbiddenLiteralsRefused(NO_FORBIDDEN_SOURCE)
+    try:
+        return load_shadow_forbidden_literals(private_dir)
+    except PrivateConfigError as error:
+        raise ForbiddenLiteralsRefused(f"forbidden_literals_refused:{error.code}") from None
+
+
+def _forbidden_literals(
+    args: argparse.Namespace, source: Optional[Callable[[argparse.Namespace], Sequence[str]]] = None
+) -> tuple[str, ...]:
+    """The literals every CLI ``EvidenceStore.open`` passes as ``forbidden=``. Never empty: an empty list is a refusal.
+
+    ``source`` is the explicit seam for a test or the operator's own wrapper, like ``runtime_factory``. It does not
+    bypass the empty check."""
+
+    literals = tuple((source or _default_forbidden_literals)(args))
+    if not literals or not all(isinstance(item, str) and item for item in literals):
+        raise ForbiddenLiteralsRefused("forbidden_literals_empty")
+    return literals
+
+
 def _print(out: TextIO, payload: dict[str, Any]) -> None:
     out.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
 
@@ -129,6 +178,7 @@ def main(
     argv: Optional[Sequence[str]] = None,
     *,
     runtime_factory: Optional[Callable[[argparse.Namespace], Any]] = None,
+    forbidden_source: Optional[Callable[[argparse.Namespace], Sequence[str]]] = None,
     out: Optional[TextIO] = None,
 ) -> int:
     out = out or sys.stdout
@@ -138,7 +188,10 @@ def main(
         return EXIT_USAGE if exc.code else EXIT_OK
     try:
         if args.command in ("resume", "status"):
-            store = EvidenceStore.open(args.root, run_id=args.run_id, session_id=session_id_for(args.session))
+            store = EvidenceStore.open(
+                args.root, run_id=args.run_id, session_id=session_id_for(args.session),
+                forbidden=_forbidden_literals(args, forbidden_source),
+            )
             if args.command == "status":
                 state = policy.run_state(store)
                 seq, head = store.head()
@@ -165,13 +218,17 @@ def main(
             report = runner.hand_flatten(
                 args.session, args.reason, include_corporate_action=args.include_corporate_action
             )
-            _print(out, {"status": report.status, "intents": report.intents, "skipped": report.skipped})
+            _print(out, {"status": report.status, "stopped": report.stopped, "intents": report.intents,
+                         "skipped": report.skipped})
             return EXIT_ABORTED if report.status == "aborted" else EXIT_OK
         if args.command == "open-run":
             _print(out, {"opened": runtime.open_run()})
             return EXIT_OK
     except RuntimeNotWired as exc:
         _print(out, {"refused": str(exc)})
+        return EXIT_REFUSED
+    except ForbiddenLiteralsRefused as exc:
+        _print(out, {"refused": exc.code})
         return EXIT_REFUSED
     except (DecideRefused, OpenRunRefused, policy.PolicyError) as exc:
         _print(out, {"refused": exc.code})

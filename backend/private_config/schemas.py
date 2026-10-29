@@ -60,6 +60,8 @@ SchemaVersion = Annotated[Literal[1], BeforeValidator(_require_plain_int)]
 
 _STRICT_MODEL = ConfigDict(extra="forbid", frozen=True)
 
+MIN_FORBIDDEN_LITERAL = 6
+
 
 def _reject_floats(value: Any) -> None:
     if isinstance(value, float):
@@ -223,3 +225,27 @@ class UkLimits(BaseModel):
     currency: Literal["GBP"]
     capital_cap: DecimalStr = Field(repr=False)
     per_position_cap: DecimalStr = Field(repr=False)
+
+
+class ShadowForbidden(BaseModel):
+    """``private/india/shadow_forbidden.json``: the literals the shadow evidence store must never record.
+
+    The operator lists the account id, static IP and any other value that must not reach a hash-chained record.
+    Each literal is a string of at least ``MIN_FORBIDDEN_LITERAL`` characters (a shorter one would match inside
+    ordinary text) with no surrounding whitespace, and the list is never empty. The values live in ``private/``
+    alone and are hidden from ``repr``.
+    """
+
+    model_config = _STRICT_MODEL
+
+    schema_version: SchemaVersion
+    workspace: Literal["india"]
+    literals: tuple[str, ...] = Field(repr=False, min_length=1)
+
+    @field_validator("literals")
+    @classmethod
+    def _literals_are_usable(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for item in value:
+            if len(item) < MIN_FORBIDDEN_LITERAL or item != item.strip():
+                raise ValueError("a forbidden literal is too short or has surrounding whitespace")
+        return value

@@ -5,6 +5,7 @@ from .loader import (
     SUPPORTED_WORKSPACES,
     WORKSPACE_CURRENCY,
     WorkspaceConfig,
+    load_shadow_forbidden_literals,
     load_workspace_config,
 )
 from .schemas import (
@@ -29,5 +30,6 @@ __all__ = [
     "UkManifest",
     "WorkspaceExecution",
     "WorkspaceConfig",
+    "load_shadow_forbidden_literals",
     "load_workspace_config",
 ]

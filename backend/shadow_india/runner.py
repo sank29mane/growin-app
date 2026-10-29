@@ -38,7 +38,7 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from brokers.breeze_gateway.errors import RelayError
-from brokers.breeze_gateway.orders import OrdersClient, VmAuditEntry, intent_body, intent_sha256
+from brokers.breeze_gateway.orders import MintMismatch, OrdersClient, VmAuditEntry, intent_body, intent_sha256
 from costs.core import Side
 from costs.fills import load_fill_scenarios
 from costs.schedule import load_schedule_set
@@ -510,6 +510,7 @@ class DecideReport:
     skipped: list[tuple[str, str]] = field(default_factory=list)  # (what, why)
     expired: list[str] = field(default_factory=list)
     recovered: Mapping[str, str] = field(default_factory=dict)
+    refused_exits: list[str] = field(default_factory=list)  # reasons of exit bodies refused this pass, pause pending
 
 
 @dataclass
@@ -657,6 +658,9 @@ class ShadowRunner:
             if self._stopped_all():
                 return
             await self._place_exit(session, as_of, result, proposal, report)
+        self._pause_refused_exits(report)
+        if self._stopped_all():
+            return
         if result.status == STATUS_EVALUATED:
             await self._strategy_sells(session, as_of, result, obligated, report)
             await self._entries(session, as_of, result, inputs, obligated, report)
@@ -814,8 +818,16 @@ class ShadowRunner:
             return None
         try:
             body = self._vm_body(proposal_id, instrument, side, quantity, limit, reason, batch_id)
-        except Exception as exc:  # MintMismatch: a body the VM would refuse is refused here, before anything is written
-            report.skipped.append((instrument.isin, f"body_invalid:{getattr(exc, 'reason', 'unknown')}"))
+        except MintMismatch as exc:  # a body the VM would refuse is refused here, before anything is written
+            if leg == LEG_EXIT:
+                # A stop or flatten exit that cannot be minted is never retried by anyone else: the run pauses (D-08)
+                # so it cannot be dropped as one more skipped line. The pause is raised once the exit loop ends
+                # (``_pause_refused_exits``), not here: a mid-loop pause would stop the loop and drop every exit after
+                # this one. An entry may stay a skip.
+                report.refused_exits.append(exc.reason)
+                report.skipped.append((instrument.isin, f"exit_body_invalid:{exc.reason}"))
+                return None
+            report.skipped.append((instrument.isin, f"body_invalid:{exc.reason}"))
             return None
         try:
             samples = self._ports.quotes.samples(instrument)
@@ -830,6 +842,15 @@ class ShadowRunner:
         )
         report.intents.append((proposal_id, outcome.status))
         return outcome
+
+    def _pause_refused_exits(self, report: DecideReport) -> None:
+        """One ``contract_mismatch`` pause (scope all) for every exit body refused in the loop that just ended."""
+
+        if not report.refused_exits:
+            return
+        reasons = ",".join(dict.fromkeys(report.refused_exits))
+        report.refused_exits.clear()
+        policy.raise_event(self._evidence, "contract_mismatch", f"exit_body_invalid:{reasons}")
 
     def _stop_for_relay_error(self, error: RelayError) -> None:
         """A relay failure outside the mint (the quote read): the table says pause or abort, never carry on."""
@@ -980,6 +1001,8 @@ class ShadowRunner:
         except (ShadowAbort, PortfolioAborted) as exc:
             self._record_abort(exc)
             report.status, report.stopped = "aborted", "abort"
+        if report.status == "done" and self._stopped_all():  # a refused exit pauses the run: the report must say so
+            report.status, report.stopped = ("aborted", "abort") if self._state().aborted else ("paused", "pause")
         return report
 
     async def _hand_flatten(
@@ -1017,6 +1040,7 @@ class ShadowRunner:
                 reason="flatten", batch_id=_hand_batch_id(session, isin, holding.quantity), signal_id=iid,
                 leg=LEG_EXIT, report=report,
             )
+        self._pause_refused_exits(report)
 
     # -- close --------------------------------------------------------------------------------------------------
 
