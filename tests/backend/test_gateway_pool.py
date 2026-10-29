@@ -1,13 +1,17 @@
 """PooledTransport (Phase 61-08, OD-3 and OD-7): bounded persistent upstream connections.
 
 A real ThreadingHTTPServer on 127.0.0.1 stands in for the upstream; nothing
-leaves the machine. The server counts accepted connections and requests in
-flight so reuse and the connection cap are measured, not assumed.
+leaves the machine. The server counts connections that carried a request and
+requests in flight so reuse and the connection cap are measured, not assumed.
 
 The port is an ephemeral one on a shared loopback, so other local processes can
 and do connect to it (a node dev tool probing for servers was caught doing
-`GET /`). Only requests carrying the X-Test header that `get` sends are counted;
-anything else gets a bare 404 and leaves every counter alone.
+`GET /`, and another probe that connects, idles, then sends). Only requests
+carrying the X-Test header that `get` sends are counted; anything else gets a
+bare 404 and leaves every counter alone. A server-side accept count cannot tell
+the pool's socket from an idle probe's, so "the pool opened no socket" is
+checked in-process instead: `connect_spy` records every socket connect to the
+upstream's port made by this process.
 """
 
 from __future__ import annotations
@@ -162,6 +166,20 @@ class Upstream:
 
 
 @pytest.fixture()
+def connect_spy(monkeypatch):
+    """Every (host, port) this process connects a socket to. Stray loopback clients cannot appear here."""
+    seen: list[tuple[str, int]] = []
+    real = socket.socket.connect
+
+    def spy(self, address):
+        seen.append(tuple(address[:2]))
+        return real(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", spy)
+    return seen
+
+
+@pytest.fixture()
 def up():
     server = Upstream()
     yield server
@@ -261,8 +279,25 @@ def test_max_connections_two_caps_in_flight_at_two(up):
     transport.close()
 
 
+class _RecordingSlots:
+    """Wraps a pool's semaphore and remembers the timeout every acquire was given."""
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+        self.timeouts: list[float | None] = []
+
+    def acquire(self, blocking=True, timeout=None):
+        self.timeouts.append(timeout)
+        return self.inner.acquire(blocking, timeout)
+
+    def release(self):
+        self.inner.release()
+
+
 def test_a_caller_that_cannot_get_a_slot_in_time_is_a_timeout_and_busy_calls_finish(up):
     transport = pooled(up, max_connections=1, pool_wait_s=0.3)
+    pool = transport._pool_for(("http", "127.0.0.1", up.port))
+    slots = pool.slots = _RecordingSlots(pool.slots)
     results: list[object] = []
 
     def busy():
@@ -270,21 +305,27 @@ def test_a_caller_that_cannot_get_a_slot_in_time_is_a_timeout_and_busy_calls_fin
 
     thread = threading.Thread(target=busy)
     thread.start()
-    assert up.entered.wait(10)  # the busy call is inside the upstream, so it holds the only slot
-    started = time.monotonic()
-    with pytest.raises(TransportError) as err:
-        get(transport, up.url("/x"))
-    waited = time.monotonic() - started
-    assert err.value.kind == "timeout" and waited >= 0.25  # it waited out pool_wait_s, not less
-    # The busy call cannot finish until released, so timing out proves the pool did
-    # not make the refused caller wait for it, with no upper wall-clock bound to flake.
-    assert thread.is_alive() and results == []
-    up.release.set()
-    thread.join(10)
-    assert not thread.is_alive() and results == [200]
-    assert up.requests == 1  # the refused caller never reached the upstream
-    assert get(transport, up.url("/after")).status == 200  # the slot came back
-    transport.close()
+    try:
+        assert up.entered.wait(10)  # the busy call is inside the upstream, so it holds the only slot
+        started = time.monotonic()
+        with pytest.raises(TransportError) as err:
+            get(transport, up.url("/x"))
+        waited = time.monotonic() - started
+        assert err.value.kind == "timeout"
+        assert 0.25 <= waited < 0.3 + 1.0  # waited out pool_wait_s, not less, not several times more
+        assert slots.timeouts == [0.3, 0.3]  # both callers were bounded by pool_wait_s, exactly
+        # The busy call cannot finish until released, so timing out proves the pool did
+        # not make the refused caller wait for it.
+        assert thread.is_alive() and results == []
+        up.release.set()
+        thread.join(10)
+        assert not thread.is_alive() and results == [200]
+        assert up.requests == 1  # the refused caller never reached the upstream
+        assert get(transport, up.url("/after")).status == 200  # the slot came back
+    finally:
+        up.release.set()  # a failed assert above must not leave a handler parked
+        thread.join(10)
+        transport.close()
 
 
 def test_stray_loopback_traffic_is_not_counted_as_upstream_requests(up):
@@ -416,12 +457,13 @@ def test_a_good_response_is_pooled(up):
     assert idle_count(transport) == 0
 
 
-def test_after_close_nothing_new_is_opened(up):
+def test_after_close_nothing_new_is_opened(up, connect_spy):
     transport = pooled(up)
     transport.close()
     with pytest.raises(TransportError) as err:
         get(transport, up.url("/ok"))
-    assert err.value.kind == "connect" and up.connections == 0
+    assert err.value.kind == "connect"
+    assert connect_spy == [] and up.connections == 0  # no socket at all, not just no request
 
 
 # ------------------------------------------------------------- rules
@@ -445,12 +487,12 @@ def test_a_redirect_is_never_followed(up):
         ("http://127.0.0.1:1/x", "scheme_not_allowed"),
     ],
 )
-def test_a_refused_target_opens_no_socket(up, url, kind):
+def test_a_refused_target_opens_no_socket(up, connect_spy, url, kind):
     transport = pooled(up)
     with pytest.raises(TransportError) as err:
         get(transport, url.format(port=up.port))
     assert err.value.kind == kind
-    assert up.connections == 0 and transport._pools == {}
+    assert connect_spy == [] and up.connections == 0 and transport._pools == {}
 
 
 def test_an_unreachable_host_is_connect_and_the_message_has_no_url_or_headers():
