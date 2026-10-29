@@ -865,3 +865,41 @@ def test_the_pool_refuses_a_cut_short_body(up):
         get(transport, up.url("/short"))
     assert err.value.kind == "protocol"
     transport.close()
+
+
+class _NoProgressSocket:
+    """A socket whose send takes nothing, as a broken stack might."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def send(self, data, flags: int = 0) -> int:
+        self.calls += 1
+        return 0
+
+
+def test_a_send_that_takes_no_bytes_is_a_broken_pipe_not_a_spin():
+    sock = _CountingSocket(_NoProgressSocket())
+    sock.deadline = time.monotonic() + 1.0  # without the guard this ends as TimeoutError, not a hang
+    with pytest.raises(BrokenPipeError):
+        sock.sendall(b"GET / HTTP/1.1\r\n\r\n")
+    assert sock.raw.calls == 1
+    assert sock.sent == 0
+
+
+class _TrickleSendSocket:
+    """A socket that takes one byte per send, slowly, like a peer reading a trickle."""
+
+    def send(self, data, flags: int = 0) -> int:
+        time.sleep(0.01)
+        return 1 if len(data) else 0
+
+
+def test_a_write_cannot_outlive_the_total_deadline():
+    sock = _CountingSocket(_TrickleSendSocket())
+    sock.deadline = time.monotonic() + 0.1
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        sock.sendall(b"x" * 10_000)
+    assert time.monotonic() - started < 1.0
+    assert 0 < sock.sent < 10_000
