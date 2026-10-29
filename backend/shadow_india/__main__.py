@@ -218,7 +218,8 @@ def main(
             report = runner.hand_flatten(
                 args.session, args.reason, include_corporate_action=args.include_corporate_action
             )
-            _print(out, {"status": report.status, "intents": report.intents, "skipped": report.skipped})
+            _print(out, {"status": report.status, "stopped": report.stopped, "intents": report.intents,
+                         "skipped": report.skipped})
             return EXIT_ABORTED if report.status == "aborted" else EXIT_OK
         if args.command == "open-run":
             _print(out, {"opened": runtime.open_run()})

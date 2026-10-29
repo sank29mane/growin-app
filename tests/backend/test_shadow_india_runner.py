@@ -1388,6 +1388,19 @@ def refuse_body(world: World, monkeypatch, side: str, error: Exception) -> None:
     monkeypatch.setattr(world.runner, "_vm_body", body)
 
 
+def refuse_body_for(world: World, monkeypatch, isin: str, error: Exception) -> None:
+    """``_vm_body`` raises ``error`` for the one name ``isin`` and builds the real body for every other."""
+
+    real = world.runner._vm_body
+
+    def body(proposal_id, instrument, *rest):
+        if instrument.isin == isin:
+            raise error
+        return real(proposal_id, instrument, *rest)
+
+    monkeypatch.setattr(world.runner, "_vm_body", body)
+
+
 def pauses_of(world: World, event: str) -> list[Any]:
     return [p for p in policy.run_state(world.evidence).open_pauses if p.event == event]
 
@@ -1416,6 +1429,62 @@ def test_a_hand_flatten_exit_the_vm_body_refuses_records_a_pause(world, monkeypa
     report = world.runner.hand_flatten(S, "operator flattens by hand")
     assert [p.scope for p in pauses_of(world, "contract_mismatch")] == [policy.SCOPE_ALL]
     assert intents_of(world, "SELL") == [] and (ISINS["AAA"], "exit_body_invalid:quantity") in report.skipped
+    # the report says what the run is: paused with exposure still held, never "done"
+    assert (report.status, report.stopped) == ("paused", "pause")
+    code, payload = run_cli(
+        cli_args(world, "hand-flatten", "--reason", "again"), runtime_factory=lambda args: world.runner
+    )
+    assert code == 0 and (payload["status"], payload["stopped"]) == ("paused", "open_pause")
+
+
+def test_one_refused_exit_does_not_drop_the_exits_after_it_in_a_decide(world, monkeypatch):
+    """Break-proof: raise the pause mid-loop again and BBB's exit is never minted (the loop stops at the pause)."""
+    own(world, "AAA", 160)
+    own(world, "BBB", 160)
+    premark(world)
+    set_closes(world, AAA="85", BBB="85")  # both past the -12% stop
+    world.script.result = evaluated("CCC", entries=True)
+    refuse_body_for(world, monkeypatch, ISINS["AAA"], MintMismatch("stock_code"))
+    report = world.decide()
+    assert [r["symbol"] for r in intents_of(world, "SELL")] == ["BBB"]  # AAA refused, BBB still sold
+    assert (ISINS["AAA"], "exit_body_invalid:stock_code") in report.skipped
+    pauses = pauses_of(world, "contract_mismatch")
+    assert [p.scope for p in pauses] == [policy.SCOPE_ALL]  # one pause, after the exit loop
+    assert (report.status, report.stopped) == ("paused", "pause")
+    assert [r["symbol"] for r in intents_of(world, "BUY")] == ["AAA", "BBB"]  # no entry after the pause: only the seeds
+
+
+def test_one_refused_exit_does_not_drop_the_exits_after_it_in_a_hand_flatten(world, monkeypatch):
+    """Break-proof: raise the pause mid-loop again and BBB's flatten is never minted."""
+    own(world, "AAA", 100)
+    own(world, "BBB", 100)
+    premark(world)
+    refuse_body_for(world, monkeypatch, ISINS["AAA"], MintMismatch("stock_code"))
+    report = world.runner.hand_flatten(S, "operator flattens by hand")
+    assert [r["symbol"] for r in intents_of(world, "SELL")] == ["BBB"]
+    assert report.skipped.count((ISINS["AAA"], "exit_body_invalid:stock_code")) == 1
+    assert [p.scope for p in pauses_of(world, "contract_mismatch")] == [policy.SCOPE_ALL]
+    assert (report.status, report.stopped) == ("paused", "pause")
+
+
+def test_two_refused_exits_raise_one_pause_naming_both_reasons(world, monkeypatch):
+    own(world, "AAA", 100)
+    own(world, "BBB", 100)
+    premark(world)
+    errors = {ISINS["AAA"]: MintMismatch("stock_code"), ISINS["BBB"]: MintMismatch("quantity")}
+    real = world.runner._vm_body
+
+    def body(proposal_id, instrument, *rest):
+        if instrument.isin in errors:
+            raise errors[instrument.isin]
+        return real(proposal_id, instrument, *rest)
+
+    monkeypatch.setattr(world.runner, "_vm_body", body)
+    world.runner.hand_flatten(S, "operator flattens by hand")
+    pauses = pauses_of(world, "contract_mismatch")
+    assert len(pauses) == 1
+    reasons = [r["reason"] for r in world.records("pause") if r.get("event") == "contract_mismatch"]
+    assert reasons == ["exit_body_invalid:stock_code,quantity"]
 
 
 def test_an_entry_the_vm_body_refuses_stays_a_skip_and_records_no_pause(world, monkeypatch):
