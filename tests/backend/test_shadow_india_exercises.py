@@ -7,7 +7,7 @@ reference ports and the signer. The signer is a P-256 key generated for each tes
 
 Never here: a real metadata server, VM, broker, Breeze, ICICI, GCP, key, Keychain item or ``private/`` file. Every row ends
 with the same standing assertions: the VM saw only mints (plus the 63 rows' own authorize), Breeze saw no non-GET, the
-metadata fake saw GET only, and every ``http.client`` connection the process opened went to the one loopback fake.
+metadata fake saw GET only, and every ``http.client`` connection the process opened (the kill reader's client) went to the one loopback fake.
 
 Rows that need the 64-04 close step or 64-05 acceptance are skipped with a reason below, not faked, and the offline_exercise
 run class is a skip too (it does not exist in ``evidence.RUN_CLASSES``). This file edits no product code.
@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import ast
 import base64
+import dataclasses
+import inspect
 import json
+import pkgutil
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -29,6 +32,7 @@ from typing import Any
 
 import pytest
 
+import shadow_india
 import shadow_india.runner as runner_module
 import test_shadow_india_runner as rt
 import relay_orders_support as ros
@@ -207,10 +211,17 @@ def test_evidence_is_labelled_offline_exercise():
 
 
 def test_acceptance_refuses_any_offline_exercise_record_inside_a_counted_run():
+    modules = {module.name for module in pkgutil.iter_modules(shadow_india.__path__)}
+    assert not [name for name in modules if "accept" in name], "64-05 acceptance landed: replace this skip with the row"
     pytest.skip("needs 64-05 acceptance")
 
 
 def test_a_restart_between_decide_and_close_pauses_and_recovers_through_sl9():
+    # Task 1's close step takes a fill source on the runner's ports. Today ``close`` takes only the session and the
+    # default port knows nothing after the submission. Either one changing means Task 1 landed: write the row.
+    assert tuple(inspect.signature(runner_module.ShadowRunner.close).parameters) == ("self", "session")
+    fills = {f.name: f for f in dataclasses.fields(runner_module.RunnerPorts)}["fills"]
+    assert fills.default_factory is runner_module.NoPostSubmissionEvidence, "Task 1 landed: replace this skip with the row"
     pytest.skip("needs 64-04 Task 1 close step")
 
 
@@ -240,9 +251,11 @@ def test_metadata_enabled_the_vm_mints_a_challenge_and_the_runner_aborts_before_
     assert ex.order_posts() == [MINT]
 
 
+# The 404 and 503 rows carry the body ``enabled`` on purpose: only the status can block them, so a reader that ignored the
+# status would read ENABLED and the row would fail.
 BLOCKED_ANSWERS = [
-    pytest.param(dict(body=None), id="404"),
-    pytest.param(dict(status=503, body=b"unavailable"), id="503"),
+    pytest.param(dict(status=404, body=b"enabled"), id="404"),
+    pytest.param(dict(status=503, body=b"enabled"), id="503"),
     pytest.param(dict(body=b"ENABLED"), id="upper_case"),
     pytest.param(dict(body=b"enabled\n"), id="trailing_newline"),
     pytest.param(dict(body=b" enabled"), id="leading_space"),
@@ -252,10 +265,12 @@ BLOCKED_ANSWERS = [
 
 @pytest.mark.parametrize("answer", BLOCKED_ANSWERS)
 def test_a_metadata_answer_that_is_not_exactly_enabled_is_blocked_and_the_run_goes_on(make_exercise, answer):
-    """Break-proof: let any of these read as ``enabled`` and the VM mints a challenge instead (the abort row above)."""
+    """Break-proof: let any of these read as ``enabled`` (a reader that took HTTP 404 as ENABLED, say) and the VM mints a
+    challenge instead (the abort row above)."""
     ex = make_exercise(**answer)
     teach_the_vm_the_names(ex, "AAA", "BBB", "CCC")  # a kill flag that failed open would mint a challenge here
     report = ex.decide()
+    assert ex.metadata.statuses and set(ex.metadata.statuses) == {answer.get("status", 200)}  # what the fake really sent
     assert report.status == "done" and open_events(ex) == [] and not policy.run_state(ex.evidence).aborted
     decisions = rt.decisions(ex.world)
     assert len(decisions) == 3
@@ -314,8 +329,8 @@ def exit_sells(ex: Exercise) -> dict[str, dict[str, Any]]:
 
 @pytest.mark.parametrize("setup,reason,quantities", EXITS)
 def test_an_exit_is_admitted_and_reserved_on_the_mac_and_refused_by_the_kill_flag(make_exercise, setup, reason, quantities):
-    held = {"AAA": 160} if reason == "stop" else {"AAA": 160, "BBB": 160, "CCC": 160}
     """Break-proof: let a kill-refused exit release its reservation (``ShadowPreparation.record_vm_decision``) and this fails."""
+    held = {"AAA": 160} if reason == "stop" else {"AAA": 160, "BBB": 160, "CCC": 160}
     ex = make_exercise()
     setup(ex)
     ex.script.result = rt.evaluated("DDD", "EEE", entries=False)
@@ -340,18 +355,49 @@ def test_an_exit_is_admitted_and_reserved_on_the_mac_and_refused_by_the_kill_fla
     assert ex.vm.http.count("POST", "/v1/orders/authorize") == 0
 
 
-@pytest.mark.parametrize("setup,reason,quantities", EXITS)
-def test_no_buy_is_admitted_while_an_exit_is_open(make_exercise, setup, reason, quantities):
+# Buys are blocked by the stop and halt latches (and run pauses) an exit leaves behind, not by the open exit itself:
+# ``entry_block_reasons`` never reads ``open_exits``. The rows below assert the reason the runner really reports.
+NO_BUY = [
+    pytest.param(stop_setup, {"stop_open"}, id="stop"),
+    pytest.param(halve_setup, {"halt_latch"}, id="halve"),
+    pytest.param(flatten_setup, {"halt_latch", "stop_open"}, id="flatten"),
+]
+
+
+def entry_blocked_reasons(report: Any, isin: str) -> set[str]:
+    """The reasons the runner itself skipped ``isin``'s entry with (``entry_blocked:a,b``), empty if it did not."""
+
+    reasons: set[str] = set()
+    for skipped_isin, why in report.skipped:
+        if skipped_isin == isin and why.startswith("entry_blocked:"):
+            reasons |= set(why.removeprefix("entry_blocked:").split(","))
+    return reasons
+
+
+def assert_a_slot_is_free(ex: Exercise) -> None:
+    """``max_positions`` is not what stops the entry: a free slot means an unblocked entry would be admitted."""
+
+    snapshot = ex.runner._portfolio.snapshot()
+    held = {h.instrument.isin for h in snapshot.holdings} | {b.instrument.isin for b in snapshot.open_buys}
+    assert len(held) < ex.script.inputs[-1].strategy.params.max_positions
+
+
+@pytest.mark.parametrize("setup,expected", NO_BUY)
+def test_no_buy_is_admitted_while_the_latches_an_exit_leaves_are_open(make_exercise, setup, expected):
+    """Break-proof: have the runner ignore ``entry_block_reasons`` (``reasons = ()``) and a new entry is admitted: this fails."""
     ex = make_exercise()
     setup(ex)
     seeds = {r["intent_id"] for r in rt.intents_of(ex.world, "BUY")}
     ex.script.result = rt.evaluated("DDD", "EEE")
-    ex.decide()
+    report = ex.decide()
+    assert_a_slot_is_free(ex)
+    assert expected <= entry_blocked_reasons(report, rt.ISINS["DDD"])  # the runner refused the entry, for the real reason
     assert {r["intent_id"] for r in rt.intents_of(ex.world, "BUY")} == seeds  # only the seed buys: no new entry
     assert ex.runner._portfolio.buys_blocked()
 
 
-def test_an_unfilled_exit_keeps_its_shares_reserved_until_the_day_expires_then_stays_owed_and_blocks_buys(make_exercise):
+def test_an_unfilled_exit_keeps_its_shares_reserved_until_the_day_expires_then_stays_owed_and_the_stop_latch_blocks_buys(make_exercise):
+    """Break-proof: have the runner ignore ``entry_block_reasons`` and the second decide admits a new entry: this fails."""
     ex = make_exercise()
     stop_setup(ex)
     ex.script.result = rt.evaluated("BBB", entries=False)
@@ -365,12 +411,19 @@ def test_an_unfilled_exit_keeps_its_shares_reserved_until_the_day_expires_then_s
     assert [(h.instrument.symbol, h.quantity) for h in snapshot.holdings] == [("AAA", 160)]  # the shares are still held
     assert isin in ex.world.latch.load().open_exits  # the exit obligation is still owed
     assert ex.runner._portfolio.buys_blocked()
+    buys = len(rt.intents_of(ex.world, "BUY"))
+    ex.script.result = rt.evaluated("DDD")  # an entry candidate with a slot free: only the stop latch is in its way
+    again_report = ex.decide()
+    assert_a_slot_is_free(ex)
+    assert "stop_open" in entry_blocked_reasons(again_report, rt.ISINS["DDD"])
+    assert len(rt.intents_of(ex.world, "BUY")) == buys
     plan = ex.runner._portfolio.exit_proposals(date(2026, 10, 23))
     (again,) = plan.proposals  # the next decide offers the same exit again, from the held position
     assert plan.waiting == () and (again.reason, again.isin, again.quantity) == ("stop", isin, 160)
 
 
-def test_a_partial_exit_keeps_the_remaining_shares_reserved_and_blocks_buys(make_exercise):
+def test_a_partial_exit_keeps_the_remaining_shares_reserved_and_the_stop_latch_blocks_buys(make_exercise):
+    """Break-proof: have the runner ignore ``entry_block_reasons`` and the second decide admits a new entry: this fails."""
     ex = make_exercise()
     stop_setup(ex)
     ex.script.result = rt.evaluated("BBB", "CCC")
@@ -388,7 +441,9 @@ def test_a_partial_exit_keeps_the_remaining_shares_reserved_and_blocks_buys(make
     assert rt.ISINS["AAA"] in ex.world.latch.load().open_exits and ex.runner._portfolio.buys_blocked()
     assert ex.runner._portfolio.exit_proposals(date(2026, 10, 23)).waiting == (rt.ISINS["AAA"],)  # never offered twice
     buys = len(rt.intents_of(ex.world, "BUY"))
-    ex.decide()  # a second decide in the window: no second sell, no buy
+    again = ex.decide()  # a second decide in the window: no second sell, no buy
+    assert_a_slot_is_free(ex)
+    assert "stop_open" in entry_blocked_reasons(again, rt.ISINS["BBB"])  # the runner refused the entry for the stop latch
     assert len(rt.intents_of(ex.world, "SELL")) == 1 and len(rt.intents_of(ex.world, "BUY")) == buys
 
 
@@ -613,7 +668,7 @@ async def test_an_expired_approval_is_refused_on_the_mac_and_by_the_vm_with_the_
     challenge = world.challenge(pid)
     assert json.loads(challenge.signed_payload)["key_id"] == signer.key_id  # the VM's bytes name the fake signer's key
     world.vm.clock.advance(61)  # past the 60 s lifetime
-    with pytest.raises(ExecutionConflictError):
+    with pytest.raises(ExecutionConflictError, match="expired"):
         await world.approve(pid, challenge, quote=None)
     assert world.http.count("POST", "/v1/orders/authorize") == 0  # the Mac refuses before anything is sent
     # The same bytes, validly signed by the fake signer, asked of the VM directly: expired, not a bad signature.

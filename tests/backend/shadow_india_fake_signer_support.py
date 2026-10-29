@@ -9,8 +9,9 @@ TEST ONLY. This module lives under ``tests/`` and nothing under ``backend/`` or 
   reader whose base URL has to be loopback (``require_loopback``) before the VM sees it.
 * ``ExerciseMetadata``: a loopback metadata server that can answer 200, 404 or 503, serve any body, or answer too
   slowly (a timeout). GET only; any other method is recorded and refused.
-* ``ConnectionSpy``: every ``http.client`` connection the process opens is recorded, and one that is not loopback
-  is refused before a socket exists, so a mistake here cannot reach a real metadata server.
+* ``ConnectionSpy``: every ``http.client.HTTPConnection`` the process opens is recorded, and one that is not loopback
+  is refused before a socket exists. The VM's kill reader uses ``http.client`` (``kill.py``), so a mistake here cannot
+  reach a real metadata server. It does not see sockets opened any other way (urllib3, httpx, raw sockets).
 
 Nothing here reaches a network, a broker, the VM, GCP or a secret.
 """
@@ -147,6 +148,8 @@ class _ExerciseHandler(BaseHTTPRequestHandler):
         data = server.body if server.body is not None else b""  # type: ignore[attr-defined]
         if self.path != KILL_PATH:
             status, data = 404, b"not found"
+        if self.path == KILL_PATH:  # stray loopback traffic (a probe of "/") is answered 404 and not counted
+            server.statuses.append(status)  # type: ignore[attr-defined]
         try:
             self.send_response(status)
             self.send_header("Content-Length", str(len(data)))
@@ -173,6 +176,7 @@ class ExerciseMetadata(MetadataFake):
         self.body = body
         self.status = status
         self.delay = delay
+        self.statuses: list[int] = []  # the status of every kill-flag answer, so a row can assert the fake really sent (say) a 404
 
     def handle_error(self, request, client_address):  # a reader that hung up (the timeout row) is not an error here
         pass
@@ -182,7 +186,9 @@ class ExerciseMetadata(MetadataFake):
 
 
 class ConnectionSpy:
-    """Records every ``http.client`` connection's (host, port). A non-loopback host is recorded and refused."""
+    """Records every ``http.client.HTTPConnection``'s (host, port): the client the VM's kill reader uses.
+
+    A non-loopback host is recorded and refused. Other HTTP stacks are not seen."""
 
     def __init__(self, monkeypatch) -> None:
         self.connections: list[tuple[str, int | None]] = []
