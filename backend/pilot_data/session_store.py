@@ -5,6 +5,11 @@ seeded file is re-ingested from its stored bytes through the public ingest funct
 the research ``source_files`` row, so the seeded sha256, byte size and first fetch time equal the research ones.
 Nothing here calls NSE, Breeze, the relay, the VM or GCP.
 
+Index lists (Nifty 500, Smallcap 250) are seeded the same way, limited to snapshots whose IST fetch date is on or before
+``window_start`` (the cutoff ``latest_index_list(fetched_by=window_start)`` applies). A list fetched later never enters
+the session store, so neither the S-1 universe nor the small-cap classification can read it. They are not only target
+inputs: the shadow signal step classifies small caps from them, and ``open_run`` refuses a store that has none.
+
 ``SEED_TABLES`` names every table the research store can hold and how the seed treats it. A table with no entry is a
 test failure, so a new table forces a decision. Before it returns, the seed re-opens the session store read-only and
 runs a parity table against the research store: the same public readers, the same answers over the seeded window.
@@ -31,6 +36,10 @@ from .bhavcopy import (
 from .breeze_bars import breeze_bars_for, ingest_breeze_response, parse_breeze_v2_daily
 from .core import (
     CaveatedResult, PilotDataError, SourceDescriptor, canonical_sha256, standard_caveats, utc_naive,
+)
+from .constituents import (
+    EXPECTED_MEMBERS, ListName, ensure_constituent_tables, fetched_by_cutoff_utc, index_members, ingest_index_list,
+    latest_index_list,
 )
 from .corporate_actions import EVENTS_TABLE, SIGHTINGS_TABLE, derive_corporate_actions, events_for_symbol
 from .dataset import verify_dataset
@@ -83,6 +92,8 @@ SEED_TABLES: dict[str, SeedMethod] = {
     "price_band_list_rows": "reingest",
     "price_band_change_rows": "reingest",
     "price_band_conventions": "copy",
+    "index_list_snapshots": "reingest",
+    "index_list_members": "reingest",
     "quarantine_records": "copy",
     "breeze_probe_records": "pinned",
     "target_universe_snapshots": "pinned",
@@ -92,8 +103,6 @@ SEED_TABLES: dict[str, SeedMethod] = {
     "dataset_snapshots": "not_seeded",
     "universe_evaluations": "not_seeded",
     "reference_refresh_runs": "not_seeded",
-    "index_list_snapshots": "not_seeded",
-    "index_list_members": "not_seeded",
     "price_band_fetch_log": "not_seeded",
     "price_band_archive_depth": "not_seeded",
     "band_coverage_reports": "not_seeded",
@@ -110,8 +119,6 @@ NOT_SEEDED_REASONS: dict[str, str] = {
     "dataset_snapshots": "the frozen dataset is pinned by directory and hash, not copied",
     "universe_evaluations": "evaluations are recomputed from the seeded reference data",
     "reference_refresh_runs": "a refresh history says nothing about the session store's freshness",
-    "index_list_snapshots": "index lists only feed targets, and targets are pinned",
-    "index_list_members": "index lists only feed targets, and targets are pinned",
     "price_band_fetch_log": "band fetch history belongs to the research run",
     "price_band_archive_depth": "archive probes belong to the research run",
     "band_coverage_reports": "coverage reports belong to the research run",
@@ -216,6 +223,7 @@ def _require_research_tables(research: PilotDataStore) -> dict[str, bool]:
         "surveillance": research.table_exists("surveillance_snapshots"),
         "probe": research.table_exists("breeze_probe_records"),
         "pr": research.table_exists("bhavcopy_ca_raw"),
+        "index_lists": research.table_exists("index_list_snapshots") and research.table_exists("index_list_members"),
     }
 
 
@@ -391,6 +399,26 @@ def _seed_bands(research, session, window) -> dict[str, list[str]]:
     return out
 
 
+def _seed_index_lists(research, session, window) -> list[str]:
+    """Every list fetched by ``window[0]`` (IST date), oldest first, so ``latest_index_list`` ties break as they did."""
+    rows = research.query(
+        "SELECT source_sha256, list_name, fetched_at_utc FROM index_list_snapshots WHERE fetched_at_utc < ? "
+        "ORDER BY fetched_at_utc, rowid", [fetched_by_cutoff_utc(window[0])])
+    sources = _sources(research, {row[0] for row in rows})
+    copied: list[str] = []
+    for sha, name, fetched in rows:
+        if name not in EXPECTED_MEMBERS:
+            raise PilotDataError("seed_index_list_unknown", f"snapshot {sha[:12]} names an unknown list {name!r}")
+        if sources[sha].first_fetched != fetched:
+            raise PilotDataError("seed_index_list_fetch_time",
+                                 f"snapshot {sha[:12]} was fetched at a time its source_files row does not carry")
+        list_name: ListName = name
+        ingest_index_list(session, sources[sha].descriptor(), research.read_blob(sha), list_name=list_name)
+        if sha not in copied:
+            copied.append(sha)
+    return copied
+
+
 def _upstream_quarantine_rows(store: PilotDataStore, window: tuple[date, date]) -> list[tuple]:
     return store.query(
         "SELECT quarantine_id, workspace, check_name, reason_code, scope, isin, nse_symbol, stock_code, series, "
@@ -488,6 +516,18 @@ def _parity(research: PilotDataStore, session: PilotDataStore, *, targets: Targe
                     raise _fail("band_on", f"{member.anchor_isin} {day.isoformat()} differs")
                 count += 1
         out.append(ParityRow(reader="band_on", compared=count, detail=f"targets x sessions from {floor.isoformat()}"))
+    if optional["index_lists"]:
+        cutoff = fetched_by_cutoff_utc(window[0])
+        count_query = "SELECT count(*) FROM index_list_snapshots WHERE fetched_at_utc < ?"
+        if session.query("SELECT count(*) FROM index_list_snapshots")[0][0] != research.query(count_query, [cutoff])[0][0]:
+            raise _fail("latest_index_list", "the seeded snapshot count differs from the research count fetched by window_start")
+        for name in sorted(EXPECTED_MEMBERS):
+            mine = latest_index_list(session, name)  # type: ignore[arg-type]  # unbounded: the store holds nothing later
+            theirs = latest_index_list(research, name, fetched_by=window[0])  # type: ignore[arg-type]
+            if mine != theirs or (mine is not None and index_members(session, mine) != index_members(research, theirs)):
+                raise _fail("latest_index_list", f"{name} newest snapshot or its members differ")
+        out.append(ParityRow(reader="latest_index_list", compared=len(EXPECTED_MEMBERS),
+                             detail="newest list per name fetched by window_start, and the snapshot count"))
     a, b = latest_snapshot(session, on_or_before=window[1]), latest_snapshot(research, on_or_before=window[1])
     if a != b or (a is not None and master_rows(session, a) != master_rows(research, b)):
         raise _fail("latest_snapshot", "the newest master snapshot or its rows differ")
@@ -540,7 +580,8 @@ def seed_session_store(session_root: Path, research_root: Path, *, dataset_dir: 
             breeze_convention = None if probe is None else probe.convention()
         sources: dict[str, list[str]] = {}
         with PilotDataStore(session_root, workspace="india") as session:
-            for ensure in (ensure_fetch_log, ensure_master_tables, ensure_band_tables, ensure_surveillance_tables):
+            for ensure in (ensure_fetch_log, ensure_master_tables, ensure_band_tables, ensure_surveillance_tables,
+                           ensure_constituent_tables):
                 ensure(session)
             sources["security_master"] = _seed_security_master(research, session, window, optional)
             sources.update({f"bhavcopy_{kind}": shas for kind, shas in _seed_bhavcopy(research, session, window, optional).items()})
@@ -554,6 +595,8 @@ def seed_session_store(session_root: Path, research_root: Path, *, dataset_dir: 
                 convention = current_band_convention(research)
                 if convention is not None:
                     record_band_convention(session, convention, workspace="india")
+            if optional["index_lists"]:
+                sources["index_list"] = _seed_index_lists(research, session, window)
             copied = _copy_quarantines(research, session, window)
         band_convention = current_band_convention(research) if optional["bands"] else None
         with PilotDataStore(session_root, workspace="india", read_only=True) as seeded:

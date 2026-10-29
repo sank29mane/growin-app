@@ -150,6 +150,11 @@ def ingest_index_list(
     )
 
 
+def fetched_by_cutoff_utc(fetched_by: date) -> datetime:
+    """Naive UTC instant before which a list counts as fetched by ``fetched_by``: 00:00 IST on the next day."""
+    return utc_naive(datetime.combine(fetched_by + timedelta(days=1), time.min, tzinfo=IST))
+
+
 def latest_index_list(
     store: PilotDataStore, list_name: ListName, *, fetched_by: date | None = None
 ) -> IndexListSnapshotRef | None:
@@ -159,8 +164,7 @@ def latest_index_list(
     cutoff = "" if fetched_by is None else " AND fetched_at_utc < ?"
     params: list = [list_name]
     if fetched_by is not None:
-        end_of_ist_day = datetime.combine(fetched_by + timedelta(days=1), time.min, tzinfo=IST)
-        params.append(utc_naive(end_of_ist_day))
+        params.append(fetched_by_cutoff_utc(fetched_by))
     found = store.query(
         "SELECT source_sha256, fetched_at_utc, member_count, placeholders_json FROM index_list_snapshots "
         f"WHERE list_name = ?{cutoff} ORDER BY fetched_at_utc DESC, rowid DESC LIMIT 1",
