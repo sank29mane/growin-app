@@ -282,6 +282,15 @@ growin_cli orders-key
 - `orders-key` prints a key id. Compare it to the `key_id` in `/etc/growin-gateway/order-key.json` on the VM and say "matches: yes" or "matches: no". Never paste the id.
 - `orders-audit` shows no entry added by this smoke.
 
+Mac value scan, now, while the session is live and before `revoke` (section 10 explains the output). Have
+that day's API_Session code ready for the optional prompt:
+
+```bash
+PYTHONPATH=backend uv run --project backend --no-sync python gateway/ops/scan_secrets.py mac
+```
+
+- `RESULT PASS` is the only pass. FAIL or INCOMPLETE stops the deploy: fix what it names, run it again.
+
 Revoke:
 
 ```bash
@@ -302,12 +311,8 @@ The scanner searches for the real values (and their URL-encoded, base64 and JSON
 prints PASS, FAIL or INCOMPLETE with counts and file paths, never what it found. `RESULT PASS` is the
 only pass. INCOMPLETE means something was not fully read: fix what it names and run it again.
 
-Mac, on the login day, while the session is live and before `revoke`, so the token file exists. Have
-that day's API_Session code ready for the optional prompt:
-
-```bash
-PYTHONPATH=backend uv run --project backend --no-sync python gateway/ops/scan_secrets.py mac
-```
+The Mac scan runs inside the section 9 smoke, before `revoke`, because `revoke` deletes the token file and
+the scan needs it. Do not run it after revoke. The VM scan:
 
 VM, as root, from a throwaway 0700 directory:
 

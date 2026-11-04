@@ -331,7 +331,10 @@ def lock_parity_problems(gateway: dict, backend: dict) -> list[str]:
         if other is None or other["version"] != package["version"]:
             problems.append(f"{name}: not in the backend lock at this version")
             continue
-        if not _hashes(package) <= _hashes(other):
+        hashes = _hashes(package)
+        if not hashes:  # an empty set is a subset of anything: an entry with no hash proves nothing
+            problems.append(f"{name}: no hashes in the gateway lock")
+        elif not hashes <= _hashes(other):
             problems.append(f"{name}: hash not in the backend lock")
     return problems
 
@@ -365,6 +368,14 @@ def test_d1_parity_helper_catches_a_git_source():  # P2
     gateway, backend = _synthetic_gateway_lock()
     gateway["package"].append({"name": "evil", "version": "1.0", "source": {"git": "https://example.invalid/x"}})
     assert any("evil" in p for p in lock_parity_problems(gateway, backend))
+
+
+def test_d1_parity_helper_catches_an_entry_with_no_hashes():
+    gateway, backend = _synthetic_gateway_lock()
+    target = next(p for p in gateway["package"] if p["name"] == "fastapi")
+    target["wheels"] = []
+    target.pop("sdist", None)
+    assert any("fastapi" in p and "no hashes" in p for p in lock_parity_problems(gateway, backend))
 
 
 def test_d1_parity_helper_catches_a_new_version():
@@ -930,3 +941,29 @@ def test_d22_p29_an_order_read_above_the_post_restart_login_is_caught():
     )
     assert planted != smoke
     assert smoke_order_violations(planted) != []
+
+
+def scan_before_revoke_problem(smoke: str) -> str | None:
+    """The Mac scan needs the token file that `revoke` deletes, so it must come first in the smoke."""
+    scan = smoke.find("scan_secrets.py mac")
+    revoke = smoke.find("growin_cli revoke")
+    if scan < 0:
+        return "section 9 has no Mac scan"
+    if revoke < 0:
+        return "section 9 has no revoke"
+    return None if scan < revoke else "the Mac scan comes after revoke"
+
+
+def test_d22_the_mac_scan_runs_before_revoke_in_the_smoke():
+    assert scan_before_revoke_problem(section(RUNBOOK, 9)) is None
+    assert "scan_secrets.py mac" not in section(RUNBOOK, 10)  # one place, so the order cannot disagree
+
+
+def test_d22_a_mac_scan_after_revoke_is_caught():  # negative control
+    smoke = section(RUNBOOK, 9)
+    block_start = smoke.index("Mac value scan, now")
+    block_end = smoke.index("Revoke:")
+    block = smoke[block_start:block_end]
+    moved = smoke[:block_start] + smoke[block_end:] + "\n" + block
+    assert scan_before_revoke_problem(moved) == "the Mac scan comes after revoke"
+    assert scan_before_revoke_problem(smoke.replace("scan_secrets.py mac", "scan_secrets.py")) is not None
