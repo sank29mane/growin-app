@@ -1,0 +1,69 @@
+# Growin gateway relay (Phase 61, OD-6, OD-16). Installed by hand from RUNBOOK.md.
+# Test: tests/backend/test_gateway_vm_deploy.py pins every line below.
+#
+# Files the relay loads, one path each, no loader change:
+#   relay.json      $CREDENTIALS_DIRECTORY/relay.json   (LoadCredential)
+#   limits.json     /etc/growin-gateway/limits.json     (read-only bind, host file 0644 root)
+#   order-key.json  /etc/growin-gateway/order-key.json  (read-only bind, host file 0644 root)
+#   counter, order state, audit, alerts under $STATE_DIRECTORY (StateDirectory)
+# TemporaryFileSystem hides the 0700 host directory inside the unit and leaves an empty
+# traversable one; the optional binds (the "-" prefix) put the two order files back.
+
+[Unit]
+Description=Growin gateway relay
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=growin-gateway
+StateDirectory=growin-gateway
+StateDirectoryMode=0700
+RuntimeDirectory=growin-gateway
+RuntimeDirectoryMode=0700
+WorkingDirectory=/run/growin-gateway
+LoadCredential=relay.json:/etc/growin-gateway/relay.json
+TemporaryFileSystem=/etc/growin-gateway:ro,mode=0755
+BindReadOnlyPaths=-/etc/growin-gateway/limits.json
+BindReadOnlyPaths=-/etc/growin-gateway/order-key.json
+Environment=PYTHONPATH=/opt/growin-gateway/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONNOUSERSITE=1
+ExecStart=/opt/growin-gateway/.venv/bin/python -B -s -m gateway_vm.main --host internal-ip --port 8443
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+LimitCORE=0
+MemoryMax=512M
+TasksMax=64
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

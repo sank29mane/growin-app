@@ -1,0 +1,31 @@
+[project]
+name = "growin-gateway-vm"
+version = "0.1.0"
+description = "Thin order and data relay that runs on the Mumbai VM. Dependencies only; the sources are copied, not installed."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "fastapi==0.109.2",
+    "uvicorn==0.27.1",
+    "pydantic==2.12.5",
+    "cryptography==46.0.4",
+]
+
+[tool.uv]
+# `uv sync` installs the dependencies only; the unit sets PYTHONPATH to the copied sources.
+package = false
+# Every transitive package is pinned to the version backend/uv.lock already holds, so the VM
+# installs nothing the repo has not locked (T-61-SC).
+constraint-dependencies = [
+    "starlette==0.36.3",
+    "pydantic-core==2.41.5",
+    "typing-inspection==0.4.2",
+    "annotated-types==0.7.0",
+    "typing-extensions==4.15.0",
+    "anyio==4.12.1",
+    "sniffio==1.3.1",
+    "idna==3.11",
+    "h11==0.16.0",
+    "click==8.3.1",
+    "cffi==2.0.0",
+    "pycparser==3.0",
+]

@@ -1,0 +1,13 @@
+{
+  "expected_egress_ip": "<EXPECTED_EGRESS_IP>",
+  "expected_userid": "<EXPECTED_USERID>",
+  "secret_names": {
+    "app_key": "breeze-api-key",
+    "secret_key": "breeze-api-secret"
+  },
+  "egress_echo_url": "https://api.ipify.org",
+  "security_master_url": "https://directlink.icicidirect.com/NewSecurityMaster/SecurityMaster.zip",
+  "per_minute": 80,
+  "per_day": 4500,
+  "security_master_per_hour": 6
+}
