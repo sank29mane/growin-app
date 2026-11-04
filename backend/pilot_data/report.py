@@ -1,7 +1,10 @@
-"""Part 1 orchestration: lineages, spans, factor sets and the universe, summarised in one report.
+"""Part 1 orchestration (lineages, spans, factor sets, the universe) and the Part 2 diagnostic report.
 
-The report leads with the survivorship and hindsight caveats. It is written read-only under
+Every report leads with the survivorship and hindsight caveats. It is written read-only under
 `<root>/reports/` with the first 12 hex characters of its hash in the file name.
+
+Part 2 (`part2`) only reads what the probe, master refresh, backfill, cross-check and dataset stages already
+stored. It opens the store read-only, calls no relay and writes nothing except its own JSON file.
 """
 
 from __future__ import annotations
@@ -24,14 +27,19 @@ from .adjustment import (
     persist_factor_set,
     quarantine_unresolved,
 )
+from .backfill import BackfillEngine, latest_conclusive_probe, load_plan
 from .core import (
+    BREEZE_RAW_UNVERIFIED_CAVEAT,
     SURVEILLANCE_HISTORY_CAVEAT,
+    Caveat,
     CaveatedResult,
     PilotDataError,
     canonical_sha256,
     standard_caveats,
 )
 from .corporate_actions import EVENTS_TABLE
+from .crosscheck import CrossCheckReport
+from .dataset import verify_dataset
 from .history_quality import compute_span, record_history_quarantines
 from .lineage import lineage_for_target, primary_bars_for_lineage
 from .sessions import day_status, ensure_fetch_log, pr_missing_sessions, sessions_between
@@ -232,10 +240,10 @@ def run_part1(
     return Part1Report(workspace=workspace, caveats=caveats, report_sha256=digest, **fields)
 
 
-def write_report(root: Path, report: Part1Report) -> Path:
+def _write_json_report(root: Path, prefix: str, report: CaveatedResult, as_of: date, digest: str) -> Path:
     reports = root / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    path = reports / f"part1-{report.as_of.isoformat()}-{report.report_sha256[:12]}.json"
+    path = reports / f"{prefix}-{as_of.isoformat()}-{digest[:12]}.json"
     if path.exists():
         return path
     dumped = report.model_dump(mode="json")
@@ -250,22 +258,312 @@ def write_report(root: Path, report: Part1Report) -> Path:
     return path
 
 
+def write_report(root: Path, report: Part1Report) -> Path:
+    return _write_json_report(root, "part1", report, report.as_of, report.report_sha256)
+
+
+# --------------------------------------------------------------------------- Part 2
+
+_BACKFILL_TABLES = (
+    "breeze_probe_records", "backfill_plans", "backfill_events", "relay_call_ledger", "relay_call_outcomes",
+    "relay_provenance",
+)
+_MASTER_TABLES = ("security_master_snapshots", "security_master_changes")
+REFUSAL_CROSSCHECK_MISSING = "crosscheck_missing"
+REFUSAL_ADJUSTED = "breeze_adjusted_detected"
+REFUSAL_NOT_BUILT = "dataset_not_built"
+REFUSAL_RUN_MISMATCH = "dataset_run_mismatch"
+
+
+class ProbeSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    strategy: Literal["two_windows", "yearly"]
+    convention_times: tuple[str, ...]
+    truncation_detected: bool
+    depth_limited: bool
+    probe_sha256: str
+
+
+class MasterRefreshSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    snapshot_sha256: str
+    snapshot_date: date
+    changes_by_kind: dict[str, int]
+
+
+class BackfillSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    plan_sha256: str
+    plan_window_start: date
+    plan_window_end: date
+    windows_by_status: dict[str, int]
+    calls_by_ist_date: dict[str, int]
+    max_calls_one_day: int
+
+
+class CrossCheckSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str
+    accepted_total: int
+    totals_by_reason: dict[str, int]
+    rawness_counts: dict[str, int]
+    members_checked: int
+    members_not_fetched: int
+
+
+class DatasetSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    dataset_sha256: str
+    row_count: int
+    export_path: str
+
+
+class Part2Report(CaveatedResult):
+    """What the real-data stages left in the store. A section is None when its stage has not run."""
+
+    as_of: date
+    window_start: date
+    window_end: date
+    probe: ProbeSummary | None
+    master_refresh: MasterRefreshSummary | None
+    backfill: BackfillSummary | None
+    crosscheck: CrossCheckSummary | None
+    dataset: DatasetSummary | None
+    dataset_refusal_code: str | None
+    report_sha256: str
+
+
+def _have_tables(store: PilotDataStore, names: tuple[str, ...]) -> bool:
+    return all(store.table_exists(name) for name in names)
+
+
+def _probe_summary(store: PilotDataStore) -> ProbeSummary | None:
+    if not _have_tables(store, _BACKFILL_TABLES):
+        return None
+    record = latest_conclusive_probe(store)
+    if record is None:
+        return None
+    return ProbeSummary(
+        strategy=record.strategy, convention_times=record.allowed_times,
+        truncation_detected=record.truncation_detected, depth_limited=record.depth_limited,
+        probe_sha256=record.probe_sha256(),
+    )
+
+
+def _master_summary(store: PilotDataStore) -> MasterRefreshSummary | None:
+    if not _have_tables(store, _MASTER_TABLES):
+        return None
+    rows = store.query(
+        "SELECT snapshot_sha256, snapshot_date FROM security_master_snapshots WHERE snapshot_date_basis = 'relay_fetch' "
+        "ORDER BY snapshot_date DESC, ingested_at_utc DESC, snapshot_sha256 LIMIT 1"
+    )
+    if not rows:
+        return None
+    sha, day = rows[0]
+    changes = {
+        kind: int(count)
+        for kind, count in store.query(
+            "SELECT change_kind, count(*) FROM security_master_changes WHERE new_snapshot_sha256 = ? "
+            "GROUP BY change_kind ORDER BY change_kind",
+            [sha],
+        )
+    }
+    return MasterRefreshSummary(snapshot_sha256=sha, snapshot_date=day, changes_by_kind=changes)
+
+
+def _backfill_summary(store: PilotDataStore, workspace: Literal["india"]) -> BackfillSummary | None:
+    if not _have_tables(store, _BACKFILL_TABLES):
+        return None
+    try:
+        plan = load_plan(store)
+    except PilotDataError as exc:
+        if exc.code != "plan_missing":
+            raise
+        return None
+    # No relay source: status() reads the events and the ledger and never calls out.
+    counts = BackfillEngine(store, None, workspace=workspace).status(plan).counts
+    # Same rule as the engine's daily cap: a call the client refused before sending (`not_sent`) is not counted.
+    per_day = {
+        day.isoformat(): int(count)
+        for day, count in store.query(
+            "SELECT l.ist_date, count(*) FROM relay_call_ledger AS l WHERE l.workspace = ? "
+            "AND l.endpoint = 'historical' AND NOT EXISTS ("
+            "SELECT 1 FROM relay_call_outcomes AS o WHERE o.call_id = l.call_id AND o.outcome = 'not_sent') "
+            "GROUP BY l.ist_date ORDER BY l.ist_date",
+            [workspace],
+        )
+    }
+    return BackfillSummary(
+        plan_sha256=plan.plan_sha256, plan_window_start=plan.window_start, plan_window_end=plan.window_end,
+        windows_by_status=dict(counts), calls_by_ist_date=per_day, max_calls_one_day=max(per_day.values(), default=0),
+    )
+
+
+def _load_crosscheck(
+    store: PilotDataStore, run_id: str | None, *, as_of: date, window_start: date, window_end: date
+) -> CrossCheckReport | None:
+    """The named run, or the newest universe-wide run for this as-of and window. Never a different window's run."""
+    if not store.table_exists("crosscheck_runs"):
+        if run_id is not None:
+            raise PilotDataError("crosscheck_run_missing", "no cross-check run with that id")
+        return None
+    rows = store.query(
+        "SELECT run_id, result_json, result_sha256 FROM crosscheck_runs ORDER BY started_at_utc DESC, rowid DESC"
+    )
+    if run_id is not None:
+        rows = [row for row in rows if row[0] == run_id]
+        if not rows:
+            raise PilotDataError("crosscheck_run_missing", "no cross-check run with that id")
+    for _, result_json, result_sha256 in rows:
+        payload = json.loads(result_json)
+        if "members" not in payload:
+            if run_id is not None:
+                raise PilotDataError("crosscheck_run_unsupported", "run is not a universe-wide cross-check")
+            continue  # a single-member tracer run
+        found = CrossCheckReport.model_validate(payload)
+        if found.report_sha256 != result_sha256:
+            raise PilotDataError("crosscheck_record_corrupt", "a stored cross-check no longer matches its hash")
+        if (found.as_of, found.window_start, found.window_end) != (as_of, window_start, window_end):
+            if run_id is not None:
+                raise PilotDataError("crosscheck_window_mismatch", "that run covers a different as-of or window")
+            continue
+        return found
+    return None
+
+
+def _dataset_state(
+    check: CrossCheckReport | None, dataset_dir: Path | None, workspace: Literal["india"]
+) -> tuple[DatasetSummary | None, str | None]:
+    """Exactly one of the two is set: a verified dataset for this run, or the reason there is none."""
+    if check is None:
+        return None, REFUSAL_CROSSCHECK_MISSING
+    if check.rawness_counts.get("adjusted_detected", 0) > 0 or any(
+        m.rawness_overall == "adjusted_detected" for m in check.members
+    ):
+        return None, REFUSAL_ADJUSTED  # vendor-adjusted history is never published, whatever sits on disk
+    if dataset_dir is None:
+        return None, REFUSAL_NOT_BUILT
+    try:
+        manifest = verify_dataset(dataset_dir, workspace=workspace)
+    except PilotDataError as exc:
+        return None, exc.code
+    if manifest.crosscheck_run_id != check.run_id:
+        return None, REFUSAL_RUN_MISMATCH
+    return (
+        DatasetSummary(
+            dataset_sha256=manifest.dataset_sha256, row_count=manifest.row_count,
+            export_path=str(Path(dataset_dir).resolve()),
+        ),
+        None,
+    )
+
+
+def _part2_caveats(check: CrossCheckReport | None) -> tuple[Caveat, ...]:
+    checked = [m for m in check.members if m.status == "checked"] if check is not None else []
+    all_raw = bool(checked) and all(m.rawness_overall == "raw_confirmed" for m in checked)
+    return standard_caveats(*(() if all_raw else (BREEZE_RAW_UNVERIFIED_CAVEAT,)))
+
+
+def build_part2_report(
+    store: PilotDataStore,
+    *,
+    as_of: date,
+    window_start: date,
+    window_end: date,
+    crosscheck_run_id: str | None,
+    dataset_dir: Path | None,
+    workspace: Literal["india"],
+) -> Part2Report:
+    """Summarise probe, master refresh, backfill, cross-check and dataset from the store. Writes nothing."""
+    if workspace != store.workspace:
+        raise PilotDataError("workspace_mismatch", "workspace differs from the store workspace")
+    if window_start > window_end:
+        raise PilotDataError("window_invalid", "window_start is after window_end")
+    check = _load_crosscheck(
+        store, crosscheck_run_id, as_of=as_of, window_start=window_start, window_end=window_end
+    )
+    crosscheck = None
+    if check is not None:
+        crosscheck = CrossCheckSummary(
+            run_id=check.run_id, accepted_total=check.accepted_total, totals_by_reason=dict(check.totals_by_reason),
+            rawness_counts=dict(check.rawness_counts),
+            members_checked=sum(1 for m in check.members if m.status == "checked"),
+            members_not_fetched=sum(1 for m in check.members if m.status == "not_fetched"),
+        )
+    dataset, refusal = _dataset_state(check, dataset_dir, workspace)
+    caveats = _part2_caveats(check)
+    fields = {
+        "as_of": as_of, "window_start": window_start, "window_end": window_end,
+        "probe": _probe_summary(store), "master_refresh": _master_summary(store),
+        "backfill": _backfill_summary(store, workspace), "crosscheck": crosscheck, "dataset": dataset,
+        "dataset_refusal_code": refusal,
+    }
+    digest_input = {
+        key: (value.model_dump(mode="json") if isinstance(value, BaseModel) else
+              value.isoformat() if isinstance(value, date) else value)
+        for key, value in fields.items()
+    }
+    digest = canonical_sha256({"fields": digest_input, "caveats": [c.code for c in caveats]})
+    return Part2Report(workspace=workspace, caveats=caveats, report_sha256=digest, **fields)
+
+
+def write_part2_report(root: Path, report: Part2Report) -> Path:
+    return _write_json_report(root, "part2", report, report.as_of, report.report_sha256)
+
+
 def _caveat_payload() -> list[dict[str, str]]:
     return [caveat.model_dump() for caveat in standard_caveats(SURVEILLANCE_HISTORY_CAVEAT)]
 
 
+def _main_part2(args: argparse.Namespace) -> int:
+    try:
+        with PilotDataStore(args.root, workspace=args.workspace, read_only=True) as store:
+            report = build_part2_report(
+                store, as_of=args.as_of, window_start=args.window_start, window_end=args.window_end,
+                crosscheck_run_id=args.run_id, dataset_dir=args.dataset_dir, workspace=args.workspace,
+            )
+        path = write_part2_report(args.root, report)
+    except PilotDataError as exc:
+        caveats = [c.model_dump() for c in standard_caveats(BREEZE_RAW_UNVERIFIED_CAVEAT)]
+        print(json.dumps({"caveats": caveats, "error_code": exc.code, "error": str(exc)}, indent=2))
+        return 2
+    summary = {
+        "report_path": str(path), "report_sha256": report.report_sha256,
+        "probe_strategy": report.probe.strategy if report.probe else None,
+        "max_calls_one_day": report.backfill.max_calls_one_day if report.backfill else None,
+        "crosscheck_run_id": report.crosscheck.run_id if report.crosscheck else None,
+        "rawness_counts": report.crosscheck.rawness_counts if report.crosscheck else None,
+        "dataset_sha256": report.dataset.dataset_sha256 if report.dataset else None,
+        "dataset_refusal_code": report.dataset_refusal_code,
+    }
+    print(json.dumps({"caveats": [c.model_dump() for c in report.caveats], "summary": summary}, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="pilot_data.report", description="Part 1 report for the India pilot data.")
+    parser = argparse.ArgumentParser(prog="pilot_data.report", description="Part 1 and Part 2 reports for the India pilot data.")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("latest-session", "part1"):
+    for name in ("latest-session", "part1", "part2"):
         child = sub.add_parser(name)
         child.add_argument("--root", required=True, type=Path)
         child.add_argument("--workspace", required=True, choices=["india"])
-        if name == "part1":
+        if name in ("part1", "part2"):
             child.add_argument("--as-of", required=True, type=date.fromisoformat)
             child.add_argument("--window-start", required=True, type=date.fromisoformat)
+        if name == "part1":
             child.add_argument("--research-date", type=date.fromisoformat)
+        if name == "part2":
+            child.add_argument("--window-end", required=True, type=date.fromisoformat)
+            child.add_argument("--run-id")
+            child.add_argument("--dataset-dir", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "part2":
+        return _main_part2(args)
     try:
         with PilotDataStore(args.root, workspace=args.workspace) as store:
             if args.command == "latest-session":
