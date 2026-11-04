@@ -62,7 +62,7 @@ def test_heuristic_only_accepts_capitalised_tokens(message, expected):
     assert extract_ticker_from_text(message) == expected
 
 
-@pytest.mark.parametrize("abbr", ["P&L", "M&A", "R&D", "Q&A", "S&P"])
+@pytest.mark.parametrize("abbr", ["P&L", "M&A", "R&D", "Q&A", "S&P", "S&P500", "PNL"])
 def test_ampersand_abbreviations_are_not_tickers(abbr):
     assert extract_ticker_from_text(f"What is my {abbr} this week?") is None
     assert extract_ticker_from_text(f"{abbr} then buy TCS") == "TCS"

@@ -27,12 +27,11 @@ def test_market_endpoint():
         pytest.skip("NEWSDATA_API_KEY not set")
 
     url = "https://newsdata.io/api/1/market"
-    params = {
-        "apikey": api_key,
-        "removeduplicate": 0,
-        "excludefield": "ai_summary",
-    }
-    response = requests.get(url, params=params, timeout=30)
+    # The key goes in a header, never the URL: a failed request can echo its URL
+    # into the exception text, and pytest prints that.
+    params = {"removeduplicate": 0, "excludefield": "ai_summary"}
+    headers = {"X-ACCESS-KEY": api_key}
+    response = requests.get(url, params=params, headers=headers, timeout=30)
     assert response.status_code == 200, f"market endpoint returned {response.status_code}"
     assert isinstance(response.json().get("results", []), list)
 

@@ -54,3 +54,28 @@ def test_live_newsdata_modules_do_not_load_dotenv_at_import(module_name, test_na
             if isinstance(sub, ast.Call):
                 target = getattr(sub.func, "id", getattr(sub.func, "attr", ""))
                 assert target != "load_dotenv", f"{module_name} calls load_dotenv at module level"
+
+
+def test_the_live_market_test_keeps_the_key_out_of_the_url_and_error(monkeypatch):
+    # Calls the test body directly (the skipif mark does not apply), with no network:
+    # requests.get raises the way a failed connection does, echoing its URL.
+    import dotenv
+    import requests
+
+    canary = "CANARY-newsdata-key-7f3a"
+    monkeypatch.setenv("NEWSDATA_API_KEY", canary)
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
+    seen = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        seen.update(url=url, params=params or {}, headers=headers or {})
+        prepared = requests.Request("GET", url, params=params).prepare()
+        raise requests.ConnectionError(f"Max retries exceeded with url: {prepared.url}")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    module = importlib.import_module("test_newsdata_endpoint")
+    with pytest.raises(requests.ConnectionError) as excinfo:
+        module.test_market_endpoint()
+    assert canary not in str(excinfo.value)
+    assert canary not in seen["url"] and canary not in repr(seen["params"])
+    assert seen["headers"].get("X-ACCESS-KEY") == canary
