@@ -1181,7 +1181,11 @@ class ShadowPortfolio:
         return True
 
     def ambiguous_exit_isins(self) -> frozenset[str]:
-        """The held names whose open halve is still ambiguous right now. Read-only: it raises and writes nothing.
+        """The held names whose open halve is still ambiguous right now. Read-only once the latch file exists.
+
+        ``_state`` goes through ``LatchStore.load``, which starts the latch (and its lock file) when none exists, or writes a
+        terminal ``state_corrupt`` abort when the ledger holds fills. Callers with no latch file must not ask: the release
+        runtime refuses ``latch_missing`` first.
 
         ``policy.resume`` clears an ``ambiguous_exit_fill`` pause only for a name not in this set. The ambiguity ends when
         the name is no longer held (the exit closes with the flat holding) or when its halve is no longer open (an

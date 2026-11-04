@@ -571,13 +571,21 @@ class ProductionRuntime:
 
 @dataclass
 class ReleaseRuntime:
-    """The portfolio alone, for ``resume``, ``release-halt`` and ``release-corporate-action``. No relay, no store writes."""
+    """The portfolio alone, for ``resume``, ``release-halt`` and ``release-corporate-action``. No relay, no store writes.
+
+    ``latch_present`` is what phase 1 saw on disk. A release command is refused ``latch_missing`` without one. A ``resume``
+    of an ordinary pause builds without one, but the portfolio's ambiguous-exit read goes through ``LatchStore.load``, which
+    creates a latch (or writes a terminal ``state_corrupt`` abort when the ledger holds fills). So with no latch file this
+    runtime never asks the portfolio: it refuses ``latch_missing`` first."""
 
     portfolio: ShadowPortfolio
     evidence: EvidenceStore
+    latch_present: bool = True
     _closers: list[Callable[[], None]] = field(default_factory=list, repr=False)
 
     def ambiguous_exit_isins(self) -> frozenset[str]:
+        if not self.latch_present:
+            raise _refuse("latch_missing")
         return self.portfolio.ambiguous_exit_isins()
 
     def shutdown(self) -> None:
@@ -672,7 +680,11 @@ def _build_runner(
 
 
 def release_runtime(args: argparse.Namespace, *, clock: Optional[Callable[[], datetime]] = None) -> ReleaseRuntime:
-    """Phases 1 and 3 for resume and the release commands: no relay, no calendar, no session-store write."""
+    """Phases 1 and 3 for resume and the release commands: no relay, no calendar, no session-store write.
+
+    The release commands are refused ``latch_missing`` when no latch file exists (``LatchStore.load`` would start one). A
+    ``resume`` builds without one so an ordinary pause can still be cleared, and the runtime then refuses the one read
+    that would load the latch (see ``ReleaseRuntime``)."""
 
     clock = clock or _utc_now
     pre = cached_preflight(args, relay=False, calendar=False)
@@ -680,7 +692,7 @@ def release_runtime(args: argparse.Namespace, *, clock: Optional[Callable[[], da
         latch = read_state(pre.latch_path)
     except StateUnreadable:
         latch = True  # an unreadable latch is the portfolio's to record (``state_corrupt``), not a missing one
-    if latch is None and args.command != "resume":  # a resume of an ordinary pause needs no latch; the policy asks for one when it must
+    if latch is None and args.command != "resume":  # a resume of an ordinary pause needs no latch; see ReleaseRuntime
         raise _refuse("latch_missing")
     closers: list[Callable[[], None]] = []
     try:
@@ -695,7 +707,7 @@ def release_runtime(args: argparse.Namespace, *, clock: Optional[Callable[[], da
         for closer in reversed(closers):
             closer()
         raise
-    return ReleaseRuntime(portfolio=portfolio, evidence=evidence, _closers=closers)
+    return ReleaseRuntime(portfolio=portfolio, evidence=evidence, latch_present=latch is not None, _closers=closers)
 
 
 __all__ = [

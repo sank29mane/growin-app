@@ -929,8 +929,12 @@ def _built(monkeypatch):
     return built
 
 
-def test_resume_builds_the_release_runtime_and_clears_both_pauses_once_nothing_is_held(env, capsys, monkeypatch):
+def test_resume_builds_the_release_runtime_and_clears_both_pauses_once_nothing_is_held(
+    env, capsys, monkeypatch, code_is_symbol
+):
     opened(env, capsys)
+    go(env, capsys, "decide")  # the decide starts the latch the ambiguous-exit read needs
+    assert env.latch_path().exists()
     pauses = _two_pauses(env)
     built = _built(monkeypatch)
     code = cli.main(env.argv("resume", "--reason", "reviewed the fill"))
@@ -1064,6 +1068,43 @@ def release_driver(monkeypatch, seeded, admission_clock):  # noqa: F811
         lambda report: (tuple(Instrument(isin, symbol, symbol) for symbol, isin in rc.UNIVERSE), {}),
     )
     monkeypatch.setattr(runtime_module, "_run_start", lambda root, run_id, window_start: (rc.S, {}))
+
+
+def _kinds(w):
+    return [r["kind"] for r in read_records(w.root, w.run_id)]
+
+
+@pytest.mark.parametrize("holding", [False, True], ids=["no_fills", "ledger_has_fills"])
+def test_a_resume_with_no_latch_clears_an_ordinary_pause_and_never_creates_the_latch(release_driver, tmp_path, holding):
+    """The relaxed latch rule is for an ordinary pause only, and it still writes no start state."""
+
+    w = rc.make_world(tmp_path, holding=holding)
+    w.raise_event("stale_data", "a stale read")
+    assert not w.latch_path.exists()
+    code, out = rc.call(w, "resume", "--reason", "reviewed the read")
+    assert code == 0 and len(out["resumed"]) == 1 and out["skipped"] == []
+    assert not w.latch_path.exists() and not w.lock_path.exists()
+    assert w.open_pauses() == [] and "abort" not in _kinds(w)
+
+
+@pytest.mark.parametrize("holding", [False, True], ids=["no_fills", "ledger_has_fills"])
+def test_a_resume_with_no_latch_and_an_ambiguous_fill_pause_is_refused_latch_missing_and_writes_nothing(
+    release_driver, tmp_path, holding
+):
+    """The ambiguous-exit read goes through ``LatchStore.load``: with no latch it would start one, and with fills in the
+    ledger it would write a terminal ``state_corrupt`` abort. The resume is refused before the portfolio is asked."""
+
+    w = rc.make_world(tmp_path, holding=holding)
+    w.raise_event("stale_data", "a stale read")
+    w.raise_event(policy.AMBIGUOUS_EXIT_FILL, "unresolved fill", isin=rc.RELIANCE)
+    pauses = w.open_pauses()
+    before = tree_state(w.root)
+    assert not w.latch_path.exists()
+    code, out = rc.call(w, "resume", "--reason", "reviewed the fill")
+    assert (code, out) == (1, {"refused": "latch_missing"})
+    assert tree_state(w.root) == before and w.open_pauses() == pauses  # nothing cleared, nothing appended
+    assert not w.latch_path.exists() and not w.lock_path.exists()
+    assert "abort" not in _kinds(w) and "resume" not in _kinds(w)
 
 
 @pytest.mark.parametrize("row", RELEASE_ROWS, ids=[name[5:50] for name in RELEASE_ROWS])
