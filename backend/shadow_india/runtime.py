@@ -36,7 +36,7 @@ from brokers.breeze_gateway.config import ConfigError, load_gateway_config
 from brokers.breeze_gateway.errors import OrdersKeyRouteUnavailable, TunnelError, UpstreamError
 from brokers.breeze_gateway.india_quote import QuoteUnavailable, RelayQuoteSource, parse_quote
 from brokers.breeze_gateway.orders import OrdersClient, OrdersProtocolError, RelayLink
-from execution.india_guard import IndiaAdmissionGuard, IndiaQuoteEvidence
+from execution.india_guard import IndiaAdmissionGuard, IndiaInstrumentMap, IndiaQuoteEvidence
 from execution.ledger import SimulationProbeRefused, probe_simulation_ledger
 from execution.models import Workspace
 from pilot_data.bhavcopy import NON_REGULAR_SERIES, primary_bars_on
@@ -659,7 +659,9 @@ def _build_runner(
         closers.append(store.close)
         pins = LiveTablePins()
         inputs = _inputs(pre, store, pins)
-        guard = IndiaAdmissionGuard.from_config(pre.exec_config, ledger, clock=clock)
+        guard = IndiaAdmissionGuard.from_config(
+            pre.exec_config, ledger, clock=clock, instruments=IndiaInstrumentMap.from_instruments(pre.instruments)
+        )
         identity = VmIdentity(guard.limits_sha256, pre.strategy.params_sha256, pre.runtime.vm_key_id)
         reference = SessionStoreReference(store, pre.members, pre.strategy.params.adv_window)
         ports = RunnerPorts(
@@ -701,7 +703,9 @@ def release_runtime(args: argparse.Namespace, *, clock: Optional[Callable[[], da
         evidence = EvidenceStore.open(
             pre.root, run_id=pre.run_id, session_id=session_id_for(pre.session), clock=clock, forbidden=pre.literals
         )
-        guard = IndiaAdmissionGuard.from_config(pre.exec_config, ledger, clock=clock)
+        guard = IndiaAdmissionGuard.from_config(
+            pre.exec_config, ledger, clock=clock, instruments=IndiaInstrumentMap.from_instruments(pre.instruments)
+        )
         portfolio = ShadowPortfolio(ledger, guard.store, evidence, pre.instruments)
     except BaseException:
         for closer in reversed(closers):

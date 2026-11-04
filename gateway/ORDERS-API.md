@@ -216,6 +216,11 @@ the same on both sides (lower case), so a Mac refusal and a VM refusal of one or
   `max_slippage_bps`, or no usable book price for the side; upper case, as `rules.slippage_check` names them),
   `intent_invalid` (not a whole-share LIMIT order with a limit price) and `india_limits_unavailable` (the
   service has no India guard; no admission, challenge or claim of an India BUY is possible without one).
+- **Mac only, new with the stock-code binding:** `instrument_unmapped` (the guard holds no binding of the order's
+  `NSE:CASH:<symbol>` ticker to its Breeze stock code and ISIN, or no map at all). The quote and the VM intent are
+  keyed by the Breeze stock code, which is not always the NSE symbol (CANBK trades as CANBAN), so the Mac checks
+  the quote against the mapped code and mapped ISIN and never substitutes the symbol. The VM needs no change: it
+  already compares `intent.stock_code` with the quote's.
 - **Rechecks.** A pending India BUY is run through the same rules again at challenge creation and at claim,
   with a fresh quote (at most 30 s old), the current latches and latch file, the 15:10 IST cutoff and both
   caps without the order's own reservation. A failed recheck refuses with the O6 reason and releases the

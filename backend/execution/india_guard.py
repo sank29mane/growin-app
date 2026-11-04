@@ -14,6 +14,10 @@ Reason names are the ``growin-orders/1`` O6 names the VM uses (``capital_cap``,
 ``SLIPPAGE_LIMIT`` and the three Mac-only names below are documented in
 ``gateway/ORDERS-API.md`` under "Mac admission codes".
 
+The quote and the VM intent are keyed by the Breeze stock code, which is not always the NSE symbol, so the
+guard resolves the order's ticker through an ``IndiaInstrumentMap`` (stock code and ISIN) and checks the quote
+against that. No map, or no entry, is ``instrument_unmapped``; the symbol is never a stand-in.
+
 What the Mac cannot know and therefore does not decide: the VM kill switch (the VM refuses
 on ``kill_switch``), ``mac_halt`` and ``account_mismatch`` (VM-derived; wired in 63-05).
 Those inputs are passed as "clear" here, which is never less strict than the VM, because
@@ -25,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from risk_india import rules
 from risk_india.state import (
@@ -44,6 +48,10 @@ INTENT_INVALID = "intent_invalid"
 INDIA_LIMITS_UNAVAILABLE = "india_limits_unavailable"
 ACCOUNT_READ_FAILED = "account_read_failed"  # an O6 name; the Mac uses it for its own ledger read
 QUOTE_UNAVAILABLE = "quote_unavailable"
+# Mac only: the guard holds no (or an ambiguous) binding of this ticker to its Breeze stock code and ISIN.
+# It is not ``instrument_unsupported`` (the VM's word for "not a tradable cash name"): the name may be
+# tradable, the Mac just cannot say which quote belongs to it, so it never guesses one from the symbol.
+INSTRUMENT_UNMAPPED = "instrument_unmapped"
 
 DEFAULT_MAX_QUOTE_AGE_SECONDS = 30
 _TICKER_PREFIX = "NSE:CASH:"
@@ -76,6 +84,67 @@ class IndiaQuoteEvidence:
             raise ValueError("quote observation time must be timezone-aware")
 
 
+@dataclass(frozen=True)
+class IndiaInstrumentBinding:
+    """One ticker's Breeze stock code and, when the caller knows it, its ISIN.
+
+    ``isin`` is None only for the explicit ``symbol_is_stock_code`` map (see there).
+    """
+
+    stock_code: str
+    isin: Optional[str]
+
+
+class IndiaInstrumentMap:
+    """The caller's own record of ``NSE:CASH:<symbol>`` to (Breeze stock code, ISIN).
+
+    The order's symbol is the NSE trading symbol and the quote and the VM intent are keyed by the Breeze
+    stock code. The two differ for many names (CANBK trades as CANBAN at Breeze), so the guard must ask this
+    map for the code instead of reading it off the symbol. The map is built once from the caller's own
+    instrument list, never from a quote, so a quote cannot vouch for itself. Conflicting entries (one ticker,
+    code or ISIN twice) refuse the whole map.
+    """
+
+    def __init__(self, bindings: Mapping[str, IndiaInstrumentBinding], *, symbol_is_code: bool = False) -> None:
+        self._bindings = dict(bindings)
+        self._symbol_is_code = symbol_is_code
+
+    @classmethod
+    def from_instruments(cls, instruments: Iterable[Any]) -> "IndiaInstrumentMap":
+        """Build from objects with ``symbol``, ``stock_code`` and ``isin`` (``shadow_india.portfolio.Instrument``)."""
+
+        bound: dict[str, IndiaInstrumentBinding] = {}
+        codes: set[str] = set()
+        isins: set[str] = set()
+        for item in instruments:
+            symbol, code, isin = item.symbol, item.stock_code, item.isin
+            if not all(isinstance(v, str) and v for v in (symbol, code, isin)):
+                raise rules.RiskConfigError("an instrument needs a symbol, a stock code and an ISIN")
+            ticker = _TICKER_PREFIX + symbol
+            if ticker in bound or code in codes or isin in isins:
+                raise rules.RiskConfigError("instrument mapping conflict")
+            bound[ticker] = IndiaInstrumentBinding(code, isin)
+            codes.add(code)
+            isins.add(isin)
+        return cls(bound)
+
+    @classmethod
+    def symbol_is_stock_code(cls) -> "IndiaInstrumentMap":
+        """Every ticker's code is its symbol. For callers whose own relay path already fetches the quote and
+        builds the VM intent with the symbol as the code (the app-hosted relay mint, ``OrderRelayMinter``).
+        The ISIN is then unknown here (the VM binds it from its own master, P-21), so the quote's is used."""
+
+        return cls({}, symbol_is_code=True)
+
+    def resolve(self, ticker: str) -> Optional[IndiaInstrumentBinding]:
+        found = self._bindings.get(ticker)
+        if found is not None:
+            return found
+        if self._symbol_is_code and ticker.startswith(_TICKER_PREFIX) and len(ticker) > len(_TICKER_PREFIX):
+            return IndiaInstrumentBinding(ticker[len(_TICKER_PREFIX) :], None)
+        return None
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -95,7 +164,10 @@ class IndiaAdmissionGuard:
         store: LatchStore,
         clock: Callable[[], datetime] = _utc_now,
         max_quote_age_seconds: int = DEFAULT_MAX_QUOTE_AGE_SECONDS,
+        instruments: Optional[IndiaInstrumentMap] = None,
     ) -> None:
+        if instruments is not None and not isinstance(instruments, IndiaInstrumentMap):
+            raise rules.RiskConfigError("instruments must be an IndiaInstrumentMap")
         if not isinstance(max_slippage_bps, Decimal) or not max_slippage_bps > 0:
             raise rules.RiskConfigError("max_slippage_bps must be a positive Decimal")
         if max_quote_age_seconds <= 0:
@@ -105,6 +177,8 @@ class IndiaAdmissionGuard:
         self._store = store
         self._clock = clock
         self._max_quote_age_seconds = max_quote_age_seconds
+        # None means no binding is known: every India order is denied ``instrument_unmapped``.
+        self._instruments = instruments
 
     @classmethod
     def from_config(
@@ -113,6 +187,7 @@ class IndiaAdmissionGuard:
         ledger: ExecutionLedger,
         *,
         clock: Callable[[], datetime] = _utc_now,
+        instruments: Optional[IndiaInstrumentMap] = None,
     ) -> "IndiaAdmissionGuard":
         """Build the guard from a ``WorkspaceConfig`` loaded with ``require_india_execution``."""
 
@@ -123,6 +198,7 @@ class IndiaAdmissionGuard:
             max_slippage_bps=config.india_execution.max_slippage_bps,
             store=store,
             clock=clock,
+            instruments=instruments,
         )
 
     @property
@@ -184,7 +260,11 @@ class IndiaAdmissionGuard:
             raise IndiaLimitDenied(INTENT_INVALID)
         if not intent.ticker.startswith(_TICKER_PREFIX) or len(intent.ticker) == len(_TICKER_PREFIX):
             raise IndiaLimitDenied("instrument_unsupported")
-        symbol = intent.ticker[len(_TICKER_PREFIX) :]
+        # The quote and the VM intent are keyed by the Breeze stock code, which is not always the NSE symbol.
+        # No binding (or no map) is a refusal; the symbol is never used as a stand-in.
+        binding = self._instruments.resolve(intent.ticker) if self._instruments is not None else None
+        if binding is None:
+            raise IndiaLimitDenied(INSTRUMENT_UNMAPPED)
 
         latch = None
         if buy:
@@ -198,8 +278,13 @@ class IndiaAdmissionGuard:
             quote = self._usable_quote(evidence, now)
             # The Mac ledger is keyed by execution ticker. The order's own position takes the
             # quote's ISIN so ``rules`` can match it; every other position keeps its ticker as
-            # an opaque key (only the cap sums read those).
-            own_key = quote.isin if quote is not None else ""
+            # an opaque key (only the cap sums read those). The order's ISIN is the mapped instrument's, so
+            # ``rules`` refuses a quote of another ISIN. Only the symbol-is-code map has no ISIN and takes
+            # the quote's (the VM binds it from its master).
+            if binding.isin is not None:
+                own_key = binding.isin
+            else:
+                own_key = quote.isin if quote is not None else ""
             holdings = tuple(
                 rules.Holding(own_key if ticker == intent.ticker else ticker, _whole(quantity), cost)
                 for ticker, quantity, cost in view.positions
@@ -218,7 +303,7 @@ class IndiaAdmissionGuard:
             )
             order = rules.OrderRequest(
                 "buy" if buy else "sell",
-                symbol,
+                binding.stock_code,
                 own_key,
                 int(quantity),
                 intent.limit_price,
@@ -298,8 +383,11 @@ __all__ = [
     "ACCOUNT_READ_FAILED",
     "DEFAULT_MAX_QUOTE_AGE_SECONDS",
     "INDIA_LIMITS_UNAVAILABLE",
+    "INSTRUMENT_UNMAPPED",
     "INTENT_INVALID",
     "IndiaAdmissionGuard",
+    "IndiaInstrumentBinding",
+    "IndiaInstrumentMap",
     "IndiaLimitDenied",
     "IndiaQuoteEvidence",
     "QUOTE_UNAVAILABLE",

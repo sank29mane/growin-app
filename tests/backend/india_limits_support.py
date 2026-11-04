@@ -16,7 +16,7 @@ from typing import Any
 
 from regime_testkit import bound_admit, gated
 from execution import ExecutionLedger, ExecutionService, OrderIntent, PaperDispatcher
-from execution.india_guard import IndiaAdmissionGuard, IndiaQuoteEvidence
+from execution.india_guard import IndiaAdmissionGuard, IndiaInstrumentMap, IndiaQuoteEvidence
 from private_config import load_workspace_config
 from risk_india import rules
 
@@ -86,10 +86,23 @@ class MutableClock:
         return self.now
 
 
-def make_guard(ledger: ExecutionLedger, private: Path, *, now: Any = NOW) -> IndiaAdmissionGuard:
+def make_guard(
+    ledger: ExecutionLedger,
+    private: Path,
+    *,
+    now: Any = NOW,
+    instruments: IndiaInstrumentMap | None = None,
+) -> IndiaAdmissionGuard:
+    """Default map is the app-hosted relay path's (symbol is the code), which is what these tests model."""
+
     config = load_workspace_config(private, "india", require_india_execution=True)
     clock = now if callable(now) else (lambda: now)
-    return IndiaAdmissionGuard.from_config(config, ledger, clock=clock)
+    return IndiaAdmissionGuard.from_config(
+        config,
+        ledger,
+        clock=clock,
+        instruments=instruments if instruments is not None else IndiaInstrumentMap.symbol_is_stock_code(),
+    )
 
 
 def make_service(
