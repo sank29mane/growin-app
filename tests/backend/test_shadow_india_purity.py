@@ -10,6 +10,10 @@ Rules:
 3. ``backend/execution/*`` is imported only by ``admission.py`` and ``runner.py``.
 4. Pure modules (everything but ``admission.py``, ``runner.py`` and ``__main__.py``) have no subprocess, no
    randomness, no dynamic import or eval, no ``sys.modules``; ``policy.py`` also has no clock at all.
+5. ``vm_replay.py`` (64-05 Task 2b) alone may load the recorded VM build from a checkout by path: ``importlib.util``,
+   ``sys.modules`` and the ``gateway_vm`` directory name as a string. It stays a pure module in every other respect:
+   no network, no relay client, no ``execution`` import, no static gateway import, no ``import_module``, ``exec``,
+   ``eval`` or ``__import__``, no subprocess, no randomness.
 
 Plants below are regression cases for the scanner itself.
 """
@@ -35,6 +39,11 @@ DYNAMIC_NAMES = {"importlib", "__import__", "import_module", "exec", "eval", "co
 EXECUTION_ALLOWED = {"admission.py", "runner.py"}
 EDGE_FILES = {"admission.py", "runner.py", "__main__.py"}
 NO_CLOCK_FILES = {"policy.py"}
+# The one module that loads another tree's code by path (the D-23 replay of the recorded VM build). Narrow on purpose:
+# only these importlib modules, the Name ``importlib`` they need, ``sys.modules`` and the gateway directory name.
+LOADER_FILES = {"vm_replay.py"}
+LOADER_IMPORTLIB = {"importlib", "importlib.util"}
+LOADER_NAMES = {"importlib"}
 
 
 def _norm(name: str) -> str:
@@ -92,9 +101,9 @@ def violations(source: str, filename: str) -> list[str]:
                 found.append(f"banned import {dotted} in a pure module")
             if filename in NO_CLOCK_FILES and root in CLOCK_ROOTS:
                 found.append(f"clock import {dotted} in {filename}")
-            if root == "importlib":
+            if root == "importlib" and not (filename in LOADER_FILES and dotted in LOADER_IMPORTLIB):
                 found.append(f"dynamic import {dotted}")
-        if isinstance(node, ast.Name) and node.id in DYNAMIC_NAMES:
+        if isinstance(node, ast.Name) and node.id in DYNAMIC_NAMES and not (filename in LOADER_FILES and node.id in LOADER_NAMES):
             found.append(f"dynamic or eval name {node.id}")
         if isinstance(node, ast.Attribute):
             builtins_compile = (
@@ -102,7 +111,7 @@ def violations(source: str, filename: str) -> list[str]:
             )  # ``re.compile`` is ordinary; only the builtin is an eval route
             if (node.attr in DYNAMIC_NAMES and node.attr != "compile") or builtins_compile:
                 found.append(f"dynamic or eval attribute {node.attr}")
-            if node.attr == "modules" and isinstance(node.value, ast.Name) and node.value.id == "sys":
+            if node.attr == "modules" and isinstance(node.value, ast.Name) and node.value.id == "sys" and filename not in LOADER_FILES:
                 found.append("sys.modules")
             if filename in NO_CLOCK_FILES and node.attr in {"now", "utcnow", "today", "time", "monotonic", "sleep"}:
                 found.append(f"clock call .{node.attr} in {filename}")
@@ -113,7 +122,8 @@ def violations(source: str, filename: str) -> list[str]:
             ):
                 found.append(f"reflection {node.func.id}")
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value.split(".")[0] in ({BROKER_SDK} | GATEWAY_ROOTS | NETWORK_ROOTS) and node.value != "":
+            named = {BROKER_SDK} | NETWORK_ROOTS | (set() if filename in LOADER_FILES else GATEWAY_ROOTS)
+            if node.value.split(".")[0] in named and node.value != "":
                 found.append(f"module named by a string {node.value!r}")
     return found
 
@@ -203,6 +213,35 @@ PLANTS = [
     ("x = now.now()", "policy.py", "clock call"),
     ("x = 'socket'", "evidence.py", "named by a string"),
     (f"x = '{BROKER_SDK}'", "policy.py", "named by a string"),
+    # the loader exemption is for vm_replay.py only, and only for what it needs to load a build by path
+    ("import importlib.util", "evidence.py", "dynamic import"),
+    ("import importlib.util", "admission.py", "dynamic import"),
+    ("import importlib.util", "policy.py", "dynamic import"),
+    ("import sys\nsys.modules['x']", "admission.py", "sys.modules"),
+    ("x = 'gateway_vm'", "evidence.py", "named by a string"),
+    ("x = 'gateway_vm'", "runner.py", "named by a string"),
+    ("import importlib\nimportlib.util", "evidence.py", "dynamic or eval name importlib"),
+    ("from importlib import import_module", "vm_replay.py", "dynamic import"),
+    ("from importlib import machinery", "vm_replay.py", "dynamic import"),
+    ("import importlib\nimportlib.import_module('x')", "vm_replay.py", "dynamic or eval attribute import_module"),
+    ("exec('pass')", "vm_replay.py", "dynamic or eval name exec"),
+    ("eval('1')", "vm_replay.py", "dynamic or eval name eval"),
+    ("m = __import__('x')", "vm_replay.py", "dynamic or eval name __import__"),
+    ("import gateway_vm.orders.limits", "vm_replay.py", "gateway import"),
+    ("from gateway_vm.orders import limits", "vm_replay.py", "gateway import"),
+    ("from gateway.vm.gateway_vm.orders import limits", "vm_replay.py", "gateway import"),
+    ("import socket", "vm_replay.py", "network import"),
+    ("import httpx", "vm_replay.py", "network import"),
+    ("import requests", "vm_replay.py", "network import"),
+    ("from urllib.request import urlopen", "vm_replay.py", "network import"),
+    ("from brokers.breeze_gateway.client import RelayClient\nimport socket", "vm_replay.py", "network import"),
+    ("x = 'socket'", "vm_replay.py", "named by a string"),
+    ("from execution.ledger import ExecutionLedger", "vm_replay.py", "execution import"),
+    ("from ..execution import ledger", "vm_replay.py", "execution import"),
+    ("import subprocess", "vm_replay.py", "banned import"),
+    ("import random", "vm_replay.py", "banned import"),
+    (f"import {BROKER_SDK}", "vm_replay.py", "broker sdk"),
+    ("getattr(os, 'modules')", "vm_replay.py", "reflection"),
 ]
 
 
@@ -223,6 +262,12 @@ CLEAN = [
     ("from ..execution import ExecutionLedger", "runner.py"),
     ("import os, fcntl, hashlib, json, re\nre.compile('x')", "evidence.py"),
     ("from decimal import Decimal", "policy.py"),
+    # what vm_replay.py needs to load the recorded build by path
+    ("import importlib.util", "vm_replay.py"),
+    ("from importlib import util", "vm_replay.py"),
+    ("import sys\nsys.modules['x'] = 1\nsys.modules.pop('x')", "vm_replay.py"),
+    ("p = 'gateway_vm'", "vm_replay.py"),
+    ("import importlib.util\nspec = importlib.util.spec_from_file_location('a', 'b')", "vm_replay.py"),
 ]
 
 

@@ -1,0 +1,1036 @@
+"""Offline replay of the shadow portfolio through the VM's own risk code (64-05 Task 2b, D-23, D-24).
+
+D-06 keeps the Mac shadow portfolio apart from broker holdings, so the VM never sees it. D-23 closes that gap
+offline: for every intent of a session, rebuild the shadow portfolio as it stood at that decision from the
+evidence, hand it to ``gateway_vm.orders.limits.evaluate`` loaded from a checkout of the deployed build, and
+require the VM's verdict to agree with the verdict the Mac recorded. Nothing is sent anywhere. This module builds
+no relay client and no HTTP client, and the test suite runs it under a network sentinel.
+
+What the replay refuses (typed ``ReplayRefused``, nothing written):
+
+- ``replay_build_mismatch``: no recorded build identity, the checkout's commit is not the recorded one, the file
+  hashes under ``orders/`` differ from the recorded ones, the code cannot be loaded, or the public surface the
+  replay calls (``evaluate``'s signature, the dataclass fields it builds) is not the one this file pins. The
+  replay never adapts to a changed surface and never falls back to the working tree;
+- ``replay_limits_mismatch``: the limits values supplied for the session do not hash to the limits hash the
+  session recorded. No default and no working-tree limits file is ever read;
+- ``replay_pins_missing`` / ``replay_pins_invalid``: the pinned quote or tick reference of an intent is absent,
+  or the pins document is malformed. Evidence holds neither the quote circuits nor the build identity today, so
+  they arrive as a hashed pins document;
+- ``replay_evidence_invalid`` / ``replay_state_ambiguous``: the evidence cannot be folded into one portfolio.
+
+What the replay records (``SessionReplay``): the build and limits hashes, the intents compared and the verdict.
+The first disagreement stops the session, is kept with both verdicts, opens a defect and pauses the run through
+the ``ReplaySink`` port. A kill switch code in a replay verdict is a replay defect, never a divergence: the
+replay asks what the VM would decide with the kill switch open, because the live flag stays blocked during shadow
+and would otherwise refuse every intent first.
+
+Claim boundary (D-06): the evidence is "Mac simulation plus separately tested VM guards".
+
+Pure over its inputs: no clock, no network, no subprocess, no randomness. It reads the checkout it is pointed at
+and nothing else.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import importlib.util
+import inspect
+import itertools
+import json
+import re
+import sys
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any, Mapping, Protocol, Sequence
+
+D06_LABEL = "Mac simulation plus separately tested VM guards"
+
+PINS_SCHEMA = "growin-vm-replay-pins/1"
+
+# Refusal and defect codes. Stable, and none carries a value.
+BUILD_MISMATCH = "replay_build_mismatch"
+LIMITS_MISMATCH = "replay_limits_mismatch"
+PINS_MISSING = "replay_pins_missing"
+PINS_INVALID = "replay_pins_invalid"
+EVIDENCE_INVALID = "replay_evidence_invalid"
+STATE_AMBIGUOUS = "replay_state_ambiguous"
+KILL_SWITCH_IN_VERDICT = "replay_kill_switch_in_verdict"
+DIVERGENCE = "replay_divergence"
+DAY_MISSING = "replay_day_missing"
+BUILD_HASH_MIXED = "replay_build_hash_mixed"
+SESSION_REFUSED = "replay_session_refused"
+
+PASS = "PASS"
+FAIL = "FAIL"
+
+# Mac verdicts.
+ADMITTED = "admitted"
+DENIED = "denied"
+NO_DECISION = "none"
+
+# The kill switch is asked open (module docstring). ``evaluate`` appends ``kill_switch`` first whenever this is
+# false, which would hide every portfolio rule behind one code.
+REPLAY_KILL_ENABLED = True
+KILL_SWITCH = "kill_switch"
+
+# The pinned code map: the Mac reason code to the VM reason code it must meet. These are the names ORDERS-API
+# "Mac admission codes" lists as shared with O6, spelled the same on both sides. A Mac code that is not here
+# (the P-16 slippage codes, ``intent_invalid``, ``india_limits_unavailable``, a cash refusal) has no VM
+# counterpart, so the replay cannot call the two verdicts equal: an unmapped code is a divergence (D-23).
+MAC_TO_VM_CODE: Mapping[str, str] = {
+    name: name
+    for name in (
+        "capital_cap",
+        "per_position_cap",
+        "collar",
+        "circuit_band",
+        "off_tick",
+        "isin_mismatch",
+        "instrument_unsupported",
+        "sell_exceeds_holding",
+        "halt_latch",
+        "pilot_ended",
+        "stop_open",
+        "session_closed",
+        "quote_unavailable",
+        "tick_reference_unavailable",
+    )
+}
+
+# The surface of the recorded build this file calls. A difference is ``replay_build_mismatch``.
+EVALUATE_PARAMETERS: tuple[tuple[str, str], ...] = (
+    ("limits", "POSITIONAL_OR_KEYWORD"),
+    ("flags", "POSITIONAL_OR_KEYWORD"),
+    ("account", "POSITIONAL_OR_KEYWORD"),
+    ("quote", "POSITIONAL_OR_KEYWORD"),
+    ("now_ist", "POSITIONAL_OR_KEYWORD"),
+    ("intent", "POSITIONAL_OR_KEYWORD"),
+    ("kill_enabled", "KEYWORD_ONLY"),
+    ("tick_reference", "KEYWORD_ONLY"),
+    ("tick_table", "KEYWORD_ONLY"),
+)
+DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = {
+    "Intent": (
+        "intent_id", "proposal_id", "workspace", "broker", "mode", "exchange", "product", "order_type", "validity",
+        "side", "stock_code", "isin", "quantity", "limit_price", "reason", "batch_id", "limits_sha256",
+        "params_sha256", "key_id",
+    ),
+    "Quote": (
+        "stock_code", "isin", "series", "ltp", "lower_circuit", "upper_circuit", "previous_close", "session_date",
+    ),
+    "RiskFlags": ("halt", "ended", "mac_halt", "account_mismatch", "stops", "ledger_cost"),
+    "AccountSnapshot": ("holdings", "open_orders", "trades"),
+    "Holding": ("isin", "quantity", "cost"),
+    "OpenOrder": ("isin", "side", "quantity", "limit_price"),
+    "Limits": (
+        "capital_cap", "per_position_cap", "drawdown_halt", "drawdown_flatten", "position_stop",
+        "fat_finger_collar", "sha256",
+    ),
+}
+LIMIT_KEYS: tuple[str, ...] = (
+    "schema_version", "workspace", "currency", "capital_cap", "per_position_cap", "drawdown_halt",
+    "drawdown_flatten", "position_stop", "fat_finger_collar",
+)
+
+# ``evaluate`` reads none of these three. They stay placeholders so the Intent is whole.
+_UNUSED_HEX = "0" * 64
+
+_HEX40 = re.compile(r"^[0-9a-f]{40}\Z")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
+_SOURCE_PACKAGE = "gateway_vm"
+_ORDERS_DIR = "orders"
+_LOAD_ORDER = ("intent", "challenge", "limits")
+_load_counter = itertools.count(1)
+_PRIVATE_ROOT = Path(__file__).resolve().parents[2] / "private"  # the repo's private/ is never read
+
+
+class ReplayRefused(Exception):
+    """The replay will not run. ``code`` is stable and carries no value; nothing was written."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+# --- pins ------------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BuildIdentity:
+    """The deployed VM build the session recorded (OI-9): the commit and the hash of every file under ``orders/``."""
+
+    commit: str
+    orders_sha256: Mapping[str, str]
+
+    @property
+    def digest(self) -> str:
+        return _sha256_json({"commit": self.commit, "orders": dict(sorted(self.orders_sha256.items()))})
+
+
+@dataclass(frozen=True)
+class QuotePin:
+    ltp: Decimal
+    lower_circuit: Decimal
+    upper_circuit: Decimal
+    previous_close: Decimal
+    series: str | None = None
+    session_date: date | None = None  # absent: the session date of the decision
+
+
+@dataclass(frozen=True)
+class IntentPin:
+    quote: QuotePin
+    tick_reference: Decimal | None  # None is a recorded "the port could not supply it", not a missing pin
+
+
+@dataclass(frozen=True)
+class SessionPins:
+    session_id: str
+    build: BuildIdentity | None
+    limits_sha256: str
+    limits: Mapping[str, Any]  # the nine contract keys, as recorded
+    intents: Mapping[str, IntentPin]
+    mac_halt: bool = False
+    account_mismatch: bool = False
+    sha256: str = ""  # of the pins document bytes
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+
+
+def _strict_loads(text: str) -> Any:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError("duplicate key")
+            out[key] = value
+        return out
+
+    def no_float(_: str) -> Any:
+        raise ValueError("float")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_float=no_float, parse_constant=no_float)
+
+
+def _dec(value: Any, *, code: str = PINS_INVALID) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ReplayRefused(code)
+    try:
+        number = Decimal(value if isinstance(value, str) else str(value))
+    except InvalidOperation:
+        raise ReplayRefused(code) from None
+    if not number.is_finite():
+        raise ReplayRefused(code)
+    return number
+
+
+def _whole(value: Decimal) -> int:
+    if value != value.to_integral_value() or value <= 0:
+        raise ReplayRefused(EVIDENCE_INVALID)
+    return int(value)
+
+
+def parse_pins(data: bytes) -> SessionPins:
+    """Parse one pins document strictly. A float, a duplicate key or a missing field is ``replay_pins_invalid``."""
+
+    try:
+        doc = _strict_loads(data.decode("ascii"))
+    except (ValueError, UnicodeDecodeError):
+        raise ReplayRefused(PINS_INVALID) from None
+    if not isinstance(doc, dict) or doc.get("schema") != PINS_SCHEMA:
+        raise ReplayRefused(PINS_INVALID)
+    session_id = doc.get("session_id")
+    limits_sha = doc.get("limits_sha256")
+    limits = doc.get("limits")
+    intents = doc.get("intents")
+    if not isinstance(session_id, str) or not isinstance(limits_sha, str) or not _HEX64.match(limits_sha):
+        raise ReplayRefused(PINS_INVALID)
+    if not isinstance(limits, dict) or not isinstance(intents, dict):
+        raise ReplayRefused(PINS_INVALID)
+    mac_halt, account_mismatch = doc.get("mac_halt", False), doc.get("account_mismatch", False)
+    if not isinstance(mac_halt, bool) or not isinstance(account_mismatch, bool):
+        raise ReplayRefused(PINS_INVALID)
+    build: BuildIdentity | None = None
+    raw_build = doc.get("build")
+    if raw_build is not None:
+        if not isinstance(raw_build, dict):
+            raise ReplayRefused(PINS_INVALID)
+        commit, files = raw_build.get("commit"), raw_build.get("orders_sha256")
+        if (
+            not isinstance(commit, str)
+            or not _HEX40.match(commit)
+            or not isinstance(files, dict)
+            or not files
+            or not all(isinstance(k, str) and isinstance(v, str) and _HEX64.match(v) for k, v in files.items())
+        ):
+            raise ReplayRefused(PINS_INVALID)
+        build = BuildIdentity(commit, dict(files))
+    pins: dict[str, IntentPin] = {}
+    for intent_id, body in intents.items():
+        if not isinstance(body, dict) or "quote" not in body or "tick_reference" not in body:
+            raise ReplayRefused(PINS_INVALID)
+        quote = body["quote"]
+        if not isinstance(quote, dict):
+            raise ReplayRefused(PINS_INVALID)
+        series, when = quote.get("series"), quote.get("session_date")
+        if series is not None and not isinstance(series, str):
+            raise ReplayRefused(PINS_INVALID)
+        try:
+            session_date = date.fromisoformat(when) if when is not None else None
+        except (TypeError, ValueError):
+            raise ReplayRefused(PINS_INVALID) from None
+        tick = body["tick_reference"]
+        pins[intent_id] = IntentPin(
+            QuotePin(
+                _dec(quote.get("ltp")), _dec(quote.get("lower_circuit")), _dec(quote.get("upper_circuit")),
+                _dec(quote.get("previous_close")), series, session_date,
+            ),
+            None if tick is None else _dec(tick),
+        )
+    return SessionPins(
+        session_id, build, limits_sha, dict(limits), pins, mac_halt, account_mismatch, hashlib.sha256(data).hexdigest()
+    )
+
+
+# --- the recorded build ------------------------------------------------------------------------------------------
+
+
+def orders_tree_sha256(vm_source: Path) -> dict[str, str]:
+    """sha256 of every file under ``<vm_source>/gateway_vm/orders``, keyed by posix path below it.
+
+    ``__pycache__`` is left out: the replay never writes bytecode into the checkout, but a checkout that has
+    run before may hold some, and it is not the code.
+    """
+
+    root = Path(vm_source) / _SOURCE_PACKAGE / _ORDERS_DIR
+    out: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            out[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
+
+
+def read_git_commit(vm_source: Path) -> str | None:
+    """The commit a checkout is on, read from its ``.git`` files (no subprocess). Looks at the source dir and two parents.
+
+    Handles a plain ``.git`` directory, a linked worktree (``.git`` file, ``commondir``), a detached HEAD and
+    ``packed-refs``. ``None`` when nothing readable names a 40-hex commit.
+    """
+
+    start = Path(vm_source).resolve()
+    for base in (start, start.parent, start.parent.parent):
+        marker = base / ".git"
+        try:
+            if marker.is_dir():
+                gitdir = marker
+            elif marker.is_file():
+                text = marker.read_text(encoding="ascii").strip()
+                if not text.startswith("gitdir:"):
+                    return None
+                gitdir = (base / text[len("gitdir:"):].strip()).resolve()
+            else:
+                continue
+            head = (gitdir / "HEAD").read_text(encoding="ascii").strip()
+            if _HEX40.match(head):
+                return head
+            if not head.startswith("ref: "):
+                return None
+            ref = head[len("ref: "):].strip()
+            common = gitdir
+            pointer = gitdir / "commondir"
+            if pointer.is_file():
+                common = (gitdir / pointer.read_text(encoding="ascii").strip()).resolve()
+            for directory in (gitdir, common):
+                loose = directory / ref
+                if loose.is_file() and _HEX40.match(loose.read_text(encoding="ascii").strip()):
+                    return loose.read_text(encoding="ascii").strip()
+            packed = common / "packed-refs"
+            if packed.is_file():
+                for line in packed.read_text(encoding="ascii").splitlines():
+                    parts = line.split(" ")
+                    if len(parts) == 2 and parts[1] == ref and _HEX40.match(parts[0]):
+                        return parts[0]
+            return None
+        except (OSError, UnicodeDecodeError):
+            return None
+    return None
+
+
+@dataclass(frozen=True)
+class _Vm:
+    """The loaded build: its evaluator and the classes ``evaluate`` takes."""
+
+    evaluate: Any
+    intent_cls: Any
+    quote_cls: Any
+    flags_cls: Any
+    account_cls: Any
+    holding_cls: Any
+    open_order_cls: Any
+    limits_cls: Any
+    ist: Any
+
+
+def _load_module(package: str, name: str, path: Path, package_dir: Path) -> Any:
+    if name == "__init__":
+        spec = importlib.util.spec_from_file_location(package, path, submodule_search_locations=[str(package_dir)])
+        module_name = package
+    else:
+        module_name = f"{package}.{name}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ReplayRefused(BUILD_MISMATCH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module  # the relative imports inside the package resolve through here
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_build(vm_source: Path, commit: str) -> _Vm:
+    """Load ``gateway_vm.orders`` from the checkout as a private package, then take it out of ``sys.modules``.
+
+    The package is loaded under a name no other build shares, so a session replayed against another checkout, or a
+    ``gateway_vm`` the test run already imported from the working tree, can never answer for this one. Bytecode is
+    not written into the checkout.
+    """
+
+    orders_dir = Path(vm_source) / _SOURCE_PACKAGE / _ORDERS_DIR
+    token = hashlib.sha256(f"{orders_dir.resolve()}:{commit}".encode()).hexdigest()[:12]
+    package = f"_growin_vm_replay_{token}_{next(_load_counter)}"
+    previous_flag = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        _load_module(package, "__init__", orders_dir / "__init__.py", orders_dir)
+        modules: dict[str, Any] = {}
+        for name in _LOAD_ORDER:
+            modules[name] = _load_module(package, name, orders_dir / f"{name}.py", orders_dir)
+        limits, intent = modules["limits"], modules["intent"]
+        vm = _Vm(
+            evaluate=limits.evaluate,
+            intent_cls=intent.Intent,
+            quote_cls=limits.Quote,
+            flags_cls=limits.RiskFlags,
+            account_cls=limits.AccountSnapshot,
+            holding_cls=limits.Holding,
+            open_order_cls=limits.OpenOrder,
+            limits_cls=limits.Limits,
+            ist=limits.IST,
+        )
+    except ReplayRefused:
+        raise
+    except Exception:  # noqa: BLE001 - any load failure of the recorded build is the one refusal, never a fallback
+        raise ReplayRefused(BUILD_MISMATCH) from None
+    finally:
+        sys.dont_write_bytecode = previous_flag
+        # Also a module whose exec failed: it is registered before it runs, so it must go on every path out.
+        for name in [n for n in sys.modules if n == package or n.startswith(package + ".")]:
+            sys.modules.pop(name, None)
+    _check_surface(vm)
+    return vm
+
+
+def _check_surface(vm: _Vm) -> None:
+    """Refuse a build whose ``evaluate`` or the types it takes are not the surface this file was written against."""
+
+    try:
+        parameters = tuple((p.name, p.kind.name) for p in inspect.signature(vm.evaluate).parameters.values())
+        if parameters != EVALUATE_PARAMETERS:
+            raise ReplayRefused(BUILD_MISMATCH)
+        classes = {
+            "Intent": vm.intent_cls, "Quote": vm.quote_cls, "RiskFlags": vm.flags_cls,
+            "AccountSnapshot": vm.account_cls, "Holding": vm.holding_cls, "OpenOrder": vm.open_order_cls,
+            "Limits": vm.limits_cls,
+        }
+        for name, cls in classes.items():
+            if not dataclasses.is_dataclass(cls) or tuple(f.name for f in dataclasses.fields(cls)) != DATACLASS_FIELDS[name]:
+                raise ReplayRefused(BUILD_MISMATCH)
+        if not callable(getattr(vm.limits_cls, "from_fields", None)):
+            raise ReplayRefused(BUILD_MISMATCH)
+    except ReplayRefused:
+        raise
+    except (TypeError, ValueError, AttributeError):
+        raise ReplayRefused(BUILD_MISMATCH) from None
+
+
+def load_recorded_build(vm_source: Path, recorded: BuildIdentity | None) -> _Vm:
+    """The build the session recorded, or ``replay_build_mismatch``. Never the working tree, never a guess."""
+
+    if recorded is None:
+        raise ReplayRefused(BUILD_MISMATCH)
+    source = Path(vm_source)
+    resolved = source.resolve()
+    if resolved == _PRIVATE_ROOT or _PRIVATE_ROOT in resolved.parents:
+        raise ReplayRefused(BUILD_MISMATCH)
+    try:
+        commit = read_git_commit(source)
+        files = orders_tree_sha256(source)
+    except OSError:
+        raise ReplayRefused(BUILD_MISMATCH) from None
+    if commit is None or commit != recorded.commit:
+        raise ReplayRefused(BUILD_MISMATCH)
+    if files != dict(recorded.orders_sha256):
+        raise ReplayRefused(BUILD_MISMATCH)
+    return _load_build(source, commit)
+
+
+# --- limits -------------------------------------------------------------------------------------------------------
+
+
+def _checked_limits(vm: _Vm, pins: SessionPins, records: Sequence[Mapping[str, Any]], session_id: str) -> Any:
+    """Build the limits from the supplied values and require them to hash to what the session recorded."""
+
+    try:
+        limits = vm.limits_cls.from_fields(dict(pins.limits))
+    except Exception:  # noqa: BLE001 - a limits document the recorded build rejects cannot be the session's limits
+        raise ReplayRefused(LIMITS_MISMATCH) from None
+    if limits.sha256 != pins.limits_sha256:
+        raise ReplayRefused(LIMITS_MISMATCH)
+    for record in records:
+        if record.get("kind") == "signal" and record.get("session_id") == session_id:
+            if record.get("limits_sha256") != pins.limits_sha256:
+                raise ReplayRefused(LIMITS_MISMATCH)
+    return limits
+
+
+# --- the portfolio at a decision point ---------------------------------------------------------------------------
+
+
+class _Fold:
+    """The shadow portfolio rebuilt from evidence records in order. Never the ledger, never a broker figure.
+
+    Money rules copy ``ExecutionLedger.book_simulated_fill``: a buy adds ``quantity x price + charges`` to the
+    position's cost, a sell removes the average cost of the shares sold, and a fully sold position has no cost.
+    The admitted quantity of an order is the intent's quantity.
+    """
+
+    def __init__(self) -> None:
+        self.intents: dict[str, Mapping[str, Any]] = {}
+        self.reserved: set[str] = set()
+        self.terminal: set[str] = set()
+        self.booked: dict[str, Decimal] = {}
+        self.pending: dict[str, Mapping[str, Any]] = {}
+        self.positions: dict[str, list[Decimal]] = {}  # isin -> [quantity, cost]
+        self.halt = False
+        self.ended = False
+        self.stops: set[str] = set()
+
+    def apply(self, record: Mapping[str, Any]) -> None:
+        kind = record.get("kind")
+        if kind == "intent":
+            self.intents[str(record["intent_id"])] = record
+        elif kind == "reservation":
+            self.reserved.add(str(record["intent_id"]))
+        elif kind == "expiry":
+            self.terminal.add(str(record["intent_id"]))
+        elif kind == "booking_intent":
+            self.pending[str(record["booking_id"])] = record
+        elif kind == "booking_refused":
+            self.pending.pop(str(record["booking_id"]), None)
+        elif kind == "booking_done":
+            booking = self.pending.pop(str(record["booking_id"]), None)
+            if booking is None:
+                raise ReplayRefused(EVIDENCE_INVALID)
+            self._book(booking)
+        elif kind == "run_ended":
+            self.ended = True
+        elif kind == "latch":
+            self._latch(str(record.get("latch")), str(record.get("scope")), str(record.get("reason")))
+
+    def _latch(self, name: str, scope: str, reason: str) -> None:
+        if name == "stop" and scope.startswith("isin:"):
+            isin = scope[len("isin:"):]
+            if reason == "cleared_by_fill":
+                self.stops.discard(isin)
+            elif reason.startswith("raised_"):
+                self.stops.add(isin)
+        elif name == "halt" and scope == "entries":
+            if reason == "released_by_operator":
+                self.halt = False
+            elif reason.startswith("raised_"):
+                self.halt = True
+        elif name == "ended":
+            self.ended = True
+
+    def _book(self, booking: Mapping[str, Any]) -> None:
+        intent_id = str(booking["intent_id"])
+        intent = self.intents.get(intent_id)
+        if intent is None or not isinstance(intent.get("isin"), str):
+            raise ReplayRefused(EVIDENCE_INVALID)
+        cumulative = _dec(booking["cumulative_quantity"], code=EVIDENCE_INVALID)
+        price = _dec(booking["price"], code=EVIDENCE_INVALID)
+        charges = _dec(booking["charges"], code=EVIDENCE_INVALID)
+        prior = self.booked.get(intent_id, Decimal(0))
+        delta = cumulative - prior
+        admitted = _dec(intent["quantity"], code=EVIDENCE_INVALID)
+        if delta <= 0 or cumulative > admitted:
+            raise ReplayRefused(EVIDENCE_INVALID)
+        isin = intent["isin"]
+        held, cost = self.positions.get(isin, [Decimal(0), Decimal(0)])
+        if intent["side"] == "buy":
+            held, cost = held + delta, cost + delta * price + charges
+        elif intent["side"] == "sell":
+            if delta > held:
+                raise ReplayRefused(EVIDENCE_INVALID)
+            remaining = held - delta
+            cost = Decimal(0) if remaining == 0 else max(Decimal(0), cost - cost * delta / held)
+            held = remaining
+        else:
+            raise ReplayRefused(EVIDENCE_INVALID)
+        self.positions[isin] = [held, cost]
+        self.booked[intent_id] = cumulative
+        if cumulative == admitted:
+            self.terminal.add(intent_id)
+
+    def snapshot(self, vm: _Vm, pins: SessionPins) -> tuple[Any, Any]:
+        """(AccountSnapshot, RiskFlags) as the VM takes them, at the point the fold has reached."""
+
+        if self.pending:
+            raise ReplayRefused(STATE_AMBIGUOUS)  # a booking is half written: holdings are not one thing yet
+        holdings, costs = [], {}
+        for isin, (held, cost) in sorted(self.positions.items()):
+            if held > 0:
+                holdings.append(vm.holding_cls(isin, _whole(held), cost))
+                costs[isin] = cost
+        orders = []
+        for intent_id in sorted(self.reserved - self.terminal):
+            intent = self.intents[intent_id]
+            unfilled = _dec(intent["quantity"], code=EVIDENCE_INVALID) - self.booked.get(intent_id, Decimal(0))
+            if unfilled > 0:
+                orders.append(
+                    vm.open_order_cls(
+                        str(intent["isin"]), str(intent["side"]), _whole(unfilled), _dec(intent["limit_price"], code=EVIDENCE_INVALID)
+                    )
+                )
+        account = vm.account_cls(holdings=tuple(holdings), open_orders=tuple(orders), trades=())
+        flags = vm.flags_cls(
+            halt=self.halt,
+            ended=self.ended,
+            mac_halt=pins.mac_halt,
+            account_mismatch=pins.account_mismatch,
+            stops=frozenset(self.stops),
+            ledger_cost=costs,
+        )
+        return account, flags
+
+
+# --- the Mac's verdict -------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class MacVerdict:
+    decision: str  # ADMITTED, DENIED or NO_DECISION
+    codes: tuple[str, ...]
+    full: bool  # True when the Mac recorded every code, not only the first
+
+
+_MAC_KINDS = frozenset({"admission", "denied", "reservation_refused", "reservation"})
+
+
+def mac_verdicts(records: Sequence[Mapping[str, Any]]) -> dict[str, MacVerdict]:
+    """The first Mac decision record per intent: an ``admission`` row, a ``denied`` or ``reservation_refused`` code, a reservation."""
+
+    out: dict[str, MacVerdict] = {}
+    for record in records:
+        kind = record.get("kind")
+        if kind not in _MAC_KINDS:
+            continue
+        intent_id = str(record.get("intent_id"))
+        if intent_id in out:
+            continue
+        if kind == "reservation":
+            out[intent_id] = MacVerdict(ADMITTED, (), True)
+        elif kind in ("denied", "reservation_refused"):
+            out[intent_id] = MacVerdict(DENIED, (str(record["code"]),), False)
+        else:
+            decision = str(record.get("decision", "")).lower()
+            if decision == ADMITTED:
+                out[intent_id] = MacVerdict(ADMITTED, (), True)
+            elif decision == DENIED:
+                listed = record.get("refusal_codes")
+                codes = tuple(str(c) for c in listed) if isinstance(listed, list) and listed else (str(record.get("reason_code")),)
+                out[intent_id] = MacVerdict(DENIED, codes, isinstance(listed, list) and bool(listed))
+    return out
+
+
+def compare(mac: MacVerdict, vm_codes: tuple[str, ...]) -> str | None:
+    """``None`` when the two verdicts agree, else the closed word naming why they do not."""
+
+    if mac.decision == NO_DECISION:
+        return "mac_decision_missing"
+    if mac.decision == ADMITTED:
+        return None if not vm_codes else "mac_admitted_vm_refused"
+    mapped = []
+    for code in mac.codes:
+        if code not in MAC_TO_VM_CODE:
+            return "mac_code_unmapped"
+        mapped.append(MAC_TO_VM_CODE[code])
+    if not vm_codes:
+        return "mac_refused_vm_admitted"
+    if mac.full:
+        return None if tuple(mapped) == vm_codes else "reason_codes_differ"
+    return None if mapped[0] == vm_codes[0] else "reason_codes_differ"
+
+
+# --- results and the sink ----------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IntentVerdict:
+    intent_id: str
+    mac_decision: str
+    mac_codes: tuple[str, ...]
+    vm_codes: tuple[str, ...]
+    agree: bool
+
+
+@dataclass(frozen=True)
+class Divergence:
+    intent_id: str
+    reason: str
+    mac_decision: str
+    mac_codes: tuple[str, ...]
+    vm_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SessionReplay:
+    run_id: str
+    session_id: str
+    verdict: str  # PASS or FAIL
+    build_digest: str
+    build_commit: str
+    limits_sha256: str
+    pins_sha256: str
+    intents_compared: int
+    no_intents: bool
+    verdicts: tuple[IntentVerdict, ...] = ()
+    divergences: tuple[Divergence, ...] = ()
+    defects: tuple[str, ...] = ()
+
+
+class ReplaySink(Protocol):
+    """Where a session's result goes. The CLI wiring (64-05 Task B) implements it over the evidence store and policy.
+
+    ``record_session`` writes the per-session record. ``open_defect`` opens a defect on a divergence or a replay
+    defect. ``pause_run`` pauses the run on a divergence so ``decide`` refuses until an operator reason.
+    """
+
+    def record_session(self, result: SessionReplay) -> None: ...
+
+    def open_defect(self, code: str, session_id: str, detail: str) -> None: ...
+
+    def pause_run(self, event: str, reason: str) -> None: ...
+
+
+def _ist_of(record: Mapping[str, Any], vm: _Vm) -> datetime:
+    try:
+        stamp = datetime.fromisoformat(str(record["ist"]))
+    except (KeyError, ValueError):
+        raise ReplayRefused(EVIDENCE_INVALID) from None
+    if stamp.tzinfo is None:
+        raise ReplayRefused(EVIDENCE_INVALID)
+    return stamp.astimezone(vm.ist)
+
+
+def _vm_intent(vm: _Vm, record: Mapping[str, Any], pins: SessionPins) -> Any:
+    isin = record.get("isin")
+    if not isinstance(isin, str):
+        raise ReplayRefused(EVIDENCE_INVALID)
+    side = str(record["side"])
+    price = _dec(record["limit_price"], code=EVIDENCE_INVALID)
+    values = {
+        "intent_id": str(record["intent_id"]),
+        "proposal_id": str(record["intent_id"]),
+        "workspace": "india",
+        "broker": "icici-breeze",
+        "mode": "SHADOW",
+        "exchange": "NSE",
+        "product": "cash",
+        "order_type": "limit",
+        "validity": "day",
+        "side": side,
+        "stock_code": str(record["symbol"]),
+        "isin": isin,
+        "quantity": _whole(_dec(record["quantity"], code=EVIDENCE_INVALID)),
+        "limit_price": format(price, "f"),
+        "reason": "entry" if side == "buy" else "exit",
+        "batch_id": None,
+        "limits_sha256": pins.limits_sha256,
+        "params_sha256": _UNUSED_HEX,
+        "key_id": _UNUSED_HEX,
+    }
+    return vm.intent_cls(**values)
+
+
+def _vm_quote(vm: _Vm, record: Mapping[str, Any], pin: IntentPin, decided: datetime) -> Any:
+    series = record.get("series") or pin.quote.series
+    if not isinstance(series, str):
+        raise ReplayRefused(PINS_MISSING)
+    return vm.quote_cls(
+        stock_code=str(record["symbol"]),
+        isin=str(record["isin"]),
+        series=series,
+        ltp=pin.quote.ltp,
+        lower_circuit=pin.quote.lower_circuit,
+        upper_circuit=pin.quote.upper_circuit,
+        previous_close=pin.quote.previous_close,
+        session_date=pin.quote.session_date or decided.date(),
+    )
+
+
+def replay_session(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    run_id: str,
+    session_id: str,
+    pins: SessionPins,
+    vm_source: Path,
+    sink: ReplaySink | None = None,
+) -> SessionReplay:
+    """Replay one session. Raises ``ReplayRefused`` before any verdict exists; otherwise returns and records the result."""
+
+    if pins.session_id != session_id:
+        raise ReplayRefused(PINS_MISSING)
+    vm = load_recorded_build(vm_source, pins.build)
+    assert pins.build is not None  # load_recorded_build refuses a missing identity
+    limits = _checked_limits(vm, pins, records, session_id)
+    macs = mac_verdicts(records)
+    fold = _Fold()
+    verdicts: list[IntentVerdict] = []
+    divergences: list[Divergence] = []
+    defects: list[str] = []
+    seen = 0
+    for record in sorted(records, key=lambda r: int(r["seq"])):
+        is_ours = record.get("kind") == "intent" and record.get("session_id") == session_id
+        if is_ours and not divergences and not defects:
+            seen += 1
+            outcome = _replay_intent(vm, limits, pins, fold, record, macs)
+            if isinstance(outcome, Divergence):
+                divergences.append(outcome)
+                verdicts.append(IntentVerdict(outcome.intent_id, outcome.mac_decision, outcome.mac_codes, outcome.vm_codes, False))
+            elif isinstance(outcome, str):
+                defects.append(outcome)
+            else:
+                verdicts.append(outcome)
+        fold.apply(record)
+    result = SessionReplay(
+        run_id=run_id,
+        session_id=session_id,
+        verdict=FAIL if divergences or defects else PASS,
+        build_digest=pins.build.digest,
+        build_commit=pins.build.commit,
+        limits_sha256=pins.limits_sha256,
+        pins_sha256=pins.sha256,
+        intents_compared=len(verdicts),
+        no_intents=seen == 0,
+        verdicts=tuple(verdicts),
+        divergences=tuple(divergences),
+        defects=tuple(defects),
+    )
+    if sink is not None:
+        sink.record_session(result)
+        for divergence in divergences:
+            sink.open_defect(DIVERGENCE, session_id, divergence.reason)
+            sink.pause_run(DIVERGENCE, f"{session_id}:{divergence.intent_id}:{divergence.reason}")
+        for defect in defects:
+            sink.open_defect(defect, session_id, defect)
+    return result
+
+
+def _replay_intent(
+    vm: _Vm,
+    limits: Any,
+    pins: SessionPins,
+    fold: _Fold,
+    record: Mapping[str, Any],
+    macs: Mapping[str, MacVerdict],
+) -> IntentVerdict | Divergence | str:
+    intent_id = str(record["intent_id"])
+    pin = pins.intents.get(intent_id)
+    if pin is None:
+        raise ReplayRefused(PINS_MISSING)
+    decided = _ist_of(record, vm)
+    account, flags = fold.snapshot(vm, pins)
+    codes = vm.evaluate(
+        limits,
+        flags,
+        account,
+        _vm_quote(vm, record, pin, decided),
+        decided,
+        _vm_intent(vm, record, pins),
+        kill_enabled=REPLAY_KILL_ENABLED,
+        tick_reference=pin.tick_reference,
+        # No tick_table: the VM resolves its default, the data file beside the loaded build (hashed with orders/).
+    )
+    vm_codes = tuple(str(c) for c in codes)
+    if KILL_SWITCH in vm_codes:
+        return KILL_SWITCH_IN_VERDICT
+    mac = macs.get(intent_id, MacVerdict(NO_DECISION, (), False))
+    reason = compare(mac, vm_codes)
+    if reason is not None:
+        return Divergence(intent_id, reason, mac.decision, mac.codes, vm_codes)
+    return IntentVerdict(intent_id, mac.decision, mac.codes, vm_codes, True)
+
+
+# --- the run --------------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunReplay:
+    run_id: str
+    verdict: str
+    sessions: tuple[SessionReplay, ...]
+    missing: tuple[str, ...] = ()
+    refused: Mapping[str, str] = field(default_factory=dict)
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def build_digests(self) -> tuple[str, ...]:
+        return tuple(sorted({s.build_digest for s in self.sessions}))
+
+
+def evidence_sessions(records: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    return tuple(sorted({str(r["session_id"]) for r in records if r.get("session_id")}))
+
+
+def run_verdict(
+    run_id: str,
+    sessions: Sequence[str],
+    results: Mapping[str, SessionReplay],
+    refused: Mapping[str, str] | None = None,
+) -> RunReplay:
+    """The D-23 verdict for a run: PASS only when every session has a PASS record, all at one build hash.
+
+    A session with evidence and no replay record is ``replay_day_missing`` and the run FAILs. There is no waiver.
+    """
+
+    refused = dict(refused or {})
+    missing = tuple(s for s in sorted(set(sessions)) if s not in results and s not in refused)
+    reasons: list[str] = []
+    if missing:
+        reasons.append(DAY_MISSING)
+    if refused:
+        reasons.append(SESSION_REFUSED)
+    ordered = tuple(results[s] for s in sorted(results))
+    if any(r.verdict != PASS for r in ordered):
+        reasons.append(DIVERGENCE)
+    if len({r.build_digest for r in ordered}) > 1:
+        reasons.append(BUILD_HASH_MIXED)
+    if not ordered and not missing and not refused:
+        reasons.append(DAY_MISSING)  # a run with nothing replayed has not passed
+    return RunReplay(run_id, FAIL if reasons else PASS, ordered, missing, refused, tuple(dict.fromkeys(reasons)))
+
+
+def replay_run(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    run_id: str,
+    sessions: Sequence[str],
+    pins_by_session: Mapping[str, SessionPins],
+    vm_source: Path,
+    sink: ReplaySink | None = None,
+) -> RunReplay:
+    """``--all``: every session in ``sessions`` and every session the evidence holds. None is skipped.
+
+    A session that refuses is listed with its refusal code and the run FAILs; it writes no verdict.
+    """
+
+    wanted = sorted(set(sessions) | set(evidence_sessions(records)))
+    results: dict[str, SessionReplay] = {}
+    refused: dict[str, str] = {}
+    for session_id in wanted:
+        pins = pins_by_session.get(session_id)
+        if pins is None:
+            refused[session_id] = PINS_MISSING
+            continue
+        try:
+            results[session_id] = replay_session(
+                records, run_id=run_id, session_id=session_id, pins=pins, vm_source=vm_source, sink=sink
+            )
+        except ReplayRefused as exc:
+            refused[session_id] = exc.code
+    return run_verdict(run_id, wanted, results, refused)
+
+
+def render_report(run: RunReplay) -> str:
+    """The text of ``64-VM-REPLAY.md``: build hash, limits hash, intents compared, verdict and divergences per session."""
+
+    lines = [
+        "# 64 VM replay (D-23)",
+        "",
+        f"Evidence label: {D06_LABEL}.",
+        "",
+        f"Run: {run.run_id}",
+        f"D-23 verdict: {run.verdict}",
+        f"Reasons: {', '.join(run.reasons) if run.reasons else 'none'}",
+        f"Build hashes: {', '.join(run.build_digests) if run.build_digests else 'none'}",
+        "",
+        "| Session | Verdict | Build commit | Build hash | Limits hash | Intents compared | Note |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for s in run.sessions:
+        note = "no_intents" if s.no_intents else ", ".join(list(s.defects) + [d.reason for d in s.divergences]) or "-"
+        lines.append(
+            f"| {s.session_id} | {s.verdict} | {s.build_commit} | {s.build_digest} | {s.limits_sha256} | {s.intents_compared} | {note} |"
+        )
+    for session_id in run.missing:
+        lines.append(f"| {session_id} | {FAIL} | - | - | - | 0 | {DAY_MISSING} |")
+    for session_id, code in sorted(run.refused.items()):
+        lines.append(f"| {session_id} | {FAIL} | - | - | - | 0 | {code} |")
+    divergent = [(s, d) for s in run.sessions for d in s.divergences]
+    if divergent:
+        lines += ["", "## Divergences", ""]
+        for s, d in divergent:
+            lines.append(
+                f"- {s.session_id} {d.intent_id}: {d.reason}; Mac {d.mac_decision} {list(d.mac_codes)}; VM {list(d.vm_codes)}"
+            )
+    lines += ["", "No waiver exists for a divergence, a missing day or a refused session.", ""]
+    return "\n".join(lines)
+
+
+__all__ = [
+    "ADMITTED",
+    "BUILD_HASH_MIXED",
+    "BUILD_MISMATCH",
+    "BuildIdentity",
+    "D06_LABEL",
+    "DAY_MISSING",
+    "DENIED",
+    "DIVERGENCE",
+    "Divergence",
+    "FAIL",
+    "IntentPin",
+    "IntentVerdict",
+    "KILL_SWITCH_IN_VERDICT",
+    "LIMITS_MISMATCH",
+    "MAC_TO_VM_CODE",
+    "MacVerdict",
+    "NO_DECISION",
+    "PASS",
+    "PINS_INVALID",
+    "PINS_MISSING",
+    "QuotePin",
+    "REPLAY_KILL_ENABLED",
+    "ReplayRefused",
+    "ReplaySink",
+    "RunReplay",
+    "SessionPins",
+    "SessionReplay",
+    "compare",
+    "evidence_sessions",
+    "load_recorded_build",
+    "mac_verdicts",
+    "orders_tree_sha256",
+    "parse_pins",
+    "read_git_commit",
+    "render_report",
+    "replay_run",
+    "replay_session",
+    "run_verdict",
+]
