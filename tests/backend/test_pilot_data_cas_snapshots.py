@@ -640,7 +640,7 @@ def test_cas_u24_status_from_procedure_entry(world: ck.World) -> None:
         CasClassRow(isin=ck.ISIN_REL)  # type: ignore[call-arg]
 
 
-def test_cas_no_default_class() -> None:
+def test_cas_no_default_class_is_defined_anywhere() -> None:
     assert SUB_REASONS == (
         "snapshot_missing", "snapshot_wrong_date", "snapshot_hash_mismatch", "procedure_unapproved",
         "series_unsupported", "identity_invalid", "identity_mismatch", "identity_ambiguous", "flag_unknown",
@@ -698,6 +698,16 @@ SCENARIOS: dict[str, tuple[Callable[[ck.World], Any], str]] = {
     "flag_unknown": (_imported("UNKA"), "flag_unknown"),
     "flag_conflict": (_imported("CONFA"), "flag_conflict"),
 }
+
+
+def test_cas_no_default_class(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every unresolved case, run for real, is a CasUnresolved. Nothing falls back to a class."""
+    for name, (run, expected) in SCENARIOS.items():
+        folder = tmp_path / name
+        folder.mkdir()
+        verdict = run(ck.make_world(folder, monkeypatch, icici_days=(D, D_NEXT)))
+        assert isinstance(verdict, CasUnresolved), f"{name} resolved to {verdict!r}"
+        assert verdict.sub_reason == expected, name
 
 
 def test_cas_scenarios_cover_every_sub_reason() -> None:
