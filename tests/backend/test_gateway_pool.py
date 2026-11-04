@@ -947,3 +947,225 @@ def test_the_per_send_timeout_never_exceeds_the_base_timeout():
     with pytest.raises(TimeoutError):
         sock.sendall(b"x")
     assert raw.timeouts == [0.05]
+
+
+# ------------------------------------- real TLS socket, peer that stops reading
+
+
+def _throwaway_tls_files(directory: Path) -> tuple[Path, Path]:
+    """A self-signed certificate for 127.0.0.1, made now and written under tmp_path only."""
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "pool-test-loopback")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True, content_commitment=False, key_encipherment=False, data_encipherment=False,
+                key_agreement=False, key_cert_sign=True, crl_sign=False, encipher_only=False, decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = directory / "cert.pem", directory / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+        )
+    )
+    return cert_path, key_path
+
+
+class _StallingTLSServer:
+    """Loopback TLS server on an ephemeral port. The first client to finish a handshake is served.
+
+    For SLOW_S seconds of wall clock it reads that client in small chunks with a sleep after each, so
+    the client's header write blocks on a slow reader. It then drains the rest of the headers at full
+    speed and, once it has seen their end, never reads again (the connection stays open). The clock,
+    not the speed of TLS or of the CPU, sets how long the header phase lasts, provided the pad is
+    bigger than the kernel buffers can absorb at the slow rate. A connection that fails the handshake
+    (a stray local probe) is dropped and the loop keeps accepting.
+    """
+
+    SLOW_S = 1.2
+    CHUNK = 4096
+    PACE_S = 0.05  # about 80 KB/s while slow
+
+    def __init__(self, cert: Path, key: Path) -> None:
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ctx.load_cert_chain(str(cert), str(key))
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)  # small window, inherited by accept
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(8)
+        self.listener.settimeout(0.1)
+        self.port = self.listener.getsockname()[1]
+        self.served_peer: tuple[str, int] | None = None
+        self.headers_done_at: float | None = None
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        held: socket.socket | None = None
+        try:
+            while not self.stop.is_set() and held is None:
+                try:
+                    raw, peer = self.listener.accept()
+                except TimeoutError:
+                    continue
+                except OSError:
+                    return
+                raw.settimeout(2.0)
+                try:
+                    held = self.ctx.wrap_socket(raw, server_side=True)
+                except (OSError, ssl.SSLError):  # not a TLS client, or one that quit: not ours
+                    raw.close()
+                    continue
+                self.served_peer = peer
+            if held is None:
+                return
+            held.settimeout(1.0)
+            tail = b""
+            slow_until = time.monotonic() + self.SLOW_S
+            while not self.stop.is_set():
+                slow = time.monotonic() < slow_until
+                try:
+                    chunk = held.recv(self.CHUNK if slow else 65536)
+                except TimeoutError:
+                    continue
+                except (OSError, ssl.SSLError):
+                    return
+                if not chunk:
+                    return
+                if b"\r\n\r\n" in tail + chunk:
+                    break
+                tail = chunk[-3:]
+                if slow:
+                    time.sleep(self.PACE_S)  # wall-clock pacing: the client blocks on a slow reader
+            self.headers_done_at = time.monotonic()
+            self.stop.wait()  # never read again; the socket stays open until teardown
+        finally:
+            if held is not None:
+                held.close()
+
+    def close(self) -> None:
+        self.stop.set()
+        self.listener.close()
+        self.thread.join(timeout=5.0)
+
+
+@pytest.mark.performance  # asserts wall-clock bounds; the covered, xdist CI job excludes it
+def test_a_real_tls_send_into_a_peer_that_stops_reading_ends_at_the_total_deadline(tmp_path, monkeypatch):
+    """The fake sockets above show the cap; this shows it on a real SSLSocket and a real kernel buffer.
+
+    A TLS send of a big buffer is one call whose timeout covers the whole write, so the cap only shows
+    when an earlier send in the same request has already used part of the deadline. So the request
+    carries a header block that the peer reads slowly for a fixed 1.2 s of wall clock, then drains and
+    stops reading for good. The pad (512 KiB) is far above what the kernel buffers hold at that rate,
+    so the header write is blocked until the peer speeds up, on any machine. Encryption cost of 512 KiB
+    is negligible. The body send then blocks. read_s (10 s) is far above what is left of
+    total_s (4 s), so the socket's timeout when the body send starts is the full 4 s that set_timeout
+    gave at the start of the request.
+
+    With the cap, the stalled body send times out at the total deadline: about 4.0 s.
+    Without the settimeout in sendall, it keeps that start-of-request timeout and ends about 1.2 s late
+    (about 5.2 s). With read_s instead of min(read_s, remaining), it ends about 10 s late (about 11 s).
+    The limit sits at total_s + 0.5 s, so the pass has 0.5 s of slack and the mutants miss it by 0.7 s or more.
+    """
+    pytest.importorskip("cryptography")
+    from gateway_vm import pool as pool_module
+
+    cert, key = _throwaway_tls_files(tmp_path)
+    total_s, read_s, margin = 4.0, 10.0, 0.5
+    pad_bytes = 512 * 1024  # above what the buffers absorb while the peer reads at about 80 KB/s
+    # The earlier send must use real time (so the mutants end visibly late) but leave the stall room.
+    # The header phase is wall-clock (about 1.2 s), so a slower machine still lands inside the window.
+    headers_min = 0.3
+    headers_max = total_s - 1.0
+
+    server = _StallingTLSServer(cert, key)
+    try:
+        # Trust only the throwaway cert, on top of the pool's own strict context (verification stays on).
+        real_ctx = pool_module._transport._tls_context
+
+        def ctx_trusting_throwaway():
+            ctx = real_ctx()
+            ctx.load_verify_locations(cafile=str(cert))
+            return ctx
+
+        monkeypatch.setattr(pool_module._transport, "_tls_context", ctx_trusting_throwaway)
+
+        # Record, at every send, the socket's own timeout and the deadline the pool gave this request.
+        # Shrink the send buffer so the kernel cannot soak up the header block and hide the slow reader.
+        sends: list[tuple[float, float, float]] = []  # (now, raw.gettimeout(), deadline)
+        client_locals: set[tuple[str, int]] = set()
+
+        class RecordingSocket(_CountingSocket):
+            def __init__(self, raw) -> None:
+                super().__init__(raw)
+                raw.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+                client_locals.add(tuple(raw.getsockname()[:2]))
+
+            def send(self, data, flags: int = 0) -> int:
+                sends.append((time.monotonic(), self.raw.gettimeout(), self.deadline))
+                return super().send(data, flags)
+
+        monkeypatch.setattr(pool_module, "_CountingSocket", RecordingSocket)
+
+        transport = PooledTransport({"127.0.0.1": AllowedHost("https", server.port)})
+        try:
+            started = time.monotonic()
+            with pytest.raises(TransportError) as err:
+                transport.request(
+                    "POST",
+                    f"https://127.0.0.1:{server.port}/up",
+                    headers={"X-Test": "1", "X-Pad": "a" * pad_bytes},
+                    body=b"x" * (1 << 20),
+                    timeouts=Timeouts(connect_s=2.0, read_s=read_s, total_s=total_s),
+                    max_bytes=1 << 20,
+                )
+            elapsed = time.monotonic() - started
+        finally:
+            transport.close()
+    finally:
+        server.close()
+
+    assert err.value.kind == "timeout"
+    # Precondition: the headers were fully sent and read well inside the deadline, then the peer stopped.
+    # If this fails the machine was too slow or too fast for the setup, not the cap.
+    assert server.headers_done_at is not None
+    headers_took = server.headers_done_at - started
+    assert len(sends) >= 2
+    body_started = sends[1][0] - started  # when the stalled body send began
+    for label, took in (("headers done at", headers_took), ("body send began at", body_started)):
+        assert headers_min < took < headers_max, (
+            f"setup precondition, not a cap failure: the machine was too slow or too fast for this proof "
+            f"({label} {took:.2f}s, allowed {headers_min:.2f}s to {headers_max:.2f}s)"
+        )
+    # Ended at the total deadline, not read_s (or the start-of-request timeout) after the stall began.
+    assert elapsed < total_s + margin, f"took {elapsed:.2f}s"
+    # No send was ever allowed to block past the deadline, and none had a timeout above total_s.
+    assert all(timeout <= total_s for _now, timeout, _deadline in sends)
+    assert all(now + timeout <= deadline + 0.02 for now, timeout, deadline in sends)
+    # Only the one client we meant to serve connected to this server, and it is the pool's socket.
+    assert client_locals == {server.served_peer}
