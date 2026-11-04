@@ -1036,7 +1036,9 @@ def test_production_january_session_wants_december(real: RealRig, monkeypatch):
     from gateway_vm.orders import sessions
 
     holidays, special = sessions.load_calendar()
-    with_2027 = lambda *_a: (holidays | {date(2027, 1, 26)}, special)  # noqa: E731
+    def with_2027(*_a):
+        return holidays | {date(2027, 1, 26)}, special
+
     monkeypatch.setattr(sessions, "load_calendar", with_2027)  # the guard's own copy
     monkeypatch.setattr(limits_mod, "load_calendar", with_2027)  # session_open's
     real.pipeline = real.build(real.store)  # the guard reads the calendar when it is built
