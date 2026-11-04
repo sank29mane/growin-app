@@ -7,8 +7,9 @@ Rules:
    rules are mirrored, not imported).
 2. No module touches the network: sockets, HTTP clients, urllib, websockets. The VM leg goes through 63-05's
    ``RelayClient`` in ``runner.py``, which this package never reimplements.
-3. ``backend/execution/*`` is imported only by ``admission.py`` and ``runner.py``.
-4. Pure modules (everything but ``admission.py``, ``runner.py`` and ``__main__.py``) have no subprocess, no
+3. ``backend/execution/*`` is imported only by ``admission.py``, ``runner.py`` and ``runtime.py`` (the edge that builds the
+   production runtime, 64-09 Task B).
+4. Pure modules (everything but ``admission.py``, ``runner.py``, ``runtime.py`` and ``__main__.py``) have no subprocess, no
    randomness, no dynamic import or eval, no ``sys.modules``; ``policy.py`` also has no clock at all.
 
 Plants below are regression cases for the scanner itself.
@@ -32,8 +33,8 @@ NETWORK_ROOTS = {
 PURE_BANNED_ROOTS = {"subprocess", "random", "secrets", "uuid", "multiprocessing", "ctypes", "pickle", "marshal", "shelve"}
 CLOCK_ROOTS = {"time", "datetime", "zoneinfo"}
 DYNAMIC_NAMES = {"importlib", "__import__", "import_module", "exec", "eval", "compile"}
-EXECUTION_ALLOWED = {"admission.py", "runner.py"}
-EDGE_FILES = {"admission.py", "runner.py", "__main__.py"}
+EXECUTION_ALLOWED = {"admission.py", "runner.py", "runtime.py"}
+EDGE_FILES = {"admission.py", "runner.py", "runtime.py", "__main__.py"}
 NO_CLOCK_FILES = {"policy.py"}
 
 
@@ -135,14 +136,32 @@ def test_every_module_in_the_package_passes_the_scan(path):
     assert violations(path.read_text(), path.name) == []
 
 
-def test_only_admission_and_the_runner_import_execution():
+def test_only_admission_the_runner_and_the_runtime_import_execution():
     importers = {
         p.name
         for p in _files()
         if any(dotted.split(".")[0] == "execution" for node in ast.walk(ast.parse(p.read_text())) for dotted in _roots(node))
     }
     assert importers <= EXECUTION_ALLOWED
-    assert "admission.py" in importers  # the scan really sees the imports it polices
+    assert {"admission.py", "runtime.py"} <= importers  # the scan really sees the imports it polices
+
+
+def test_the_edge_and_execution_allowlists_are_pinned_exactly():
+    """Break-proof B7: widening either set to admit another module fails here, not silently."""
+    assert EXECUTION_ALLOWED == {"admission.py", "runner.py", "runtime.py"}
+    assert EDGE_FILES == {"admission.py", "runner.py", "runtime.py", "__main__.py"}
+
+
+def test_the_runtime_builds_a_runner_only_through_assemble():
+    """Break-proof B6: ``ShadowRunner(...)`` is never called in ``runtime.py``; the one constructor is ``runner.assemble``."""
+    tree = ast.parse((PKG / "runtime.py").read_text())
+    called = {
+        node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, (ast.Name, ast.Attribute))
+    }
+    assert "ShadowRunner" not in called
+    assert "assemble" in called
 
 
 def test_evidence_and_policy_import_nothing_from_the_gateway_or_the_execution_spine():

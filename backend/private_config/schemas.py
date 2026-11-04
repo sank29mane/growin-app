@@ -9,6 +9,7 @@ key is a validation failure and never a silently supplied value.
 from __future__ import annotations
 
 import re
+from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -248,4 +249,39 @@ class ShadowForbidden(BaseModel):
         for item in value:
             if len(item) < MIN_FORBIDDEN_LITERAL or item != item.strip():
                 raise ValueError("a forbidden literal is too short or has surrounding whitespace")
+        return value
+
+
+class ShadowRuntime(BaseModel):
+    """``private/india/shadow_runtime.json``: what the production shadow runtime reads (64-09 Task B).
+
+    Every path is absolute. ``calendar_sha256`` pins the NSE calendar file, ``window_start`` is the session
+    store's seeded window start, and ``vm_key_id`` is the order key id the VM must report before any local write.
+    The values live in ``private/`` alone and are hidden from ``repr``.
+    """
+
+    model_config = _STRICT_MODEL
+
+    schema_version: SchemaVersion
+    workspace: Literal["india"]
+    session_store_root: str = Field(repr=False, min_length=1)
+    dataset_dir: str = Field(repr=False, min_length=1)
+    calendar_path: str = Field(repr=False, min_length=1)
+    calendar_sha256: Sha256Hex = Field(repr=False)
+    simulation_root: str = Field(repr=False, min_length=1)
+    window_start: date = Field(repr=False)
+    vm_key_id: Sha256Hex = Field(repr=False)
+
+    @field_validator("session_store_root", "dataset_dir", "calendar_path", "simulation_root")
+    @classmethod
+    def _absolute_path(cls, value: str) -> str:
+        if not value.startswith("/") or "\x00" in value:
+            raise ValueError("a runtime path must be absolute")
+        return value
+
+    @field_validator("window_start", mode="before")
+    @classmethod
+    def _iso_date_string(cls, value: Any) -> Any:
+        if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
+            raise ValueError("window_start must be an ISO date string")
         return value

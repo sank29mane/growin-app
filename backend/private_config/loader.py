@@ -30,6 +30,7 @@ from .schemas import (
     IndiaLimits,
     IndiaStrategy,
     ShadowForbidden,
+    ShadowRuntime,
     UkLimits,
     UkManifest,
     WorkspaceExecution,
@@ -512,3 +513,32 @@ def load_shadow_forbidden_literals(private_dir: str | os.PathLike[str] | None) -
     parsed = _validate_model(ShadowForbidden, data)
     _check_bound_identity(parsed, "india")
     return parsed.literals
+
+
+SHADOW_RUNTIME_FILE = "shadow_runtime.json"
+
+
+def load_shadow_runtime_config(private_dir: str | os.PathLike[str] | None) -> ShadowRuntime:
+    """``private/india/shadow_runtime.json`` through the same fail-closed checks as ``load_shadow_forbidden_literals``.
+
+    A missing directory or file is an error, never a default. No value is ever placed in an error.
+    """
+
+    if private_dir is None:
+        raise PrivateConfigError("PRIVATE_DIR_MISSING", "private_dir")
+    private_path = Path(private_dir)
+    if not os.path.lexists(private_path):
+        raise PrivateConfigError("PRIVATE_DIR_MISSING", "private_dir")
+    _lstat_checked(private_path, directory=True, field="private_dir")
+    workspace_dir = private_path / "india"
+    if not os.path.lexists(workspace_dir):
+        raise PrivateConfigError("WORKSPACE_DIR_MISSING", "india")
+    _lstat_checked(workspace_dir, directory=True, field="india")
+    path = workspace_dir / SHADOW_RUNTIME_FILE
+    if not os.path.lexists(path):
+        raise PrivateConfigError("SHADOW_RUNTIME_MISSING", SHADOW_RUNTIME_FILE)
+    data = _parse_object(_read_config_file(path, SHADOW_RUNTIME_FILE), SHADOW_RUNTIME_FILE)
+    _check_identity(data, "india")
+    parsed = _validate_model(ShadowRuntime, data)
+    _check_bound_identity(parsed, "india")
+    return parsed
