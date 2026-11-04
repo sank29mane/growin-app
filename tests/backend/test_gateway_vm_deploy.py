@@ -238,34 +238,39 @@ def _mutate(old: str, new: str) -> str:
     return text.replace(old, new, 1)
 
 
+def lazy(old: str, new: str):
+    """A mutation evaluated at test time, so a changed real unit fails the test and not the collection."""
+    return lambda: _mutate(old, new)
+
+
 @pytest.mark.parametrize(
-    "label,text",
+    "label,make",
     [
         (
             "P5 --config on ExecStart",
-            _mutate("--host internal-ip", "--config /etc/growin-gateway/relay.json --host internal-ip"),
+            lazy("--host internal-ip", "--config /etc/growin-gateway/relay.json --host internal-ip"),
         ),
         (
             "P6 second LoadCredential",
-            _mutate("LoadCredential=relay.json:", "LoadCredential=other.json:/etc/growin-gateway/o.json\nLoadCredential=relay.json:"),
+            lazy("LoadCredential=relay.json:", "LoadCredential=other.json:/etc/growin-gateway/o.json\nLoadCredential=relay.json:"),
         ),
-        ("P7 MemoryDenyWriteExecute off", _mutate("MemoryDenyWriteExecute=yes", "MemoryDenyWriteExecute=no")),
-        ("P8 EnvironmentFile", _mutate("Environment=PYTHONUNBUFFERED=1", "EnvironmentFile=/etc/x.env\nEnvironment=PYTHONUNBUFFERED=1")),
-        ("P14 TemporaryFileSystem deleted", _mutate("TemporaryFileSystem=/etc/growin-gateway:ro,mode=0755\n", "")),
-        ("P15 tmpfs mode 0700", _mutate("ro,mode=0755", "ro,mode=0700")),
+        ("P7 MemoryDenyWriteExecute off", lazy("MemoryDenyWriteExecute=yes", "MemoryDenyWriteExecute=no")),
+        ("P8 EnvironmentFile", lazy("Environment=PYTHONUNBUFFERED=1", "EnvironmentFile=/etc/x.env\nEnvironment=PYTHONUNBUFFERED=1")),
+        ("P14 TemporaryFileSystem deleted", lazy("TemporaryFileSystem=/etc/growin-gateway:ro,mode=0755\n", "")),
+        ("P15 tmpfs mode 0700", lazy("ro,mode=0755", "ro,mode=0700")),
         (
             "P16 dash dropped from a bind",
-            _mutate("BindReadOnlyPaths=-/etc/growin-gateway/limits.json", "BindReadOnlyPaths=/etc/growin-gateway/limits.json"),
+            lazy("BindReadOnlyPaths=-/etc/growin-gateway/limits.json", "BindReadOnlyPaths=/etc/growin-gateway/limits.json"),
         ),
-        ("credential in Environment", _mutate("Environment=PYTHONUNBUFFERED=1", "Environment=BREEZE_X=1\nEnvironment=PYTHONUNBUFFERED=1")),
-        ("CREDENTIALS_DIRECTORY set", _mutate("Environment=PYTHONUNBUFFERED=1", "Environment=CREDENTIALS_DIRECTORY=/x\nEnvironment=PYTHONUNBUFFERED=1")),
-        ("capability added", _mutate("CapabilityBoundingSet=", "CapabilityBoundingSet=CAP_NET_BIND_SERVICE")),
-        ("wildcard bind in a comment", _text(UNIT_PATH) + "\n# listens on 0.0.0.0\n"),
-        ("syscall filter order", _mutate("SystemCallFilter=@system-service\nSystemCallFilter=~@privileged @resources", "SystemCallFilter=~@privileged @resources\nSystemCallFilter=@system-service")),
+        ("credential in Environment", lazy("Environment=PYTHONUNBUFFERED=1", "Environment=BREEZE_X=1\nEnvironment=PYTHONUNBUFFERED=1")),
+        ("CREDENTIALS_DIRECTORY set", lazy("Environment=PYTHONUNBUFFERED=1", "Environment=CREDENTIALS_DIRECTORY=/x\nEnvironment=PYTHONUNBUFFERED=1")),
+        ("capability added", lazy("CapabilityBoundingSet=", "CapabilityBoundingSet=CAP_NET_BIND_SERVICE")),
+        ("wildcard bind in a comment", lambda: _text(UNIT_PATH) + "\n# listens on 0.0.0.0\n"),
+        ("syscall filter order", lazy("SystemCallFilter=@system-service\nSystemCallFilter=~@privileged @resources", "SystemCallFilter=~@privileged @resources\nSystemCallFilter=@system-service")),
     ],
 )
-def test_d3_negative_controls_are_caught(label, text):
-    assert unit_problems(text) != [], label
+def test_d3_negative_controls_are_caught(label, make):
+    assert unit_problems(make()) != [], label
 
 
 # ------------------------------------------------------------------ pyproject
