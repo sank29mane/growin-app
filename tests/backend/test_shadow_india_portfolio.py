@@ -319,7 +319,8 @@ def test_minus_7_99_percent_latches_nothing_and_minus_8_exactly_halts_entries(tm
     result = edge.mark(D1, AAA="460")
     assert result.state.halt and not result.state.ended and result.drawdown == Decimal("-0.080000")
     assert [(p.event, p.scope) for p in policy.run_state(edge.store).open_pauses] == [("drawdown_halt", "entries")]
-    assert edge.portfolio.entry_block_reasons() == ("halt_latch", "run_paused")
+    # The 50-share halve is owed, so the run-wide exit_open (D-37) joins the halt latch and its pause.
+    assert edge.portfolio.entry_block_reasons() == ("exit_open", "halt_latch", "run_paused")
     assert [(r["latch"], r["scope"]) for r in edge.records("latch")] == [("halt", "entries")]
 
 
@@ -457,7 +458,7 @@ def test_any_open_stop_exit_blocks_every_buy_at_the_real_gate_and_writes_the_ses
         # A different name is blocked too: the block is account-wide.
         denied = run(rig.adapter.prepare(buy_intent(rig, "other", "TCS", 5), samples_for("TCS")))
         assert denied.decision is AdmissionDecision.DENIED and denied.reason_code == "stop_open"
-        assert portfolio.entry_block_reasons(ISINS["TCS"]) == ("stop_open",)
+        assert portfolio.entry_block_reasons(ISINS["TCS"]) == ("exit_open", "stop_open")  # D-37: the stop exit is owed
         (report,) = [r for r in store.records() if r["kind"] == "stop_open_report"]
         assert report["isins"] == [ISINS["RELIANCE"]] and report["buys_blocked"] is True
         assert report["as_of_date"] == D1.isoformat()
@@ -545,7 +546,7 @@ def test_recovery_releases_nothing_by_itself_and_only_the_latch_backed_release_c
         world.mark(day, AAA=close)
         assert world.latch.load().halt
         assert [p.event for p in policy.run_state(world.store).open_pauses] == ["drawdown_halt"]
-        assert world.portfolio.entry_block_reasons() == ("halt_latch", "run_paused")
+        assert world.portfolio.entry_block_reasons() == ("exit_open", "halt_latch", "run_paused")
     # The generic resume still refuses the drawdown pause.
     with pytest.raises(policy.PolicyError) as generic:
         policy.resume(world.store, "equity is back")
@@ -555,7 +556,7 @@ def test_recovery_releases_nothing_by_itself_and_only_the_latch_backed_release_c
     world.portfolio.release_halt("operator", "reviewed the recovery")
     assert not world.latch.load().halt
     assert policy.run_state(world.store).open_pauses == ()
-    assert world.portfolio.entry_block_reasons() == ()
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)  # D-37: the release does not close the owed halve
     assert world.records("resume")[-1]["reason"] == "reviewed the recovery"
     assert [r["reason"] for r in world.records("latch")] == ["raised_2026-10-09", "released_by_operator"]
 
@@ -575,7 +576,7 @@ def test_release_is_refused_while_drawdown_is_at_or_below_the_halt_line_unless_t
     world.portfolio.release_halt("operator", "accept the loss", rebase_halt_anchor=True)
     state = world.latch.load()
     assert not state.halt and state.halt_anchor == Decimal("46000") and state.peak == peak_before == CAP
-    assert world.portfolio.entry_block_reasons() == ()
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)  # D-37: the release does not close the owed halve
 
 
 def test_the_peak_never_rebases_and_the_recorded_drawdown_is_measured_from_it(tmp_path):
@@ -866,10 +867,10 @@ def test_halt_stop_and_run_end_survive_a_restart_and_the_buy_block_stays(tmp_pat
     world.account.buy("AAA", 20, "500")
     world.mark(D1, AAA="440")
     again = world.restart()
-    assert again.portfolio.entry_block_reasons() == ("stop_open",)
+    assert again.portfolio.entry_block_reasons() == ("exit_open", "stop_open")
     assert sorted(again.latch.load().stops) == [A]
     again.mark(D2, AAA="600")  # recovery
-    assert again.portfolio.entry_block_reasons() == ("stop_open",)
+    assert again.portfolio.entry_block_reasons() == ("exit_open", "stop_open")
 
 
 def test_a_second_mark_for_an_evaluated_session_changes_nothing(tmp_path):
@@ -959,7 +960,7 @@ def test_after_a_reopen_the_real_gate_still_refuses_from_the_latch_file(tmp_path
         portfolio = ShadowPortfolio(
             rig.ledger, rig.guard.store, reopen_evidence(tmp_path / "evidence"), instruments("RELIANCE", "TCS")
         )
-        assert portfolio.entry_block_reasons() == ("stop_open",)
+        assert portfolio.entry_block_reasons() == ("exit_open", "stop_open")
         denied = run(rig.adapter.prepare(buy_intent(rig, "after-reopen", "TCS", 5), samples_for("TCS")))
         assert denied.reason_code == "stop_open"
         assert state_path_for(rig.ledger.path).exists()
@@ -3008,3 +3009,150 @@ def test_a_gain_then_a_sale_carries_the_lowest_placement_not_a_stale_heap_readin
     value, reconciled = world.portfolio._carried_value(holding, base, lot_bookings(rows))
     assert not reconciled
     assert value == Decimal("2074")
+
+
+# --- D-37: an open risk exit blocks every buy until fill evidence closes it ----------------------------------------------------------------
+# A reset or ``release_halt`` clears the latch that raised an exit and leaves the exit itself in the latch. Before D-37
+# buys of every other name resumed at that moment, with the exit unsold. The rule reads ``open_exits``, so the only
+# thing that lifts it is the fill that closes the exit (or a Q-6 hold on that one name).
+
+
+def release(world: Fake) -> None:
+    """The operator accepts the loss and releases the halt: the 50-share halve is still owed."""
+
+    world.portfolio.release_halt("operator", "accept the loss", rebase_halt_anchor=True)
+
+
+def test_d37_a_released_halt_with_the_halve_still_owed_blocks_every_buy(tmp_path):
+    """Row ``halt_released_halve_owed_blocks_buys``. Break-proof: drop the ``open_exits`` read in
+    ``entry_block_reasons`` and the reasons are empty after the release: this fails."""
+    world = halved_world(tmp_path)
+    release(world)
+    state = world.latch.load()
+    assert not state.halt and state.open_exits[A].quantity == 50 and policy.run_state(world.store).open_pauses == ()
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)
+    assert world.portfolio.entry_block_reasons(B) == ("exit_open",)  # run-wide: another name is refused too
+    assert world.portfolio.buys_blocked(B)
+    assert [(p.reason, p.quantity) for p in world.portfolio.exit_proposals(D2).proposals] == [("halve", 50)]
+    assert world.restart().portfolio.entry_block_reasons() == ("exit_open",)  # the file says it, not memory
+
+
+def test_d37_a_stop_reset_with_the_stop_exit_owed_and_the_price_recovered_still_blocks(tmp_path):
+    """Row ``stop_reset_stop_exit_owed_blocks_buys``. Break-proof: drop the ``open_exits`` read and the reset leaves
+    nothing in the way: this fails."""
+    world = Fake(tmp_path)
+    world.account.buy("AAA", 20, "500")
+    world.mark(D1, AAA="400")
+    assert sorted(world.latch.load().stops) == [A]
+    world.latch.reset("stop", "operator", key=A)  # what ``python -m risk_india reset --latch stop`` does to this file
+    world.mark(D2, AAA="600")  # the price is back: the stop does not latch again
+    state = world.latch.load()
+    assert state.stops == {} and state.open_exits[A].reason == "stop"
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)  # no stop_open any more, and still no buy
+    assert world.portfolio.entry_block_reasons(B) == ("exit_open",)
+    (proposal,) = world.portfolio.exit_proposals(D3).proposals
+    assert (proposal.reason, proposal.quantity) == ("stop", 20)  # the exit is still owed, so the block is real
+
+
+def test_d37_the_block_clears_only_on_fill_evidence_and_a_partial_halve_fill_with_no_resting_sell_still_blocks(tmp_path):
+    """Row ``exit_open_clears_only_on_fill``. Break-proof: clear the block on ``open_sells == 0`` (no resting sell)
+    instead of on the holding and the partial row, which has no resting sell, reads empty: this fails."""
+    world = halved_world(tmp_path)
+    release(world)
+    assert dict(world.account.sells) == {}  # nothing rests: only the holding can speak
+    world.sell_for_exit("AAA", 20, "460")
+    world.portfolio.on_booked_sell(A, 20)
+    assert world.latch.load().open_exits[A].quantity == 30
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)  # 20 of 50 sold, no sell resting: still blocked
+    world.sell_for_exit("AAA", 30, "460")
+    world.portfolio.on_booked_sell(A, 30)
+    assert world.latch.load().open_exits == {} and world.portfolio.snapshot().holdings[0].quantity == 50
+    assert world.portfolio.entry_block_reasons() == ()  # the fill closed it: that is the only thing that does
+
+    stop = Fake(tmp_path / "stop")
+    stop.account.buy("AAA", 20, "500")
+    stop.mark(D1, AAA="400")
+    stop.latch.reset("stop", "operator", key=A)
+    stop.account.sell("AAA", 8, "400", proposal_id=stop.exit_id(A))
+    stop.portfolio.on_booked_sell(A, 8)
+    assert stop.portfolio.entry_block_reasons() == ("exit_open",)
+    stop.account.sell("AAA", 12, "400", proposal_id=stop.exit_id(A))
+    stop.portfolio.on_booked_sell(A, 12)
+    assert stop.portfolio.entry_block_reasons() == ()
+
+
+def test_d37_three_sessions_without_a_fill_still_block_because_time_releases_nothing(tmp_path):
+    """Row ``exit_open_survives_sessions_without_fill``. Break-proof: release an exit once it is a few sessions old
+    (``state.last_session`` minus ``since``) and the last mark reads empty: this fails."""
+    world = halved_world(tmp_path)
+    release(world)
+    for day, close in ((D2, "470"), (D3, "480"), (D4, "490")):
+        world.mark(day, AAA=close)  # a session passes and nothing fills
+        assert world.latch.load().open_exits[A].quantity == 50
+        assert world.portfolio.entry_block_reasons() == ("exit_open",)
+    assert world.restart().portfolio.entry_block_reasons() == ("exit_open",)
+
+
+def test_d37_after_a_release_a_held_out_halve_blocks_only_its_own_name_but_an_ambiguous_halve_blocks_the_run(tmp_path):
+    """Row ``held_out_and_ambiguous_exits_after_release``. Break-proof: count a held-out exit (drop the
+    ``_frozen_isins`` filter) and the held-out half fails; skip ambiguous exits and the ambiguous half fails."""
+    # Q-6: AAA carries a bonus pause and owes a halve of 20; BBB's stop is filled, so only the held-out halve is left.
+    world = probe_world(tmp_path / "held", structural=True)
+    plan = world.portfolio.exit_proposals(D3)
+    assert plan.held_out == (A,) and [(p.isin, p.reason) for p in plan.proposals] == [(B, "stop")]
+    world.sell_for_exit("BBB", 60, "430")
+    world.portfolio.on_booked_sell(B, 60)
+    release(world)
+    state = world.latch.load()
+    assert not state.halt and state.stops == {} and sorted(state.open_exits) == [A]
+    assert world.portfolio.entry_block_reasons() == ()  # another name is not blocked
+    assert world.portfolio.entry_block_reasons(B) == ()
+    assert world.portfolio.entry_block_reasons(A) == ("instrument_paused",)  # the held-out name is, as it was before D-37
+
+    # The same halve with no corporate action is not held out: it blocks the run.
+    control = probe_world(tmp_path / "control", structural=False)
+    control.sell_for_exit("BBB", 60, "430")
+    control.portfolio.on_booked_sell(B, 60)
+    release(control)
+    assert sorted(control.latch.load().open_exits) == [A] and control.portfolio.entry_block_reasons() == ("exit_open",)
+
+    # An ambiguous halve (a sell that is not its own) cannot be sized, so it blocks the whole run, and its own name too.
+    ambiguous = halved_world(tmp_path / "ambiguous")
+    ambiguous.account.sell("AAA", 5, "460")  # booked under no exit id
+    assert ambiguous.portfolio.exit_proposals(D2).ambiguous == (A,)
+    release(ambiguous)
+    assert ambiguous.portfolio.entry_block_reasons() == ("exit_open",)
+    assert ambiguous.portfolio.entry_block_reasons(A) == ("exit_open", "instrument_paused")
+
+
+def test_d37_a_held_out_exit_beside_a_waiting_exit_still_blocks_the_run_after_both_latches_are_reset(tmp_path):
+    """Mixed case (Sol P2). AAA is held out under a Q-6 pause; BBB's stop exit is still owed and its sell rests
+    (``waiting``); the stop latch and the halt are reset. Break-proof: widen the exception to
+    ``bool(open_exits) and not frozen`` and the reasons read empty: this fails."""
+    world = probe_world(tmp_path, structural=True)  # AAA: halve of 20, held out; BBB: stop of 60
+    world.latch.reset("stop", "operator", key=B)
+    release(world)
+    state = world.latch.load()
+    assert not state.halt and state.stops == {} and sorted(state.open_exits) == [A, B]
+    world.account.sells = {"BBB": 60}  # BBB's exit sell rests
+    plan = world.portfolio.exit_proposals(D3)
+    assert plan.held_out == (A,) and plan.waiting == (B,) and plan.proposals == ()
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)
+    assert world.portfolio.entry_block_reasons(ISINS["TCS"]) == ("exit_open",)
+    assert world.portfolio.entry_block_reasons(A) == ("exit_open", "instrument_paused")
+
+
+def test_d37_a_waiting_exit_blocks_the_run(tmp_path):
+    """A halve with a sell resting in the account is ``waiting``: still an open exit, still a block after release."""
+    world = halved_world(tmp_path)
+    release(world)
+    world.account.sells = {"AAA": 50}  # the halve's sell rests
+    assert world.portfolio.exit_proposals(D2).waiting == (A,)
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)
+
+
+def test_d37_an_unreadable_latch_stays_latch_unreadable_and_never_reads_open_exits(tmp_path):
+    world = halved_world(tmp_path)
+    release(world)
+    world.latch_path.write_text("{}")
+    assert world.portfolio.entry_block_reasons() == ("latch_unreadable",)
