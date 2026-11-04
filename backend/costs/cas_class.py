@@ -1,21 +1,27 @@
-"""Dated NSE closing-auction (CAS) class per ISIN and session date.
+"""CAS class types and the operator approval log for the snapshot procedure (D-34).
 
 The intraday fill model (``intraday_fills``) needs to know whether a security was in
-closing-auction scope on a date, because its volume check band is pinned per class. The
-class comes from an NSE publication the operator identifies and saves locally; no agent
-fetches NSE. Each table version cites that publication, the sha256 of the operator-saved
-file and the operator's written approval line, and lists one explicit row per ISIN.
+closing-auction scope on a session date, because its volume check band is pinned per class.
+The class is read from the operator-saved NSE security-master snapshot for exactly that
+session date (``pilot_data.cas_snapshots``, ``ElgbltyClsgAuctnSsn``); no agent fetches NSE.
+This module holds only the pure part:
+
+* ``CasClassRow``: one resolved class with the provenance the simulator records;
+* ``CasUnresolved``: a typed verdict with exactly one sub-reason and a detail string;
+* the append-only approval log ``schedules/nse_cas_procedure.json`` and its loader.
 
 Fail closed, like the holiday table in the gateway and ``ticks.py``:
 
-* There is no default class. An ISIN with no row on a date raises ``CasClassUnavailable``;
-  the simulator caller maps that to the INCONCLUSIVE code ``session_scope_unknown``.
-* A version with no publication, sha256 or operator approval refuses to load, as does a
-  row the operator marked unverified.
-* An empty table (the committed state until the operator sources the rows) loads and
-  resolves nothing.
+* There is no default class and no carry-forward. A symbol the snapshot cannot resolve is a
+  ``CasUnresolved``; the simulator caller maps it to the INCONCLUSIVE code
+  ``session_scope_unknown`` and records the sub-reason.
+* A procedure version counts only when the log holds an approval entry for it and no
+  revocation. The committed log ships with no entry: until the operator approves the
+  procedure, nothing resolves.
+* The log is hash-chained (``prev_sha256`` is the canonical sha256 of the entry before it),
+  so an edited or removed earlier entry makes the whole log refuse to load.
 
-The simulator never reads the table file: it receives the resolved ``CasClassRow``.
+The simulator never reads a file: it receives the resolved row or the unresolved verdict.
 """
 
 from __future__ import annotations
@@ -23,8 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from functools import lru_cache
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,85 +37,229 @@ from .core import (
     InputError,
     ScheduleError,
     canonical_json,
+    canonical_value,
     load_strict_json,
     sha256_hex,
 )
 
-CAS_SCHEMA = "growin.costs.cas_class/1"
-CAS_TABLE_PATH = Path(__file__).parent / "schedules" / "nse_cas_class.json"
+CAS_PROCEDURE_SCHEMA = "growin.costs.cas_procedure/1"
+PROCEDURE_PATH = Path(__file__).parent / "schedules" / "nse_cas_procedure.json"
 CAS = "cas"
 NON_CAS = "non_cas"
 CAS_CLASSES = (CAS, NON_CAS)
-# The INCONCLUSIVE code a caller reports when this module has no row.
+# The INCONCLUSIVE code a caller reports when a symbol-day has no resolved class.
 SCOPE_UNKNOWN_CODE = "session_scope_unknown"
 
-_FILE_KEYS = ("schema", "source_id", "status", "versions")
-_VERSION_KEYS = (
-    "version",
-    "revision",
-    "effective_from",
-    "effective_to",
-    "publication_id",
-    "publication_date",
-    "source_sha256",
-    "operator_approval",
-    "rows",
+# One sub-reason per unresolved verdict (D-34 b, 64-02 Task 2b). The tuple is the precedence order.
+SUB_REASONS = (
+    "snapshot_missing",
+    "snapshot_wrong_date",
+    "snapshot_hash_mismatch",
+    "procedure_unapproved",
+    "series_unsupported",
+    "identity_invalid",
+    "identity_mismatch",
+    "identity_ambiguous",
+    "flag_unknown",
+    "flag_conflict",
 )
-_APPROVAL_KEYS = ("line", "date")
-_ROW_KEYS = ("isin", "symbol", "class")
-_ISIN = re.compile(r"[A-Z0-9]{12}", re.ASCII)
+
+U24_UNVERIFIED = "unverified"
+U24_VERIFIED = "verified"
+U24_STATUSES = (U24_UNVERIFIED, U24_VERIFIED)
+
 _SHA256 = re.compile(r"[0-9a-f]{64}", re.ASCII)
+_FILE_KEYS = ("schema", "entries")
+_APPROVAL_ENTRY_KEYS = (
+    "procedure_version",
+    "spec_sha256",
+    "impl_sha256",
+    "u24_status",
+    "u24_evidence_ref",
+    "operator_approval",
+    "prev_sha256",
+)
+_REVOCATION_ENTRY_KEYS = ("revokes", "operator_approval", "prev_sha256")
+_APPROVAL_KEYS = ("line", "date")
 
 
-class CasClassUnavailable(InputError):
-    """No approved CAS-class row covers this ISIN on this date. Nothing defaults."""
+@dataclass(frozen=True)
+class IciciRef:
+    """The ICICI master row a Breeze stock code resolved through (D-34 e)."""
 
-    code = SCOPE_UNKNOWN_CODE
+    snapshot_date: date
+    snapshot_sha256: str
+    row_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.snapshot_date, date) or isinstance(self.snapshot_date, datetime):
+            raise InputError("icici_ref.snapshot_date must be a datetime.date")
+        for name in ("snapshot_sha256", "row_sha256"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise InputError(f"icici_ref.{name} must be 64 lowercase hex characters")
 
 
 @dataclass(frozen=True)
 class CasClassRow:
-    """One resolved row plus the provenance the simulator records."""
+    """One resolved class plus the provenance the simulator records (R-28, R-31)."""
 
     isin: str
-    symbol: str
+    nse_symbol: str
+    series: str
     cas_class: str
-    session_date: date
-    table_version: str
-    table_revision: str
-    version_hash: str
-    publication_id: str
-    publication_date: date
-    source_sha256: str
-    approval_date: date
+    snapshot_date: date
+    snapshot_sha256: str
+    index_sha256: str
+    procedure_version: int
+    spec_sha256: str
+    impl_sha256: str
+    u24_status: str
+    u24_evidence_ref: str | None
+    stock_code: str | None
+    icici_ref: IciciRef | None
+
+    def __post_init__(self) -> None:
+        for name in ("isin", "nse_symbol", "series"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise InputError(f"cas row {name} must be a non-empty string")
+        if self.cas_class not in CAS_CLASSES:
+            raise InputError(f"cas row class must be one of {CAS_CLASSES}, got {self.cas_class!r}")
+        if not isinstance(self.snapshot_date, date) or isinstance(self.snapshot_date, datetime):
+            raise InputError("cas row snapshot_date must be a datetime.date")
+        for name in ("snapshot_sha256", "index_sha256", "spec_sha256", "impl_sha256"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise InputError(f"cas row {name} must be 64 lowercase hex characters")
+        if isinstance(self.procedure_version, bool) or not isinstance(self.procedure_version, int):
+            raise InputError("cas row procedure_version must be an int")
+        if self.u24_status not in U24_STATUSES:
+            raise InputError(f"cas row u24_status must be one of {U24_STATUSES}")
+        if self.icici_ref is not None and not isinstance(self.icici_ref, IciciRef):
+            raise InputError("cas row icici_ref must be an IciciRef")
 
 
 @dataclass(frozen=True)
-class CasClassVersion:
-    version: str
-    revision: str
-    effective_from: date
-    effective_to: date | None
-    publication_id: str
-    publication_date: date
-    source_sha256: str
+class CasUnresolved:
+    """A typed verdict: no class, exactly one sub-reason, and what was known when it stopped."""
+
+    sub_reason: str
+    detail: str
+    session_date: date
+    procedure_version: int
+    snapshot_sha256: str | None = None
+    index_sha256: str | None = None
+    spec_sha256: str | None = None
+    impl_sha256: str | None = None
+    u24_status: str | None = None
+    u24_evidence_ref: str | None = None
+    stock_code: str | None = None
+    icici_ref: IciciRef | None = None
+
+    def __post_init__(self) -> None:
+        if self.sub_reason not in SUB_REASONS:
+            raise InputError(f"sub_reason must be one of {SUB_REASONS}, got {self.sub_reason!r}")
+        if not isinstance(self.detail, str) or not self.detail.strip():
+            raise InputError("an unresolved verdict needs a detail string")
+        if not isinstance(self.session_date, date) or isinstance(self.session_date, datetime):
+            raise InputError("session_date must be a datetime.date")
+        if isinstance(self.procedure_version, bool) or not isinstance(self.procedure_version, int):
+            raise InputError("procedure_version must be an int")
+
+
+def cas_record(verdict: CasClassRow | CasUnresolved | None, nse_symbol: str) -> dict[str, Any]:
+    """The one CAS field list of R-28, R-31 and D-34 e, as canonical primitives.
+
+    ``cas_class`` (or ``sub_reason`` and ``detail``), ``nse_symbol`` (the attempt pin),
+    ``snapshot_date``, ``snapshot_sha256``, ``index_sha256``, ``procedure_version``,
+    ``spec_sha256``, ``impl_sha256``, ``u24_status``, ``u24_evidence_ref`` and ``icici_ref``.
+    """
+    base: dict[str, Any] = {
+        "cas_class": None,
+        "sub_reason": None,
+        "detail": None,
+        "nse_symbol": nse_symbol,
+        "snapshot_date": None,
+        "snapshot_sha256": None,
+        "index_sha256": None,
+        "procedure_version": None,
+        "spec_sha256": None,
+        "impl_sha256": None,
+        "u24_status": None,
+        "u24_evidence_ref": None,
+        "icici_ref": None,
+    }
+    if isinstance(verdict, CasClassRow):
+        base.update(
+            cas_class=verdict.cas_class,
+            snapshot_date=verdict.snapshot_date.isoformat(),
+            snapshot_sha256=verdict.snapshot_sha256,
+            index_sha256=verdict.index_sha256,
+            procedure_version=verdict.procedure_version,
+            spec_sha256=verdict.spec_sha256,
+            impl_sha256=verdict.impl_sha256,
+            u24_status=verdict.u24_status,
+            u24_evidence_ref=verdict.u24_evidence_ref,
+            icici_ref=canonical_value(verdict.icici_ref),
+        )
+    elif isinstance(verdict, CasUnresolved):
+        base.update(
+            sub_reason=verdict.sub_reason,
+            detail=verdict.detail,
+            snapshot_date=verdict.session_date.isoformat(),
+            snapshot_sha256=verdict.snapshot_sha256,
+            index_sha256=verdict.index_sha256,
+            procedure_version=verdict.procedure_version,
+            spec_sha256=verdict.spec_sha256,
+            impl_sha256=verdict.impl_sha256,
+            u24_status=verdict.u24_status,
+            u24_evidence_ref=verdict.u24_evidence_ref,
+            icici_ref=canonical_value(verdict.icici_ref),
+        )
+    return base
+
+
+# ---- the approval log --------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProcedureEntry:
+    """One approved procedure identity (an approval entry of the log)."""
+
+    procedure_version: int
+    spec_sha256: str
+    impl_sha256: str
+    u24_status: str
+    u24_evidence_ref: str | None
     approval_line: str
     approval_date: date
-    classes: tuple[tuple[str, str, str], ...]  # (isin, symbol, class), file order
-    version_hash: str
+    prev_sha256: str | None
 
-    def covers(self, session_date: date) -> bool:
-        if session_date < self.effective_from:
-            return False
-        return self.effective_to is None or session_date <= self.effective_to
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "procedure_version": self.procedure_version,
+            "spec_sha256": self.spec_sha256,
+            "impl_sha256": self.impl_sha256,
+            "u24_status": self.u24_status,
+            "u24_evidence_ref": self.u24_evidence_ref,
+            "operator_approval": {"line": self.approval_line, "date": self.approval_date.isoformat()},
+            "prev_sha256": self.prev_sha256,
+        }
 
 
 @dataclass(frozen=True)
-class CasClassTable:
-    schema: str
-    source_id: str
-    status: str
-    versions: tuple[CasClassVersion, ...]
+class ProcedureLog:
+    """The validated log: raw entries in file order, approvals and the revoked versions."""
+
+    raw_entries: tuple[dict[str, Any], ...]
+    approvals: tuple[ProcedureEntry, ...]
+    revoked: frozenset[int]
+
+
+def entry_sha256(raw_entry: Mapping[str, Any]) -> str:
+    """Canonical sha256 of one log entry; the next entry carries it as ``prev_sha256``."""
+    return sha256_hex(canonical_json(raw_entry))
 
 
 def _mapping(raw: Any, path: str) -> Mapping[str, Any]:
@@ -135,130 +284,109 @@ def _text(raw: Mapping[str, Any], key: str, path: str) -> str:
     return value
 
 
-def _date(raw: Mapping[str, Any], key: str, path: str) -> date:
+def _sha(raw: Mapping[str, Any], key: str, path: str) -> str:
     value = raw[key]
-    if not isinstance(value, str):
-        raise ScheduleError(f"{path}.{key}: expected an ISO date string")
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
+        raise ScheduleError(f"{path}.{key}: expected 64 lowercase hex characters")
+    return value
+
+
+def _approval(raw: Any, path: str) -> tuple[str, date]:
+    approval = _mapping(raw, path)
+    _exact(approval, _APPROVAL_KEYS, path)
+    stamp = _text(approval, "date", path)
     try:
-        return date.fromisoformat(value)
+        return _text(approval, "line", path), date.fromisoformat(stamp)
     except ValueError as exc:
-        raise ScheduleError(f"{path}.{key}: not an ISO date") from exc
+        raise ScheduleError(f"{path}.date: not an ISO date") from exc
 
 
-def _parse_rows(raw: Any, path: str) -> tuple[tuple[str, str, str], ...]:
-    if not isinstance(raw, list) or not raw:
-        raise ScheduleError(f"{path}: expected a non-empty list of rows")
-    rows: list[tuple[str, str, str]] = []
-    seen: set[str] = set()
-    for n, item in enumerate(raw):
-        row_path = f"{path}[{n}]"
-        row = _mapping(item, row_path)
-        # ``status`` is the operator's per-row mark. Only an explicit "verified" is accepted;
-        # anything else (UNVERIFIED included) refuses the whole version.
-        if "status" in row:
-            if row["status"] != "verified":
-                raise ScheduleError(f"{row_path}.status: only 'verified' rows load, got {row['status']!r}")
-            row = {key: value for key, value in row.items() if key != "status"}
-        _exact(row, _ROW_KEYS, row_path)
-        isin = _text(row, "isin", row_path)
-        if not _ISIN.fullmatch(isin):
-            raise ScheduleError(f"{row_path}.isin: expected 12 upper-case letters or digits")
-        if isin in seen:
-            raise ScheduleError(f"{row_path}.isin: duplicate ISIN {isin!r} in one version")
-        seen.add(isin)
-        cas_class = _text(row, "class", row_path)
-        if cas_class not in CAS_CLASSES:
-            raise ScheduleError(f"{row_path}.class: expected one of {CAS_CLASSES}, got {cas_class!r}")
-        rows.append((isin, _text(row, "symbol", row_path), cas_class))
-    return tuple(rows)
-
-
-def _parse_version(raw: Any, index: int) -> CasClassVersion:
-    path = f"versions[{index}]"
-    top = _mapping(raw, path)
-    _exact(top, _VERSION_KEYS, path)
-    effective_from = _date(top, "effective_from", path)
-    effective_to = None if top["effective_to"] is None else _date(top, "effective_to", path)
-    if effective_to is not None and effective_to < effective_from:
-        raise ScheduleError(f"{path}.effective_to: precedes effective_from")
-    sha = _text(top, "source_sha256", path)
-    if not _SHA256.fullmatch(sha):
-        raise ScheduleError(f"{path}.source_sha256: expected 64 lowercase hex characters")
-    approval = _mapping(top["operator_approval"], f"{path}.operator_approval")
-    _exact(approval, _APPROVAL_KEYS, f"{path}.operator_approval")
-    return CasClassVersion(
-        version=_text(top, "version", path),
-        revision=_text(top, "revision", path),
-        effective_from=effective_from,
-        effective_to=effective_to,
-        publication_id=_text(top, "publication_id", path),
-        publication_date=_date(top, "publication_date", path),
-        source_sha256=sha,
-        approval_line=_text(approval, "line", f"{path}.operator_approval"),
-        approval_date=_date(approval, "date", f"{path}.operator_approval"),
-        classes=_parse_rows(top["rows"], f"{path}.rows"),
-        version_hash=sha256_hex(canonical_json(top)),
-    )
-
-
-def load_cas_table(path: Path) -> CasClassTable:
-    """Load one CAS-class file. The path is required; ``resolve_cas_class`` uses the committed file."""
-    source = Path(path)
-    raw = _mapping(load_strict_json(source.read_text(encoding="utf-8"), ScheduleError, source.name), "$")
-    _exact(raw, _FILE_KEYS, "$")
-    if raw["schema"] != CAS_SCHEMA:
-        raise ScheduleError(f"$.schema: expected {CAS_SCHEMA!r}")
-    versions_raw = raw["versions"]
-    # An empty list is the unpopulated state and is allowed: every lookup then fails closed.
-    if not isinstance(versions_raw, list):
-        raise ScheduleError("$.versions: expected a list")
-    versions = sorted(
-        (_parse_version(item, n) for n, item in enumerate(versions_raw)), key=lambda v: v.effective_from
-    )
-    ids = [version.version for version in versions]
-    if len(set(ids)) != len(ids):
-        raise ScheduleError("$.versions: duplicate version id")
-    for earlier, later in zip(versions, versions[1:]):
-        if earlier.effective_to is None:
-            raise ScheduleError(f"$.versions: {earlier.version} is open-ended but is not the latest version")
-        if earlier.effective_to >= later.effective_from:
-            raise ScheduleError(f"$.versions: {earlier.version} overlaps {later.version}")
-        if earlier.effective_to + timedelta(days=1) != later.effective_from:
-            raise ScheduleError(f"$.versions: {earlier.version} and {later.version} are not contiguous")
-    return CasClassTable(raw["schema"], _text(raw, "source_id", "$"), _text(raw, "status", "$"), tuple(versions))
-
-
-@lru_cache(maxsize=None)
-def committed_cas_table() -> CasClassTable:
-    return load_cas_table(CAS_TABLE_PATH)
-
-
-def resolve_cas_class(isin: str, session_date: date, *, table: CasClassTable | None = None) -> CasClassRow:
-    """The operator-approved class of ``isin`` on ``session_date``; no row raises ``CasClassUnavailable``."""
-    if not isinstance(isin, str) or not isin.strip():
-        raise CasClassUnavailable("isin must be a non-empty string")
-    if not isinstance(session_date, date) or isinstance(session_date, datetime):
-        raise CasClassUnavailable(f"session_date must be a datetime.date, got {type(session_date).__name__}")
-    used = committed_cas_table() if table is None else table
-    for version in used.versions:
-        if not version.covers(session_date):
-            continue
-        for row_isin, symbol, cas_class in version.classes:
-            if row_isin == isin:
-                return CasClassRow(
-                    isin=row_isin,
-                    symbol=symbol,
-                    cas_class=cas_class,
-                    session_date=session_date,
-                    table_version=version.version,
-                    table_revision=version.revision,
-                    version_hash=version.version_hash,
-                    publication_id=version.publication_id,
-                    publication_date=version.publication_date,
-                    source_sha256=version.source_sha256,
-                    approval_date=version.approval_date,
+def parse_procedure_log(raw: Any) -> ProcedureLog:
+    """Validate a parsed log. Any malformed, reordered, edited or removed earlier entry raises."""
+    top = _mapping(raw, "$")
+    _exact(top, _FILE_KEYS, "$")
+    if top["schema"] != CAS_PROCEDURE_SCHEMA:
+        raise ScheduleError(f"$.schema: expected {CAS_PROCEDURE_SCHEMA!r}")
+    entries = top["entries"]
+    if not isinstance(entries, list):
+        raise ScheduleError("$.entries: expected a list")
+    approvals: list[ProcedureEntry] = []
+    revoked: set[int] = set()
+    previous: str | None = None
+    last_version = 0
+    for n, item in enumerate(entries):
+        path = f"entries[{n}]"
+        entry = _mapping(item, path)
+        if "revokes" in entry:
+            _exact(entry, _REVOCATION_ENTRY_KEYS, path)
+        else:
+            _exact(entry, _APPROVAL_ENTRY_KEYS, path)
+        if entry["prev_sha256"] != previous:
+            raise ScheduleError(f"{path}.prev_sha256: does not match the entry before it (the log was edited)")
+        _approval(entry["operator_approval"], f"{path}.operator_approval")
+        if "revokes" in entry:
+            target = entry["revokes"]
+            if isinstance(target, bool) or not isinstance(target, int):
+                raise ScheduleError(f"{path}.revokes: expected an integer version")
+            if target not in {a.procedure_version for a in approvals}:
+                raise ScheduleError(f"{path}.revokes: version {target} has no earlier approval entry")
+            if target in revoked:
+                raise ScheduleError(f"{path}.revokes: version {target} is already revoked")
+            revoked.add(target)
+        else:
+            version = entry["procedure_version"]
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                raise ScheduleError(f"{path}.procedure_version: expected an integer of at least 1")
+            if version <= last_version:
+                raise ScheduleError(f"{path}.procedure_version: versions must strictly increase")
+            last_version = version
+            u24 = entry["u24_status"]
+            evidence = entry["u24_evidence_ref"]
+            if u24 not in U24_STATUSES:
+                raise ScheduleError(f"{path}.u24_status: expected one of {U24_STATUSES}")
+            if u24 == U24_VERIFIED:
+                if not isinstance(evidence, str) or not _SHA256.fullmatch(evidence):
+                    raise ScheduleError(f"{path}.u24_evidence_ref: verified needs the saved circular's sha256")
+            elif evidence is not None:
+                raise ScheduleError(f"{path}.u24_evidence_ref: must be null while u24_status is unverified")
+            line, stamp = _approval(entry["operator_approval"], f"{path}.operator_approval")
+            approvals.append(
+                ProcedureEntry(
+                    procedure_version=version,
+                    spec_sha256=_sha(entry, "spec_sha256", path),
+                    impl_sha256=_sha(entry, "impl_sha256", path),
+                    u24_status=u24,
+                    u24_evidence_ref=evidence,
+                    approval_line=line,
+                    approval_date=stamp,
+                    prev_sha256=previous,
                 )
-        break  # versions never overlap: the covering version has no row for this ISIN
-    raise CasClassUnavailable(
-        f"no approved CAS-class row for {isin!r} on {session_date.isoformat()} (there is no default class)"
-    )
+            )
+        previous = entry_sha256(entry)
+    return ProcedureLog(tuple(dict(e) for e in entries), tuple(approvals), frozenset(revoked))
+
+
+def load_procedure_log() -> ProcedureLog:
+    """Read and validate ``PROCEDURE_PATH``. Nothing is cached, so a revocation takes effect at once."""
+    source = Path(PROCEDURE_PATH)
+    raw = load_strict_json(source.read_text(encoding="utf-8"), ScheduleError, source.name)
+    return parse_procedure_log(raw)
+
+
+def approved_entry(log: ProcedureLog, version: int) -> ProcedureEntry | None:
+    """The approval entry of ``version`` when it exists and is not revoked, else None."""
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise InputError("procedure_version must be an int")
+    if version in log.revoked:
+        return None
+    for entry in log.approvals:
+        if entry.procedure_version == version:
+            return entry
+    return None
+
+
+def is_append_only_extension(base: tuple[Mapping[str, Any], ...], branch: tuple[Mapping[str, Any], ...]) -> bool:
+    """True when ``base`` (the entries on main) is an unchanged prefix of ``branch``."""
+    if len(branch) < len(base):
+        return False
+    return all(canonical_json(old) == canonical_json(new) for old, new in zip(base, branch))

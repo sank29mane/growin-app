@@ -12,7 +12,7 @@ import json
 import socket
 import threading
 import time as clock
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -644,19 +644,17 @@ def nse_desc(kind: str):
                             fetched_at=PILOT_FETCHED)
 
 
-@pytest.fixture()
-def pilot_root(tmp_path) -> Path:
+def build_pilot(root: Path, master_day: date = D) -> Path:
     from pilot_data.bhavcopy import ingest_cm_legacy
     from pilot_data.security_master import ingest_security_master
     from pilot_data.store import PilotDataStore
 
-    root = tmp_path / "pilot"
     with PilotDataStore(root, workspace="india") as store:
         ingest_security_master(
             store,
             nse_desc("security_master"),
             kit.security_master_bytes([kit.MASTER_RELIND, kit.MASTER_NIFBEE]),
-            snapshot_date=D,
+            snapshot_date=master_day,
             snapshot_date_basis="test_fixture",
         )
         rows = [
@@ -669,24 +667,36 @@ def pilot_root(tmp_path) -> Path:
     return root
 
 
-def cas_table_file(tmp_path: Path, isin: str = "INE002A01018") -> Path:
-    path = tmp_path / "cas.json"
-    path.write_text(json.dumps({
-        "schema": "growin.costs.cas_class/1", "source_id": "test-fixture", "status": "TEST FIXTURE",
-        "versions": [{
-            "version": "v1", "revision": "r1", "effective_from": "2026-01-01", "effective_to": None,
-            "publication_id": "TEST-PUB", "publication_date": "2026-01-01", "source_sha256": "a" * 64,
-            "operator_approval": {"line": "approved by test", "date": "2026-01-02"},
-            "rows": [{"isin": isin, "symbol": "RELIANCE", "class": "cas"}],
-        }],
-    }))
-    return path
+@pytest.fixture()
+def pilot_root(tmp_path) -> Path:
+    return build_pilot(tmp_path / "pilot")
+
+
+def import_cas(pilot_root: Path, tmp_path: Path, monkeypatch, day: date = D, *, name_day: date | None = None):
+    """Approve procedure version 1 in a temp log and import a small synthetic NSE snapshot for ``day``."""
+    import cas_testkit as ck
+    from costs import cas_class
+    from pilot_data import cas_snapshots
+
+    log = ck.ProcedureLogFile(tmp_path / "procedure.json")
+    monkeypatch.setattr(cas_class, "PROCEDURE_PATH", log.path)
+    log.approve(1)
+    rows = [ck.nse_row("RELIANCE", "EQ", "INE002A01018", "1"), ck.nse_row("NIFTYBEES", "EQ", "INF204KB14I2", "0")]
+    path = ck.write_snapshot(tmp_path / "inbox", name_day or day, rows)
+    cas_snapshots.import_snapshot(pilot_root, path, name_day or day, 1, calendar=ck.calendar_for(tmp_path))
+    return log
+
+
+@pytest.fixture()
+def cas_log(pilot_root: Path, tmp_path: Path, monkeypatch):
+    return import_cas(pilot_root, tmp_path, monkeypatch)
 
 
 def compare(env: Env, pilot_root: Path, *extra: str) -> tuple[int, list[str]]:
     out = io.StringIO()
+    version = [] if "--procedure-version" in extra else ["--procedure-version", "1"]
     code = cli_mod.main(
-        ["probe-intraday", "compare", "--saved", str(env.dir), "--pilot-store", str(pilot_root), *extra],
+        ["probe-intraday", "compare", "--saved", str(env.dir), "--pilot-store", str(pilot_root), *version, *extra],
         client_factory=lambda: pytest.fail("compare must not build a client"),
         out=out,
     )
@@ -712,10 +722,7 @@ def test_probe_compare_offline_no_client(env: Env, pilot_root: Path, monkeypatch
     assert env.relay.budget_reads == before and sent(env) == 6  # no relay call of any kind
 
 
-def test_probe_compare_prints_ttq_ratio_class_and_extremes(env: Env, pilot_root: Path, tmp_path: Path, monkeypatch):
-    from costs import cas_class
-
-    monkeypatch.setattr(cas_class, "committed_cas_table", lambda: cas_class.load_cas_table(cas_table_file(tmp_path)))
+def test_probe_compare_prints_ttq_ratio_class_and_extremes(env: Env, pilot_root: Path, cas_log):
     env.step("S-3")
     env.step("S-6")
     code, lines = compare(env, pilot_root)
@@ -723,24 +730,73 @@ def test_probe_compare_prints_ttq_ratio_class_and_extremes(env: Env, pilot_root:
     assert lines[0] == "compare probe_date 2026-10-21 symbols 3 saved_hashes verified"
     relind = next(line for line in lines if line.startswith("symbol RELIND bhavcopy_ttq"))
     assert "bhavcopy_ttq 3750 bar_volume_sum_day_window 3750 ratio 1.0000" in relind
-    assert "class cas table_version v1" in relind
+    assert "class cas nse_symbol RELIANCE isin INE002A01018 series EQ snapshot_date 2026-10-21 " in relind
+    assert "procedure_version 1 " in relind and "u24_status unverified icici_pin 2026-10-21:" in relind
     assert "U-23" in relind and "pre-open and block-deal" in relind  # the note rides on every ratio line
     nifbee = next(line for line in lines if line.startswith("symbol NIFBEE bhavcopy_ttq"))
     assert "bhavcopy_ttq 7500 bar_volume_sum_day_window 3750 ratio 0.5000" in nifbee
-    assert "class session_scope_unknown table_version none" in nifbee  # no row, so no default class
+    assert "class non_cas nse_symbol NIFTYBEES isin INF204KB14I2 series EQ" in nifbee
     assert "U-23" in nifbee
     assert "symbol RELIND day_high bhavcopy 101 bars 101 match true" in lines
     assert "symbol RELIND day_low bhavcopy 99 bars 99 match true" in lines
     assert "symbol NIFBEE day_low bhavcopy 98 bars 99 match false" in lines
-    assert "symbol BAJFI bhavcopy_row none reason master_unmapped" in lines
+    assert ("symbol BAJFI bhavcopy_row none reason master_unmapped "
+            "session_scope_unknown identity_mismatch icici_unmapped") in lines
     assert any(line.startswith("symbol RELIND sha256 verified") and "after_1540_ist true" in line for line in lines)
 
 
-def test_probe_compare_with_the_committed_empty_table_reports_scope_unknown(env: Env, pilot_root: Path):
+def test_probe_compare_without_a_snapshot_reports_scope_unknown_and_no_class(env: Env, pilot_root: Path):
     env.step("S-3")
     env.step("S-6")
     _, lines = compare(env, pilot_root)
-    assert all("class session_scope_unknown" in line for line in lines if " bhavcopy_ttq " in line)
+    ratio_lines = [line for line in lines if " bhavcopy_ttq " in line]
+    assert ratio_lines and all(
+        "session_scope_unknown snapshot_missing no_snapshot_for_date" in line and " class cas " not in line
+        and " class non_cas " not in line for line in ratio_lines
+    )
+
+
+def test_probe_compare_reports_an_unapproved_procedure(env: Env, pilot_root: Path, cas_log):
+    env.step("S-3")
+    env.step("S-6")
+    cas_log.revoke(1)
+    _, lines = compare(env, pilot_root)
+    ratio_lines = [line for line in lines if " bhavcopy_ttq " in line]
+    assert ratio_lines and all(
+        "session_scope_unknown procedure_unapproved procedure_version_revoked" in line for line in ratio_lines
+    )
+
+
+def test_probe_compare_symbol_from_same_date_snapshot_only(env: Env, tmp_path: Path, monkeypatch):
+    """The bhavcopy join and the CAS class both read the probe date only: an earlier master or snapshot never stands in."""
+    earlier = D - timedelta(days=1)
+    root = build_pilot(tmp_path / "pilot-earlier", master_day=earlier)
+    import_cas(root, tmp_path, monkeypatch, day=earlier)  # a snapshot for the day before, none for the probe date
+    env.step("S-3")
+    env.step("S-6")
+    _, lines = compare(env, root)
+    relind = [line for line in lines if line.startswith("symbol RELIND ")]
+    assert any("bhavcopy_row none reason master_unmapped session_scope_unknown snapshot_missing" in line for line in relind)
+    assert not any(" bhavcopy_ttq " in line for line in relind)
+
+
+def test_cas_check_broker_matches_compare(env: Env, pilot_root: Path, cas_log):
+    """``check-broker`` and the probe print one text for the same code, so what an operator checks is what runs."""
+    from pilot_data import cas_snapshots
+
+    env.step("S-3")
+    env.step("S-6")
+    _, lines = compare(env, pilot_root)
+    sink = io.StringIO()
+    code = cas_snapshots.main(["check-broker", "--root", str(pilot_root), "--date", D.isoformat(),
+                               "--procedure-version", "1", "--stock-codes", "RELIND", "NIFBEE", "BAJFI"], out=sink)
+    assert code == 0
+    checked = sink.getvalue().splitlines()
+    assert len(checked) == 3
+    for line in checked:
+        _, stock_code, text = line.split(" ", 2)
+        probe_lines = [p for p in lines if p.startswith(f"symbol {stock_code} ") and text in p]
+        assert probe_lines, f"{stock_code}: {text} not printed by compare"
 
 
 def test_probe_compare_rehashes_saved_bytes(env: Env, pilot_root: Path):
@@ -790,8 +846,12 @@ def test_probe_compare_uses_the_highest_seq_s6_answer(env: Env, pilot_root: Path
 def test_the_cli_documents_exit_code_5_and_both_probe_modes():
     assert cli_mod.EXIT_EVIDENCE == 5
     parser = cli_mod._parser()
-    ns = parser.parse_args(["probe-intraday", "compare", "--saved", "a", "--pilot-store", "b"])
-    assert (ns.command, ns.probe_mode) == ("probe-intraday", "compare")
+    ns = parser.parse_args(["probe-intraday", "compare", "--saved", "a", "--pilot-store", "b", "--procedure-version", "3"])
+    assert (ns.command, ns.probe_mode, ns.procedure_version) == ("probe-intraday", "compare", 3)
+    for argv in (["probe-intraday", "compare", "--saved", "a", "--pilot-store", "b"],  # no default version
+                 ["probe-intraday", "compare", "--saved", "a", "--pilot-store", "b", "--procedure-version", "latest"]):
+        with pytest.raises(SystemExit):
+            parser.parse_args(argv)
     ns = parser.parse_args(["probe-intraday", "step", "--step", "S-3", "--probe-dir", "a"])
     assert (ns.command, ns.probe_mode, ns.step) == ("probe-intraday", "step", "S-3")
 
@@ -802,7 +862,7 @@ def test_relay_api_documents_the_probe_flags_and_every_exit_code():
     for code in ("0 ok", "1 relay error", "2 usage", "3 config error", "4 tunnel error", "5 saved evidence refused"):
         assert code in exits
     assert "INCONCLUSIVE" in exits
-    for flag in ("--symbol", "--date", "--probe-dir", "--pilot-store"):
+    for flag in ("--symbol", "--date", "--probe-dir", "--pilot-store", "--procedure-version"):
         assert flag in text
     status = text[text.index("Status:") : text.index("## Contract growin-relay/1")]
     for stale in ("arrive on the VM side", "later change"):
@@ -821,7 +881,7 @@ def test_probe_a_latched_stop_refuses_a_later_step_and_names_it(env: Env):
     assert "slot S-9 intraday RELIND probe_budget_stop" in lines
     assert lines[-1] == "step S-9 status probe_budget_stop sent 3"
     _, closing = env.step("S-12")
-    assert closing[0] == f"step S-12 relay_delta 0 ledger_sent 3"
+    assert closing[0] == "step S-12 relay_delta 0 ledger_sent 3"
 
 
 # ------------------------------------------------------- one rule for a slot's outcome (review r3)

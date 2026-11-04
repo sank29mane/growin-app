@@ -205,6 +205,28 @@ def latest_snapshot(store: PilotDataStore, *, on_or_before: date) -> MasterSnaps
     return _snapshot_from_db(found[0]) if found else None
 
 
+def snapshot_on(store: PilotDataStore, day: date) -> MasterSnapshotRef | None:
+    """The snapshot dated exactly ``day`` (same tie-break as ``latest_snapshot``), or None. Never a nearer date."""
+    ensure_master_tables(store)
+    found = store.query(
+        "SELECT snapshot_sha256, snapshot_date, snapshot_date_basis, row_count FROM security_master_snapshots "
+        "WHERE snapshot_date = ? ORDER BY ingested_at_utc DESC, snapshot_sha256 LIMIT 1",
+        [day],
+    )
+    return _snapshot_from_db(found[0]) if found else None
+
+
+def snapshot_by_sha(store: PilotDataStore, snapshot_sha256: str, day: date) -> MasterSnapshotRef | None:
+    """The snapshot with this sha256 AND this date (both keys of its primary key), or None. No fallback."""
+    ensure_master_tables(store)
+    found = store.query(
+        "SELECT snapshot_sha256, snapshot_date, snapshot_date_basis, row_count FROM security_master_snapshots "
+        "WHERE snapshot_sha256 = ? AND snapshot_date = ? LIMIT 1",
+        [snapshot_sha256, day],
+    )
+    return _snapshot_from_db(found[0]) if found else None
+
+
 def require_fresh_snapshot(store: PilotDataStore, *, today_ist: date) -> MasterSnapshotRef:
     ensure_master_tables(store)
     found = store.query(

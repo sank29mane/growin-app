@@ -684,16 +684,20 @@ def compare(
     say: Callable[[str], None],
     *,
     window: tuple[time, time],
+    procedure_version: int,
     probe_date: date | None = None,
 ) -> int:
-    """S-11b. Offline: reads the saved S-6 bytes, the local pilot store and the committed CAS table.
+    """S-11b. Offline: reads the saved S-6 bytes, the local pilot store and the probe-date CAS snapshot.
 
-    It builds no RelayClient and no HTTP client, and it opens the pilot store read-only.
+    The class comes from ``cas_snapshots.resolve_broker`` for the probe date under the required, explicit
+    ``procedure_version`` (no newest fallback), through the ICICI master dated exactly the probe date. A symbol
+    that does not resolve prints ``session_scope_unknown <sub_reason>``. It builds no RelayClient and no HTTP
+    client, and it opens the pilot store read-only.
     """
-    from costs.cas_class import CasClassUnavailable, resolve_cas_class
+    from pilot_data import cas_snapshots
     from pilot_data.bhavcopy import primary_bars_on
     from pilot_data.core import PilotDataError
-    from pilot_data.security_master import latest_snapshot, lookup_stock_code
+    from pilot_data.security_master import lookup_stock_code, snapshot_on
     from pilot_data.store import PilotDataStore
 
     day = probe_date or _latest_answer_date(saved)
@@ -706,7 +710,7 @@ def compare(
     with store:
         try:
             bars = primary_bars_on(store, day)
-            snapshot = latest_snapshot(store, on_or_before=day)
+            snapshot = snapshot_on(store, day)
         except PilotDataError as err:
             raise EvidenceError(f"pilot_store_{err.code}") from None
         for symbol in sorted(answers):
@@ -721,24 +725,24 @@ def compare(
             if facts is None:
                 say(f"symbol {symbol} bars_unreadable")
                 continue
+            # The class never depends on the bhavcopy join: it is resolved first and printed on every line below.
+            verdict = cas_snapshots.resolve_broker(
+                pilot_store, day, procedure_version, symbol, cas_snapshots.IciciPin.select(day)
+            )
+            klass = cas_snapshots.describe(verdict)
             try:
                 master = lookup_stock_code(store, snapshot, symbol) if snapshot is not None else None
             except PilotDataError as err:
-                say(f"symbol {symbol} master_lookup {err.code}")
+                say(f"symbol {symbol} master_lookup {err.code} {klass}")
                 continue
             if master is None or not master.isin:
-                say(f"symbol {symbol} bhavcopy_row none reason master_unmapped")
+                say(f"symbol {symbol} bhavcopy_row none reason master_unmapped {klass}")
                 continue
             rows = [bar for bar in bars if bar.isin == master.isin and bar.series in ("EQ", "BE")]
             if len(rows) != 1:
-                say(f"symbol {symbol} bhavcopy_row none reason {'ambiguous' if rows else 'absent'}")
+                say(f"symbol {symbol} bhavcopy_row none reason {'ambiguous' if rows else 'absent'} {klass}")
                 continue
             bhavcopy = rows[0]
-            try:
-                cas = resolve_cas_class(master.isin, day)
-                klass = f"class {cas.cas_class} table_version {cas.table_version}"
-            except CasClassUnavailable:
-                klass = "class session_scope_unknown table_version none"
             if bhavcopy.volume > 0:
                 ratio = (Decimal(facts["volume_day_window"]) / Decimal(bhavcopy.volume)).quantize(Decimal("0.0001"))
             else:

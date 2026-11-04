@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from costs import intraday_fills as ifs
-from costs.cas_class import CasClassRow
+from costs.cas_class import CasClassRow, CasUnresolved, IciciRef, SUB_REASONS, cas_record
 from costs.core import IST, InputError, ScheduleError, Side, seal, sha256_hex
 from costs.fills import (
     FILLED_AT_LIMIT,
@@ -59,6 +59,7 @@ D = Decimal
 ISIN = "INE0TEST0001"
 SERIES = "EQ"
 CODE = "TESTCO"
+NSE_SYMBOL = "TESTNSE"
 SESSION = date(2026, 10, 6)
 NEXT_SESSION = date(2026, 10, 7)
 SCHEDULE_PATH = (
@@ -74,11 +75,20 @@ NO_BAND = PriceBand("no_band", None, None, SESSION, "test-band", sha256_hex("tes
 SESSION_OK = SessionFacts(True, SCHEDULE.session_timing_version)
 
 
-def cas_row(cas_class: str = "cas", isin: str = ISIN, session: date = SESSION) -> CasClassRow:
+def cas_row(
+    cas_class: str = "cas", isin: str = ISIN, session: date = SESSION, nse_symbol: str = NSE_SYMBOL, series: str = SERIES,
+    procedure_version: int = 1,
+) -> CasClassRow:
     return CasClassRow(
-        isin, CODE, cas_class, session, "cas-test-v1", "r1", sha256_hex("version"), "PUB-TEST-1",
-        date(2026, 10, 1), sha256_hex("saved-file"), date(2026, 10, 2),
+        isin, nse_symbol, series, cas_class, session, sha256_hex("snapshot"), sha256_hex("index"), procedure_version,
+        sha256_hex("spec"), sha256_hex("impl"), "unverified", None, CODE,
+        IciciRef(session, sha256_hex("icici-snapshot"), sha256_hex("icici-row")),
     )
+
+
+def cas_unresolved(sub_reason: str = "snapshot_missing", detail: str = "no_snapshot_for_date", session: date = SESSION):
+    return CasUnresolved(sub_reason, detail, session, 1, snapshot_sha256=sha256_hex("snapshot"),
+                         spec_sha256=sha256_hex("spec"), impl_sha256=sha256_hex("impl"), u24_status="unverified")
 
 
 # ---- builders ----------------------------------------------------------------------------
@@ -155,7 +165,8 @@ def assess(rows=None, *, schedule=SCHEDULE, evidence=None, bhavcopy="auto", cas=
     rows = session_rows() if rows is None else rows
     return assess_day(
         evidence if evidence is not None else evidence_for(rows, **evidence_kw),
-        schedule=schedule, isin=ISIN, series=SERIES, stock_code=CODE, session_date=SESSION, tick=tick, band=band,
+        schedule=schedule, isin=ISIN, series=SERIES, stock_code=CODE, nse_symbol=NSE_SYMBOL, session_date=SESSION,
+        tick=tick, band=band,
         session=session, cas_row=cas_row() if cas is None else cas,
         bhavcopy=bhavcopy_for(rows) if bhavcopy == "auto" else bhavcopy, daily_bar_volume=daily,
     )
@@ -164,7 +175,7 @@ def assess(rows=None, *, schedule=SCHEDULE, evidence=None, bhavcopy="auto", cas=
 def attempt(intent_id="a1", *, side=Side.BUY, quantity=10, limit="399.50", at_time="10:02", seconds=30,
             band=FIXED_BAND, tick=TICK, schedule=SCHEDULE) -> IntradayAttempt:
     return IntradayAttempt(
-        intent_id, ISIN, SERIES, CODE, SESSION, side, quantity, D(limit), tick, band,
+        intent_id, ISIN, SERIES, CODE, NSE_SYMBOL, SESSION, side, quantity, D(limit), tick, band,
         at(at_time, seconds), schedule.schedule_hash,
     )
 
@@ -360,7 +371,8 @@ def test_schedule_loader_refuses_duplicate_keys_and_floats():
 
 def test_R1_input_pin_missing():
     base = dict(
-        intent_id="a1", isin=ISIN, series=SERIES, stock_code=CODE, session_date=SESSION, side=Side.BUY,
+        intent_id="a1", isin=ISIN, series=SERIES, stock_code=CODE, nse_symbol=NSE_SYMBOL, session_date=SESSION,
+        side=Side.BUY,
         quantity=10, limit_price=D("399.50"), tick=TICK, band=FIXED_BAND, submitted_at=at("10:02"),
         scenario_set_hash=SCHEDULE.schedule_hash,
     )
@@ -368,7 +380,7 @@ def test_R1_input_pin_missing():
     for field, bad in [
         ("quantity", 0), ("quantity", True), ("quantity", 1.5), ("limit_price", 399.5), ("limit_price", "399.5"),
         ("side", "BUY"), ("tick", None), ("band", None), ("intent_id", ""), ("scenario_set_hash", "abc"),
-        ("submitted_at", None),
+        ("submitted_at", None), ("nse_symbol", ""), ("nse_symbol", None),
     ]:
         with pytest.raises(InputError):
             IntradayAttempt(**{**base, field: bad})
@@ -377,7 +389,8 @@ def test_R1_input_pin_missing():
 def test_R1_input_naive_time():
     with pytest.raises(InputError):
         attempt_naive = dict(
-            intent_id="a1", isin=ISIN, series=SERIES, stock_code=CODE, session_date=SESSION, side=Side.BUY,
+            intent_id="a1", isin=ISIN, series=SERIES, stock_code=CODE, nse_symbol=NSE_SYMBOL, session_date=SESSION,
+        side=Side.BUY,
             quantity=10, limit_price=D("399.50"), tick=TICK, band=FIXED_BAND,
             submitted_at=datetime(2026, 10, 6, 10, 2), scenario_set_hash=SCHEDULE.schedule_hash,
         )
@@ -387,7 +400,7 @@ def test_R1_input_naive_time():
 def test_R1_submission_on_another_date_is_an_input_error():
     with pytest.raises(InputError):
         IntradayAttempt(
-            "a1", ISIN, SERIES, CODE, SESSION, Side.BUY, 10, D("399.50"), TICK, FIXED_BAND,
+            "a1", ISIN, SERIES, CODE, NSE_SYMBOL, SESSION, Side.BUY, 10, D("399.50"), TICK, FIXED_BAND,
             at("10:02") - timedelta(days=1), SCHEDULE.schedule_hash,
         )
 
@@ -395,8 +408,8 @@ def test_R1_submission_on_another_date_is_an_input_error():
 def test_R1_other_timezones_are_read_as_instants():
     utc = timezone.utc
     moment = at("10:02", 30).astimezone(utc)
-    same = IntradayAttempt("a1", ISIN, SERIES, CODE, SESSION, Side.BUY, 10, D("399.50"), TICK, FIXED_BAND, moment,
-                           SCHEDULE.schedule_hash)
+    same = IntradayAttempt("a1", ISIN, SERIES, CODE, NSE_SYMBOL, SESSION, Side.BUY, 10, D("399.50"), TICK, FIXED_BAND,
+                           moment, SCHEDULE.schedule_hash)
     (result,) = simulate_intraday(assess(), [same], SCHEDULE)
     assert {e.reason: e for e in result.exclusions}["before_submission"].last_label == label("10:03")
 
@@ -571,19 +584,17 @@ def test_R9_session_timing_version_changed():
     assert code_of(result) == ifs.SESSION_NOT_STANDARD
 
 
-class _NoCas:
-    pass
+def day_with(cas, **kw):
+    rows = session_rows()
+    return assess_day(
+        evidence_for(rows), schedule=SCHEDULE, isin=ISIN, series=SERIES, stock_code=CODE, nse_symbol=NSE_SYMBOL,
+        session_date=SESSION, tick=TICK, band=FIXED_BAND, session=SESSION_OK, cas_row=cas,
+        bhavcopy=bhavcopy_for(rows), **kw,
+    )
 
 
 def test_R9_session_scope_unknown():
-    (missing,) = run(cas=None, **{}) if False else simulate_intraday(
-        assess_day(
-            evidence_for(session_rows()), schedule=SCHEDULE, isin=ISIN, series=SERIES, stock_code=CODE,
-            session_date=SESSION, tick=TICK, band=FIXED_BAND, session=SESSION_OK, cas_row=None,
-            bhavcopy=bhavcopy_for(session_rows()),
-        ),
-        [attempt()], SCHEDULE,
-    )
+    (missing,) = simulate_intraday(day_with(None), [attempt()], SCHEDULE)
     assert code_of(missing) == ifs.SESSION_SCOPE_UNKNOWN
     (other_isin,) = run(cas=cas_row(isin="INE0TEST0002"))
     assert code_of(other_isin) == ifs.SESSION_SCOPE_UNKNOWN
@@ -591,12 +602,100 @@ def test_R9_session_scope_unknown():
     assert code_of(other_day) == ifs.SESSION_SCOPE_UNKNOWN
 
 
-def test_R9_verdict_records_the_class_table_version_and_source():
+def test_cas_row_instrument_mismatch_refused():
+    """A resolved row for another symbol, series or ISIN than the pinned instrument is never used."""
+    for row_changes, sub_reason, detail in [
+        ({"isin": "INE0TEST0002"}, "identity_mismatch", "row_instrument_differs_from_pinned"),
+        ({"nse_symbol": "OTHER"}, "identity_mismatch", "row_instrument_differs_from_pinned"),
+        ({"series": "BE"}, "identity_mismatch", "row_instrument_differs_from_pinned"),
+        ({"session": NEXT_SESSION}, "snapshot_wrong_date", "row_date_differs_from_session"),
+    ]:
+        day = assess(cas=cas_row(**row_changes))
+        assert (day.cas_class, day.cas_sub_reason, day.cas_detail) == (None, sub_reason, detail)
+        assert day.verdict_code == ifs.SESSION_SCOPE_UNKNOWN
+
+
+def test_cas_attempt_symbol_pin_mismatch():
+    """The attempt pins the NSE symbol; evidence of the day for another symbol cannot be admitted."""
+    day = assess()
+    other = dataclasses.replace(attempt(), nse_symbol="OTHER")
+    with pytest.raises(InputError):
+        simulate_intraday(day, [other], SCHEDULE)
+    with pytest.raises(InputError):
+        admit_bars(day, other, SCHEDULE)
+
+
+def test_R9_verdict_records_the_class_and_the_snapshot_provenance():
     day = assess(cas=cas_row("non_cas"))
-    assert (day.cas_class, day.cas_table_version) == ("non_cas", "cas-test-v1")
-    assert day.cas_source_ref == f"PUB-TEST-1:{sha256_hex('saved-file')}"
+    assert (day.cas_class, day.cas_sub_reason, day.cas_detail) == ("non_cas", None, None)
+    assert day.nse_symbol == NSE_SYMBOL
+    assert day.cas_snapshot_date == SESSION.isoformat()
+    assert (day.cas_snapshot_sha256, day.cas_index_sha256) == (sha256_hex("snapshot"), sha256_hex("index"))
+    assert (day.cas_procedure_version, day.cas_spec_sha256, day.cas_impl_sha256) == (
+        1, sha256_hex("spec"), sha256_hex("impl"))
+    assert (day.cas_u24_status, day.cas_u24_evidence_ref) == ("unverified", None)
+    assert day.cas_icici_ref == {"snapshot_date": SESSION.isoformat(), "snapshot_sha256": sha256_hex("icici-snapshot"),
+                                 "row_sha256": sha256_hex("icici-row")}
     assert day.continuous_end == "15:30"
     assert assess(cas=cas_row("cas")).continuous_end == "15:15"
+
+
+@pytest.mark.parametrize("sub_reason", SUB_REASONS)
+def test_session_scope_unknown_sub_reason_recorded(sub_reason):
+    """One row per sub-reason: the day verdict is INCONCLUSIVE session_scope_unknown and the reason is kept."""
+    verdict = cas_unresolved(sub_reason, f"{sub_reason}_detail")
+    day = assess(cas=verdict)
+    assert day.verdict_code == ifs.SESSION_SCOPE_UNKNOWN
+    assert (day.cas_class, day.cas_sub_reason, day.cas_detail) == (None, sub_reason, f"{sub_reason}_detail")
+    assert day.cas_snapshot_sha256 == sha256_hex("snapshot") and day.cas_u24_status == "unverified"
+    (result,) = run(cas=verdict)
+    assert code_of(result) == ifs.SESSION_SCOPE_UNKNOWN
+    assert (result.cas_class, result.cas_sub_reason, result.cas_detail) == (None, sub_reason, f"{sub_reason}_detail")
+    assert {s.outcome for s in result.scenarios} == {IntradayOutcome.INCONCLUSIVE}
+
+
+def test_cas_unresolved_for_another_date_is_snapshot_wrong_date():
+    day = assess(cas=cas_unresolved("flag_unknown", "x", session=NEXT_SESSION))
+    assert (day.cas_sub_reason, day.cas_detail) == ("snapshot_wrong_date", "verdict_is_for_another_date")
+
+
+def test_cas_row_not_supplied_is_snapshot_missing():
+    day = day_with(None)
+    assert (day.cas_sub_reason, day.cas_detail) == ("snapshot_missing", "cas_row_not_supplied")
+
+
+def test_cas_snapshot_fields_in_result_hash():
+    """Every CAS field of R-28 and R-31 moves the day hash; a different snapshot is a different day record."""
+    base = assess(cas=cas_row()).day_hash
+    assert assess(cas=cas_row()).day_hash == base
+    variants = {
+        "class": cas_row("non_cas"),
+        "procedure_version": cas_row(procedure_version=2),
+        "snapshot": dataclasses.replace(cas_row(), snapshot_sha256=sha256_hex("snapshot-2")),
+        "index": dataclasses.replace(cas_row(), index_sha256=sha256_hex("index-2")),
+        "spec": dataclasses.replace(cas_row(), spec_sha256=sha256_hex("spec-2")),
+        "impl": dataclasses.replace(cas_row(), impl_sha256=sha256_hex("impl-2")),
+        "u24": dataclasses.replace(cas_row(), u24_status="verified", u24_evidence_ref=sha256_hex("circular")),
+        "icici": dataclasses.replace(cas_row(), icici_ref=IciciRef(SESSION, sha256_hex("icici-2"), sha256_hex("icici-row"))),
+        "icici_row": dataclasses.replace(cas_row(), icici_ref=IciciRef(SESSION, sha256_hex("icici-snapshot"), sha256_hex("row-2"))),
+        "no_icici": dataclasses.replace(cas_row(), icici_ref=None),
+    }
+    hashes = {name: assess(cas=row_).day_hash for name, row_ in variants.items()}
+    assert base not in hashes.values() and len(set(hashes.values())) == len(hashes), hashes
+    # The sub-reason and detail are part of the record too.
+    reasons = {assess(cas=cas_unresolved(r, "d")).day_hash for r in SUB_REASONS}
+    assert len(reasons) == len(SUB_REASONS)
+    assert assess(cas=cas_unresolved("flag_unknown", "d1")).day_hash != assess(cas=cas_unresolved("flag_unknown", "d2")).day_hash
+    day = assess(cas=cas_row())
+    verify_day_integrity(day)
+    tampered = dataclasses.replace(day, cas_snapshot_sha256=sha256_hex("other"))
+    with pytest.raises(InputError):
+        verify_day_integrity(tampered)
+    (result,) = simulate_intraday(day, [attempt()], SCHEDULE)
+    record = cas_record(cas_row(), NSE_SYMBOL)
+    assert result.nse_symbol == NSE_SYMBOL and result.cas_snapshot_sha256 == record["snapshot_sha256"]
+    assert (result.cas_procedure_version, result.cas_spec_sha256, result.cas_impl_sha256) == (1, record["spec_sha256"], record["impl_sha256"])
+    assert result.cas_icici_ref == record["icici_ref"]
 
 
 def test_R11_lifetime_same_for_cas_and_non_cas():
@@ -1500,7 +1599,7 @@ COSTS_DIR = Path(__file__).resolve().parents[2] / "backend" / "costs"
 
 # codex-r1-3: the purity scan bans imports and clocks, not file reads. Stage A and Stage B must read nothing from
 # disk. Only the two loaders below may touch the filesystem, and each does exactly one read of a committed file.
-APPROVED_LOADERS = {"intraday_fills.py": {"load_intraday_scenarios"}, "cas_class.py": {"load_cas_table"}}
+APPROVED_LOADERS = {"intraday_fills.py": {"load_intraday_scenarios"}, "cas_class.py": {"load_procedure_log"}}
 FS_ATTR_CALLS = {
     "open", "read_text", "read_bytes", "write_text", "write_bytes", "exists", "is_file", "is_dir", "is_symlink",
     "iterdir", "glob", "rglob", "walk", "scandir", "listdir", "stat", "lstat", "mkdir", "unlink", "rmdir", "touch",
@@ -1612,7 +1711,7 @@ FS_MUTANTS = (
 @pytest.mark.parametrize(
     "module, function",
     [("intraday_fills.py", "assess_day"), ("intraday_fills.py", "simulate_intraday"),
-     ("intraday_fills.py", "admit_bars"), ("cas_class.py", "resolve_cas_class")],
+     ("intraday_fills.py", "admit_bars"), ("cas_class.py", "approved_entry")],
 )
 def test_R30_filesystem_mutant_inside_a_stage_goes_red(module, function, statement):
     source = (COSTS_DIR / module).read_text(encoding="utf-8")

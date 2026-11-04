@@ -304,7 +304,7 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-s
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-audit --after-seq 0
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli tunnel
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday step --step S-3 --probe-dir DIR
-uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday compare --saved DIR --pilot-store ROOT
+uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday compare --saved DIR --pilot-store ROOT --procedure-version N
 ```
 
 - `health` prints `state`, `login_pending`, `expires_at_ist` and `egress_ok`, one per line.
