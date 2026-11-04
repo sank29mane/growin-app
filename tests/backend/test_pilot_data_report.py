@@ -723,3 +723,20 @@ def test_the_part2_cli_fails_closed_on_a_writable_existing_report(tmp_path, caps
     path.chmod(0o644)
     assert main(argv) == 2
     assert json.loads(capsys.readouterr().out)["error_code"] == "report_file_writable"
+
+
+def test_a_cross_check_stored_under_another_run_id_is_refused(relay_store):
+    load_bhavcopy(relay_store)
+    load_breeze(relay_store, "CANBAN", breeze_rows("CANBAN", CANBK))
+    check = cc_run(relay_store, make_targets(CANBK_MEMBER))
+    body = relay_store.query("SELECT result_json FROM crosscheck_runs WHERE run_id = ?", [check.run_id])[0][0]
+    relay_store.append_rows(  # the content and its hash are both genuine; only the row's key differs
+        "crosscheck_runs",
+        [{"run_id": "6" * 64, "workspace": "india", "started_at_utc": datetime(2099, 1, 1), "params_json": "{}",
+          "result_json": body, "result_sha256": check.report_sha256, "source_sha256": "6" * 64,
+          "row_sha256": check.report_sha256}],
+        check="crosscheck_run",
+    )
+    with pytest.raises(PilotDataError) as caught:
+        part2(relay_store, run_id="6" * 64)
+    assert caught.value.code == "crosscheck_record_corrupt"
