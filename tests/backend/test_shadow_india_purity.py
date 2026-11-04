@@ -11,10 +11,11 @@ Rules:
 4. Pure modules (everything but ``admission.py``, ``runner.py`` and ``__main__.py``) have no subprocess, no
    randomness, no dynamic import or eval, no ``sys.modules``; ``policy.py`` also has no clock at all.
 5. ``vm_replay.py`` (64-05 Task 2b) alone may run the recorded VM build's source bytes. The exemption is not a
-   module-wide switch. It covers a short list of exact statements (``LOADER_FUNCTIONS``) inside two named
-   functions, ``_exec_source`` (``compile``, ``exec``, one ``sys.modules`` registration) and ``_forget_package``
-   (the ``sys.modules`` cleanup), and the one ``gateway_vm`` directory-name constant (``LOADER_MODULE_STATEMENTS``).
-   A statement that differs by a token, a second loader in any other function, an extra statement in an approved
+   module-wide switch. Two named top-level functions, ``_exec_source`` (``compile``, ``exec``, one ``sys.modules``
+   registration) and ``_forget_package`` (the ``sys.modules`` cleanup), are pinned by their complete text
+   (signature, decorators and body, compared as ``ast.unparse`` with the docstring left out), each must be defined
+   exactly once at module top level, and the one ``gateway_vm`` directory-name constant is pinned the same way. A
+   function that differs by a token, a duplicate of one, a repeated or moved statement, a second loader in any other
    function, ``importlib`` anywhere and every other rule (no network, no relay client, no ``execution`` import, no
    static gateway import, no ``import_module``, ``__import__``, subprocess or randomness) are flagged as usual.
 
@@ -24,6 +25,7 @@ Plants below are regression cases for the scanner itself.
 from __future__ import annotations
 
 import ast
+import copy
 from pathlib import Path
 
 import pytest
@@ -42,43 +44,76 @@ DYNAMIC_NAMES = {"importlib", "__import__", "import_module", "exec", "eval", "co
 EXECUTION_ALLOWED = {"admission.py", "runner.py"}
 EDGE_FILES = {"admission.py", "runner.py", "__main__.py"}
 NO_CLOCK_FILES = {"policy.py"}
-# The one module that runs another tree's code (the D-23 replay of the recorded VM build). Narrow on purpose: it is
-# pinned to named top-level functions and, inside them, to exact statements (compared as ``ast.unparse`` text). Only
-# nodes inside a pinned statement skip the dynamic-name, ``sys.modules`` and gateway-name rules. ``importlib`` is
+# The one module that runs another tree's code (the D-23 replay of the recorded VM build). Narrow on purpose: the
+# approved functions are pinned by their complete text, each exactly once at module top level. Only nodes inside a
+# function that matches its pin skip the dynamic-name, ``sys.modules`` and gateway-name rules. ``importlib`` is
 # never exempt: the loader compiles the bytes it hashed and consults no import machinery.
-LOADER_FUNCTIONS: dict[str, dict[str, frozenset[str]]] = {
-    "vm_replay.py": {
-        "_exec_source": frozenset({
-            "sys.modules[module_name] = module",
-            "code = compile(source, filename, 'exec', dont_inherit=True)",
-            "exec(code, module.__dict__)",
-        }),
-        "_forget_package": frozenset({
-            "for name in [n for n in list(sys.modules) if n == package or n.startswith(package + '.')]:\n"
-            "    sys.modules.pop(name, None)",
-        }),
-    },
+EXEC_SOURCE_PIN = """def _exec_source(module_name: str, filename: str, source: bytes, package: str) -> Any:
+    module = types.ModuleType(module_name)
+    module.__file__ = filename
+    module.__package__ = package
+    sys.modules[module_name] = module
+    code = compile(source, filename, 'exec', dont_inherit=True)
+    exec(code, module.__dict__)
+    return module"""
+FORGET_PACKAGE_PIN = """def _forget_package(package: str) -> None:
+    for name in [n for n in list(sys.modules) if n == package or n.startswith(package + '.')]:
+        sys.modules.pop(name, None)"""
+LOADER_FUNCTIONS: dict[str, dict[str, str]] = {
+    "vm_replay.py": {"_exec_source": EXEC_SOURCE_PIN, "_forget_package": FORGET_PACKAGE_PIN},
 }
 LOADER_MODULE_STATEMENTS: dict[str, frozenset[str]] = {
     "vm_replay.py": frozenset({"_SOURCE_PACKAGE = 'gateway_vm'"}),
 }
 
 
-def _exempt_nodes(tree: ast.Module, filename: str) -> set[int]:
-    """Ids of the nodes inside a pinned loader statement of this file. Empty for every other file."""
+def pinned_text(function: ast.FunctionDef) -> str:
+    """The complete text a pin is compared with: ``ast.unparse`` of the definition, its docstring left out."""
 
-    functions = LOADER_FUNCTIONS.get(filename, {})
-    module_statements = LOADER_MODULE_STATEMENTS.get(filename, frozenset())
-    exempt: set[int] = set()
+    clone = copy.deepcopy(function)
+    first = clone.body[0] if clone.body else None
+    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+        clone.body = clone.body[1:]
+    return ast.unparse(clone)
+
+
+def _top_level_bindings(tree: ast.Module, name: str) -> list[ast.stmt]:
+    """Every top-level statement that binds ``name``: a def, a class, an assignment or an import."""
+
+    found: list[ast.stmt] = []
     for top in tree.body:
-        if isinstance(top, ast.FunctionDef) and top.name in functions:
-            pairs = [(statement, functions[top.name]) for statement in top.body]
-        else:
-            pairs = [(top, module_statements)]
-        for statement, allowed in pairs:
-            if ast.unparse(statement) in allowed:
-                exempt.update(id(node) for node in ast.walk(statement))
+        if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and top.name == name:
+            found.append(top)
+        elif isinstance(top, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in top.targets):
+            found.append(top)
+        elif isinstance(top, ast.AnnAssign) and isinstance(top.target, ast.Name) and top.target.id == name:
+            found.append(top)
+        elif isinstance(top, (ast.Import, ast.ImportFrom)) and any((a.asname or a.name.split(".")[0]) == name for a in top.names):
+            found.append(top)
+    return found
+
+
+def _exempt_nodes(tree: ast.Module, filename: str) -> set[int]:
+    """Ids of the nodes inside an approved loader function or constant of this file. Empty for every other file."""
+
+    exempt: set[int] = set()
+    for name, pin in LOADER_FUNCTIONS.get(filename, {}).items():
+        bound = _top_level_bindings(tree, name)
+        if len(bound) == 1 and isinstance(bound[0], ast.FunctionDef) and pinned_text(bound[0]) == pin:
+            exempt.update(id(node) for node in ast.walk(bound[0]))
+    for text in LOADER_MODULE_STATEMENTS.get(filename, frozenset()):
+        same = [top for top in tree.body if ast.unparse(top) == text]
+        if len(same) == 1:
+            exempt.update(id(node) for node in ast.walk(same[0]))
     return exempt
+
+
+def _duplicates(tree: ast.Module, filename: str) -> list[str]:
+    return [
+        f"approved loader {name} bound {len(_top_level_bindings(tree, name))} times"
+        for name in LOADER_FUNCTIONS.get(filename, {})
+        if len(_top_level_bindings(tree, name)) > 1
+    ]
 
 
 def _norm(name: str) -> str:
@@ -120,6 +155,7 @@ def violations(source: str, filename: str) -> list[str]:
     tree = ast.parse(source)
     pure = filename not in EDGE_FILES
     exempt = _exempt_nodes(tree, filename)
+    found += _duplicates(tree, filename)
     for node in ast.walk(tree):
         for dotted in _roots(node):
             root = dotted.split(".")[0]
@@ -200,20 +236,8 @@ def test_evidence_and_policy_import_nothing_from_the_gateway_or_the_execution_sp
 
 # --- plants: every one must be caught --------------------------------------------------------------------
 
-APPROVED_EXEC_SOURCE = """
-def _exec_source(module_name, filename, source, package):
-    module = types.ModuleType(module_name)
-    module.__file__ = filename
-    sys.modules[module_name] = module
-    code = compile(source, filename, "exec", dont_inherit=True)
-    exec(code, module.__dict__)
-    return module
-"""
-APPROVED_FORGET_PACKAGE = """
-def _forget_package(package):
-    for name in [n for n in list(sys.modules) if n == package or n.startswith(package + ".")]:
-        sys.modules.pop(name, None)
-"""
+APPROVED_EXEC_SOURCE = "\n" + EXEC_SOURCE_PIN + "\n"
+APPROVED_FORGET_PACKAGE = "\n" + FORGET_PACKAGE_PIN + "\n"
 
 PLANTS = [
     (f"import {BROKER_SDK}", "evidence.py", "broker sdk"),
@@ -336,6 +360,7 @@ CLEAN = [
     (APPROVED_FORGET_PACKAGE, "vm_replay.py"),
     ("_SOURCE_PACKAGE = 'gateway_vm'", "vm_replay.py"),
     ("import sys\nimport types\n" + APPROVED_EXEC_SOURCE + APPROVED_FORGET_PACKAGE + "_SOURCE_PACKAGE = 'gateway_vm'", "vm_replay.py"),
+    ('def _exec_source(module_name: str, filename: str, source: bytes, package: str) -> Any:\n    """Docs may change."""\n' + "\n".join(EXEC_SOURCE_PIN.splitlines()[1:]), "vm_replay.py"),
 ]
 
 
@@ -378,9 +403,11 @@ SECOND_LOADERS = {
 def test_the_real_vm_replay_is_clean_and_the_pins_match_its_text():
     assert violations(REAL_VM_REPLAY, "vm_replay.py") == []
     tree = ast.parse(REAL_VM_REPLAY)
-    for function, statements in LOADER_FUNCTIONS["vm_replay.py"].items():
-        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function)
-        assert statements <= {ast.unparse(st) for st in node.body}, function  # every pin is in use
+    for function, pin in LOADER_FUNCTIONS["vm_replay.py"].items():
+        bound = _top_level_bindings(tree, function)
+        assert len(bound) == 1 and isinstance(bound[0], ast.FunctionDef), function  # defined exactly once
+        assert pinned_text(bound[0]) == pin, function  # and its complete text is the pinned one
+    assert _exempt_nodes(tree, "vm_replay.py")  # the pins are in use, not vacuous
 
 
 @pytest.mark.parametrize("plant", sorted(SECOND_LOADERS))
@@ -416,5 +443,65 @@ def test_a_disallowed_statement_inside_the_approved_function_is_flagged(plant):
     old, new = DISALLOWED_IN_APPROVED_FUNCTION[plant]
     assert old in REAL_VM_REPLAY, plant
     mutated = REAL_VM_REPLAY.replace(old, new, 1)
+    assert mutated != REAL_VM_REPLAY
+    assert violations(mutated, "vm_replay.py"), plant
+
+
+DUPLICATES_AND_MOVES = {
+    "a duplicate _exec_source appended": REAL_VM_REPLAY + "\n\n" + EXEC_SOURCE_PIN + "\n",
+    "a duplicate _exec_source with an extra loader": (
+        REAL_VM_REPLAY + "\n\ndef _exec_source(module_name, filename, source, package):\n"
+        "    exec(compile(open(filename).read(), filename, 'exec'), {})\n"
+    ),
+    "a duplicate _forget_package appended": REAL_VM_REPLAY + "\n\n" + FORGET_PACKAGE_PIN + "\n",
+    "an approved name rebound by assignment": REAL_VM_REPLAY + "\n_exec_source = lambda *a: None\n",
+    "an approved name rebound by import": REAL_VM_REPLAY + "\nfrom os import system as _exec_source\n",
+    "the gateway constant repeated": REAL_VM_REPLAY + "\n_SOURCE_PACKAGE = 'gateway_vm'\n",
+}
+
+
+@pytest.mark.parametrize("plant", sorted(DUPLICATES_AND_MOVES))
+def test_a_duplicate_or_rebound_approved_loader_is_flagged(plant):
+    assert violations(DUPLICATES_AND_MOVES[plant], "vm_replay.py"), plant
+
+
+REPEATED_OR_MOVED = {
+    "the exec statement repeated": ("    exec(code, module.__dict__)\n", "    exec(code, module.__dict__)\n    exec(code, module.__dict__)\n"),
+    "the registration repeated": (
+        "    sys.modules[module_name] = module  # the relative imports inside the package resolve through here\n",
+        "    sys.modules[module_name] = module\n    sys.modules[module_name] = module\n",
+    ),
+    "the compile statement repeated": (
+        "    code = compile(source, filename, \"exec\", dont_inherit=True)\n",
+        "    code = compile(source, filename, \"exec\", dont_inherit=True)\n    code = compile(source, filename, \"exec\", dont_inherit=True)\n",
+    ),
+    "the exec statement moved into another function": (
+        "    exec(code, module.__dict__)\n    return module\n",
+        "    return module\n\n\ndef _elsewhere(code, module):\n    exec(code, module.__dict__)\n",
+    ),
+    "the registration moved into another function": (
+        "    sys.modules[module_name] = module  # the relative imports inside the package resolve through here\n",
+        "",
+    ),
+    "the cleanup loop moved into another function": (
+        "        sys.modules.pop(name, None)\n", "        pass\n",
+    ),
+    "a signature that injects code": (
+        "def _exec_source(module_name: str, filename: str, source: bytes, package: str) -> Any:",
+        "def _exec_source(module_name: str, filename: str, source: bytes, package: str, code: Any = None) -> Any:",
+    ),
+    "a decorator added": ("def _exec_source(", "@staticmethod\ndef _exec_source("),
+}
+
+
+@pytest.mark.parametrize("plant", sorted(REPEATED_OR_MOVED))
+def test_a_repeated_or_moved_approved_statement_is_flagged(plant):
+    old, new = REPEATED_OR_MOVED[plant]
+    assert old in REAL_VM_REPLAY, plant
+    mutated = REAL_VM_REPLAY.replace(old, new, 1)
+    if plant == "the registration moved into another function":
+        mutated += "\n\ndef _elsewhere(module_name, module):\n    sys.modules[module_name] = module\n"
+    if plant == "the cleanup loop moved into another function":
+        mutated += "\n\ndef _elsewhere(package):\n    sys.modules.pop(package, None)\n"
     assert mutated != REAL_VM_REPLAY
     assert violations(mutated, "vm_replay.py"), plant

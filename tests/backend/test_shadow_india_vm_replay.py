@@ -18,7 +18,7 @@ import py_compile
 import shutil
 import socket
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -27,7 +27,10 @@ import pytest
 
 import shadow_india.vm_replay as vm_replay
 from shadow_india import vm_codes
-from shadow_india.evidence import EvidenceStore, read_records
+from shadow_india.admission import deterministic_proposal_id
+from shadow_india.evidence import SCHEMAS, EvidenceStore, read_records
+from shadow_india.portfolio import exit_intent_id, exit_obligation_id
+from shadow_india.runner import LEG_ENTRY, LEG_EXIT, LEG_SWING
 from shadow_india.vm_replay import (
     BuildIdentity,
     MacVerdict,
@@ -75,6 +78,12 @@ SIGNAL_HASHES = (
 )
 ISIN_A, ISIN_B, ISIN_C = "INE002A01018", "INE009A01021", "INE467B01029"
 SYMBOL = {ISIN_A: "AAA", ISIN_B: "BBB", ISIN_C: "CCC"}
+
+
+def swing_signal_id(as_of: date, isin: str) -> str:
+    """The runner's swing sell id. ``runner._strategy_sells`` builds it inline, so a test pins this f-string to its source."""
+
+    return f"swing-{as_of:%Y%m%d}-{isin}"
 
 
 # --- the network sentinel ------------------------------------------------------------------------------------------
@@ -154,7 +163,11 @@ def vm(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def limits_sha(vm: Path) -> str:
-    return load_recorded_build(vm, identity_of(vm)).limits_cls.from_fields(LIMITS).sha256
+    built = load_recorded_build(vm, identity_of(vm))
+    try:
+        return built.limits_cls.from_fields(LIMITS).sha256
+    finally:
+        built.close()
 
 
 # --- evidence and pins -----------------------------------------------------------------------------------------------
@@ -219,6 +232,8 @@ class Scenario:
         signal: bool | dict[str, Any] = True,
         symbol: str | None = None,
         extra: dict[str, Any] | None = None,
+        leg: str = LEG_ENTRY,
+        signal_id: str | None = None,
     ) -> str:
         """One decision as ``AdmissionService.prepare`` records it: a ``signal`` record (the instrument and the limits
         hash), then an ``intent`` with exactly the fields the writer emits. It carries no ``isin`` and no ``series``.
@@ -231,7 +246,7 @@ class Scenario:
         self.clock.now = datetime(year, month, day, 9, minute, 0, tzinfo=IST)
         self._intent += 1
         iid = iid or f"intent-{self._intent:04d}"
-        signal_id = f"sig-{self._intent}"
+        signal_id = signal_id or f"sig-{self._intent}"
         if signal is not False:
             store.append(
                 "signal",
@@ -245,7 +260,7 @@ class Scenario:
         store.append(
             "intent",
             {
-                "intent_id": iid, "session_id": session, "signal_id": signal_id, "leg": "leg1", "intent_sha256": "e" * 64,
+                "intent_id": iid, "session_id": session, "signal_id": signal_id, "leg": leg, "intent_sha256": "e" * 64,
                 "symbol": symbol or SYMBOL[isin], "side": side, "quantity": str(quantity), "limit_price": price,
                 **(extra or {}),
             },
@@ -266,6 +281,34 @@ class Scenario:
             "tick_reference": price if tick_reference is True else tick_reference,
         }
         return iid
+
+    def sell(
+        self,
+        session: str,
+        kind: str,
+        quantity: int,
+        price: str,
+        *,
+        isin: str = ISIN_A,
+        **options: Any,
+    ) -> str:
+        """A runner-shaped sell, ids from the code that mints them, and no ``signal`` record (the runner writes none).
+
+        ``halve``, ``stop`` and ``flatten`` are exit obligations: the intent id IS ``exit_intent_id`` and so is the
+        ``signal_id`` (``runner.RunnerPreparation.proposal_id``). ``swing`` is a strategy sell: ``signal_id`` is
+        ``swing_signal_id`` and the intent id is ``deterministic_proposal_id`` (``AdmissionService.proposal_id``).
+        """
+
+        year, month, day = DAYS[session]
+        if kind == "swing":
+            signal_id = swing_signal_id(date(year, month, day), isin)
+            iid = deterministic_proposal_id(RUN, session, signal_id, LEG_SWING)
+            leg = LEG_SWING
+        else:
+            signal_id = iid = exit_intent_id(exit_obligation_id(kind, isin, date(year, month, day)), 1)
+            leg = LEG_EXIT
+        options = {"leg": leg, "signal_id": signal_id, "iid": iid, **options}
+        return self.intent(session, "sell", quantity, price, isin=isin, signal=False, **options)
 
     def book(self, session: str, iid: str, cumulative: int, price: str, charges: str = "0") -> None:
         store = self.use(session)
@@ -887,6 +930,98 @@ def test_the_loader_consults_no_import_machinery(sc: Scenario, monkeypatch: pyte
     assert sc.replay(S1).verdict == "PASS"
 
 
+OFF_TICK_TABLE = "gateway_vm/orders/data/nse_cash_tick_sizes.json"
+
+
+def finer_ticks(text: str) -> str:
+    changed = text.replace('"tick": "0.01"', '"tick": "0.001"')
+    assert changed != text
+    return changed
+
+
+def test_a_tick_table_swapped_on_disk_after_the_hash_walk_does_not_change_the_verdict(sc: Scenario, monkeypatch: pytest.MonkeyPatch):
+    """Rs 100.005 is off tick. The Mac refused it. A table with finer ticks swapped in after hashing would admit it."""
+
+    sc.intent(S1, "buy", 1, "100.005", mac=("deny", "off_tick"), tick_reference="100")
+    real = vm_replay._digests
+    table = sc.vm / OFF_TICK_TABLE
+
+    def swap_after_hashing(sources: Any) -> Any:
+        digests = real(sources)
+        table.write_text(finer_ticks(table.read_text()))
+        return digests
+
+    monkeypatch.setattr(vm_replay, "_digests", swap_after_hashing)
+    result = sc.replay(S1)
+    assert result.verdict == "PASS", result
+    assert result.verdicts[0].vm_codes == ("off_tick",)
+
+
+def test_a_tick_table_swapped_on_disk_between_two_intents_does_not_change_the_second_verdict(sc: Scenario, monkeypatch: pytest.MonkeyPatch):
+    sc.intent(S1, "buy", 1, "100.00", tick_reference="100")
+    sc.intent(S1, "buy", 1, "100.005", isin=ISIN_B, mac=("deny", "off_tick"), tick_reference="100")
+    real = vm_replay._replay_intent
+    table = sc.vm / OFF_TICK_TABLE
+    calls: list[int] = []
+
+    def swap_after_the_first(*args: Any, **kwargs: Any) -> Any:
+        out = real(*args, **kwargs)
+        if not calls:
+            table.write_text(finer_ticks(table.read_text()))
+        calls.append(1)
+        return out
+
+    monkeypatch.setattr(vm_replay, "_replay_intent", swap_after_the_first)
+    assert sc.replay(S1).verdict == "PASS"
+    assert len(calls) == 2
+
+
+_HELD_DIRECTORIES: list[Any] = []
+
+
+def private_dirs(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    import tempfile
+
+    made: list[Path] = []
+    real = tempfile.TemporaryDirectory
+
+    def recording(*args: Any, **kwargs: Any) -> Any:
+        directory = real(*args, **kwargs)
+        made.append(Path(directory.name))
+        _HELD_DIRECTORIES.append(directory)  # keep it referenced: the object's own finalizer would otherwise hide a missing cleanup
+        return directory
+
+    monkeypatch.setattr(vm_replay.tempfile, "TemporaryDirectory", recording)
+    return made
+
+
+def test_the_private_copy_of_the_build_holds_the_hashed_bytes_and_is_removed_after_the_replay(sc: Scenario, monkeypatch: pytest.MonkeyPatch):
+    made = private_dirs(monkeypatch)
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.replay(S1)
+    assert len(made) == 1 and not made[0].exists()
+    assert not made[0].is_relative_to(sc.vm)  # never in the checkout
+    assert not list((sc.vm / "gateway_vm").rglob("__pycache__"))
+
+
+def test_the_private_copy_is_removed_when_the_build_is_refused_after_loading(tmp_path: Path, limits_sha: str, monkeypatch: pytest.MonkeyPatch):
+    made = private_dirs(monkeypatch)
+    drifted = make_vm(tmp_path, "drifted", edits={"limits.py": lambda t: t.replace("    kill_enabled: bool,\n", "    kill_enabled: bool,\n    extra_input: int = 0,\n", 1)})
+    with pytest.raises(ReplayRefused) as raised:
+        load_recorded_build(drifted, identity_of(drifted))
+    assert raised.value.code == vm_replay.BUILD_MISMATCH
+    assert made and not any(path.exists() for path in made)
+
+
+def test_a_loaded_build_reads_its_data_files_from_the_private_copy_not_the_checkout(sc: Scenario):
+    built = load_recorded_build(sc.vm, sc.identity)
+    try:
+        assert Path(built.evaluate.__globals__["TICK_TABLE_PATH"]).read_bytes() == (sc.vm / OFF_TICK_TABLE).read_bytes()
+        assert not Path(built.evaluate.__globals__["TICK_TABLE_PATH"]).is_relative_to(sc.vm)
+    finally:
+        built.close()
+
+
 # --- git head reading -------------------------------------------------------------------------------------------------
 
 
@@ -979,7 +1114,33 @@ def test_an_intents_signal_of_another_session_with_the_same_limits_hash_passes(s
 # --- the instrument comes from the signal ----------------------------------------------------------------------------
 
 ENVELOPE = {"seq", "prev_sha256", "entry_sha256", "kind", "run_id", "session_id", "run_class", "utc", "ist"}
-WRITER_INTENT_FIELDS = {"intent_id", "signal_id", "leg", "intent_sha256", "symbol", "side", "quantity", "limit_price"}
+ADMISSION_PY = REPO / "backend" / "shadow_india" / "admission.py"
+WRITER_INTENT_FIELDS = set(SCHEMAS["intent"][0])  # the required fields of an intent record: what the writer must emit
+
+
+def admission_intent_write() -> set[str]:
+    """The keys of the dict ``AdmissionService.prepare`` appends as the intent record, read from admission.py itself."""
+
+    for node in ast.walk(ast.parse(ADMISSION_PY.read_text())):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_append"
+            and len(node.args) == 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "E_INTENT"
+        ):
+            assert isinstance(node.args[1], ast.Dict)
+            return {key.value for key in node.args[1].keys if isinstance(key, ast.Constant)}
+    raise AssertionError("admission.py no longer appends an intent record the way this test reads it")
+
+
+def test_the_fixture_intent_is_what_admission_py_writes():
+    """The writer emits the schema's required fields and nothing optional (so no ``isin``, no ``series``)."""
+
+    written = admission_intent_write()
+    assert written - {"session_id"} == WRITER_INTENT_FIELDS
+    assert not written & set(SCHEMAS["intent"][1])
 
 
 def signal_payload(signal_id: str, isin: str = ISIN_A, series: str = "EQ") -> dict[str, Any]:
@@ -1076,6 +1237,138 @@ def test_one_signal_id_that_names_two_instruments_is_invalid_evidence(sc: Scenar
     assert refusal_of(sc) == vm_replay.EVIDENCE_INVALID
 
 
+# --- exit and swing sells have no signal ---------------------------------------------------------------------------------
+
+SELLS = [("halve", 50), ("stop", 100), ("flatten", 100), ("swing", 100)]
+
+
+@pytest.mark.parametrize(("kind", "quantity"), SELLS, ids=[k for k, _ in SELLS])
+def test_a_runner_shaped_sell_with_no_signal_record_replays_to_pass(sc: Scenario, kind: str, quantity: int):
+    fund(sc)  # a booked buy of 100 in the first session
+    iid = sc.sell(S2, kind, quantity, "60.00")
+    sell = next(r for r in sc.records() if r["kind"] == "intent" and r["intent_id"] == iid)
+    assert set(sell) - ENVELOPE == WRITER_INTENT_FIELDS
+    assert not [r for r in sc.records() if r["kind"] == "signal" and r["signal_id"] == sell["signal_id"]]
+    result = sc.replay(S2)
+    assert result.verdict == "PASS", result
+    assert result.intents_compared == 1 and result.defects == ()
+
+
+def test_a_booked_exit_sell_lowers_the_position_the_next_decision_sees(sc: Scenario):
+    fund(sc, quantity=100, price="100.00", charges="0")  # cost 10,000
+    sold = sc.sell(S2, "halve", 50, "100.00")
+    sc.book(S2, sold, 50, "100.00")  # cost 5,000 left
+    sc.intent(S2, "buy", 450, "100.00", isin=ISIN_B, tick_reference="100")  # 5,000 + 45,000 is not over the 50,000 cap
+    result = sc.replay(S2)
+    assert result.verdict == "PASS", result
+    assert result.intents_compared == 2
+
+
+def test_a_booked_sell_of_the_whole_position_leaves_nothing_to_sell_again(sc: Scenario):
+    fund(sc)
+    gone = sc.sell(S1, "flatten", 100, "60.00", minute=40)
+    sc.book(S1, gone, 100, "60.00")
+    sc.sell(S2, "swing", 100, "60.00")
+    assert refusal_of(sc, S2) == vm_replay.INSTRUMENT_UNRESOLVED
+
+
+def test_replay_instrument_unresolved_a_sell_for_an_isin_that_is_not_held_refuses(sc: Scenario):
+    sc.sell(S1, "halve", 10, "60.00")
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, sink)
+    assert raised.value.code == vm_replay.INSTRUMENT_UNRESOLVED == "replay_instrument_unresolved"
+    assert sink.empty()
+
+
+@pytest.mark.parametrize("kind", ["halve", "swing"])
+def test_replay_instrument_unresolved_a_sell_whose_symbol_differs_from_the_held_position_refuses(sc: Scenario, kind: str):
+    fund(sc)
+    sc.sell(S2, kind, 10, "60.00", symbol="ZZZ")
+    assert refusal_of(sc, S2) == vm_replay.INSTRUMENT_UNRESOLVED
+
+
+def test_a_sell_of_an_isin_other_than_the_one_held_refuses(sc: Scenario):
+    fund(sc, isin=ISIN_A)
+    sc.sell(S2, "stop", 10, "60.00", isin=ISIN_B)
+    assert refusal_of(sc, S2) == vm_replay.INSTRUMENT_UNRESOLVED
+
+
+def unknown_shape(sc: Scenario, leg: str, signal_id: str, side: str = "sell") -> None:
+    fund(sc)
+    sc.intent(S2, side, 10, "60.00", signal=False, leg=leg, signal_id=signal_id)
+
+
+EXIT_OK = "exit-halve-20261028-INE002A01018-t1"
+UNKNOWN_SHAPES = [
+    ("exit", "exit-bogus"),
+    ("exit", "exit-halve-20261028-INE002A01018-t0"),  # the runner never mints attempt 0
+    ("exit", "exit-reduce-20261028-INE002A01018-t1"),  # not halve, stop or flatten
+    ("exit", "exit-halve-20261028-INE002A0101-t1"),  # a short ISIN
+    ("exit", "swing-20261028-INE002A01018"),  # a swing id on the exit leg
+    ("swing", EXIT_OK),  # an exit id on the swing leg
+    ("swing", "swing-2026-INE002A01018"),
+    ("swing", "swing-20261028-INE002A01018-t1"),
+    ("pilot", EXIT_OK),
+    ("pilot", "swing-20261028-INE002A01018"),
+]
+
+
+@pytest.mark.parametrize(("leg", "signal_id"), UNKNOWN_SHAPES, ids=[f"{leg}:{sid}" for leg, sid in UNKNOWN_SHAPES])
+def test_replay_leg_unknown_an_id_shape_the_runner_never_mints_refuses(sc: Scenario, leg: str, signal_id: str):
+    unknown_shape(sc, leg, signal_id)
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S2, sink)
+    assert raised.value.code == vm_replay.LEG_UNKNOWN == "replay_leg_unknown"
+    assert sink.empty()
+
+
+def test_replay_leg_unknown_a_buy_under_an_exit_or_swing_id_refuses(sc: Scenario):
+    unknown_shape(sc, LEG_EXIT, EXIT_OK, side="buy")
+    assert refusal_of(sc, S2) == vm_replay.LEG_UNKNOWN
+
+
+def test_a_sell_needs_its_pinned_series_because_no_signal_names_it(sc: Scenario):
+    fund(sc)
+    iid = sc.sell(S2, "halve", 10, "60.00")
+    del sc.pins[S2][iid]["quote"]["series"]
+    assert refusal_of(sc, S2) == vm_replay.PINS_MISSING
+
+
+def test_a_sells_pinned_series_is_the_series_the_vm_sees(sc: Scenario):
+    fund(sc)
+    sc.sell(S2, "halve", 10, "60.00", series="BZ", mac=("deny", "instrument_unsupported"))
+    assert sc.replay(S2).verdict == "PASS"
+
+
+def test_an_entry_still_needs_its_signal_even_beside_signal_less_sells(sc: Scenario):
+    fund(sc)
+    sc.sell(S2, "halve", 10, "60.00")
+    sc.intent(S2, "buy", 1, "60.00", signal=False)
+    assert refusal_of(sc, S2) == vm_replay.SIGNAL_MISSING
+
+
+def test_the_session_limits_check_still_applies_to_a_session_of_signal_less_sells(sc: Scenario):
+    fund(sc)
+    sc.sell(S2, "halve", 10, "60.00")
+    sc.signal(S2, limits_sha256="7" * 64)
+    assert refusal_of(sc, S2) == vm_replay.LIMITS_MISMATCH
+
+
+def test_the_sell_ids_are_the_ones_the_runner_mints_and_the_replay_shares_its_pattern():
+    import shadow_india.runner as runner
+
+    exit_id = exit_intent_id(exit_obligation_id("halve", ISIN_A, date(2026, 10, 28)), 1)
+    assert exit_id == EXIT_OK
+    assert runner._EXIT_ID.fullmatch(exit_id) and vm_replay._EXIT_ID is runner._EXIT_ID  # shared, not copied
+    swing = swing_signal_id(date(2026, 10, 28), ISIN_A)
+    assert vm_replay._SWING_ID.fullmatch(swing)
+    assert 'signal_id=f"swing-{as_of:%Y%m%d}-{isin}"' in (REPO / "backend" / "shadow_india" / "runner.py").read_text()
+    assert vm_replay._ISIN_PATTERN in runner._EXIT_ID.pattern  # one ISIN shape across the exit and swing ids
+    assert (vm_replay.LEG_ENTRY, vm_replay.LEG_EXIT, vm_replay.LEG_SWING) == (LEG_ENTRY, LEG_EXIT, LEG_SWING)
+
+
 # --- a missing field is a typed refusal ------------------------------------------------------------------------------
 
 
@@ -1097,7 +1390,7 @@ def drop(records: list[dict[str, Any]], kind: str, field: str) -> list[dict[str,
 MISSING_FIELDS = [
     ("denied", "code"), ("denied", "intent_id"),
     ("intent", "seq"), ("intent", "side"), ("intent", "symbol"), ("intent", "intent_id"), ("intent", "quantity"),
-    ("intent", "limit_price"), ("intent", "signal_id"),
+    ("intent", "limit_price"), ("intent", "signal_id"), ("intent", "leg"),
     ("reservation", "intent_id"), ("reservation", "seq"),
     ("booking_intent", "booking_id"), ("booking_intent", "intent_id"), ("booking_intent", "cumulative_quantity"),
     ("booking_intent", "price"), ("booking_intent", "charges"),
