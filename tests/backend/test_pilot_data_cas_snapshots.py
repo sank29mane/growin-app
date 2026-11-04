@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import sys
 import dataclasses
+import functools
 import hashlib
 import inspect
 import io
@@ -51,7 +52,6 @@ from pilot_data import cas_snapshots as cs
 from pilot_data import core as pd_core
 from pilot_data import models as pd_models
 from pilot_data import security_master as sm
-from pilot_data import store as pd_store
 from pilot_data.core import PilotDataError
 from pilot_data.store import DB_FILE_NAME, PilotDataStore
 
@@ -703,13 +703,59 @@ def _global_names(code: types.CodeType) -> set[str]:
     return found
 
 
-def _functions_of(target: Any) -> list[types.FunctionType]:
+_FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+
+def _outermost_function_nodes(tree: ast.AST) -> list[ast.AST]:
+    """Every def, async def and lambda under ``tree`` at any depth (nested classes included). A function found is not
+    descended into: walking it already covers whatever it contains."""
+    found: list[ast.AST] = []
+    for child in ast.iter_child_nodes(tree):
+        if isinstance(child, _FUNCTION_NODES):
+            found.append(child)
+        else:
+            found += _outermost_function_nodes(child)
+    return found
+
+
+def _ast_names(node: ast.AST) -> set[str]:
+    """Names and attribute names a subtree reads: the AST counterpart of ``co_names`` for source that has no function."""
+    names: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name):
+            names.add(sub.id)
+        elif isinstance(sub, ast.Attribute):
+            names.add(sub.attr)
+    return names
+
+
+def _units_of(target: Any) -> list[tuple[set[str], ast.AST, dict[str, Any]]]:
+    """The code the CAS procedure fingerprint walks for one fingerprinted object, as (names read, syntax tree, globals).
+
+    A module-level function is one unit. A class is read from its whole source, not from its members, so a property
+    setter or deleter, a ``functools.cached_property``, a pydantic validator descriptor and a method of a nested class
+    are all walked; only the functions a framework attaches to the class at runtime (not in its source) are left out.
+    """
     if inspect.isfunction(target):
-        return [target]
-    home = inspect.getsourcefile(target)  # skip functions a framework (pydantic) attaches to the class
-    members = [m.__func__ if isinstance(m, (classmethod, staticmethod)) else m for m in vars(target).values()]
-    members += [m.fget for m in vars(target).values() if isinstance(m, property) and m.fget is not None]
-    return [m for m in members if inspect.isfunction(m) and m.__code__.co_filename == home]
+        tree = ast.parse(textwrap.dedent(inspect.getsource(target)))
+        return [(_global_names(target.__code__), tree, target.__globals__)]
+    scope = vars(sys.modules[target.__module__])
+    tree = ast.parse(textwrap.dedent(inspect.getsource(target)))
+    units = [(_ast_names(node), node, scope) for node in _outermost_function_nodes(tree)]
+    return units + [unit for fn in _assigned_members(target) for unit in _units_of(fn)]
+
+
+def _assigned_members(target: type) -> list[Any]:
+    """Same-file functions bound into the class by assignment (``method = helper``): members with no def in its source."""
+    home = inspect.getsourcefile(target)
+    found = []
+    for member in vars(target).values():
+        if isinstance(member, (classmethod, staticmethod)):
+            member = member.__func__
+        if (inspect.isfunction(member) and member.__code__.co_filename == home
+                and not member.__qualname__.startswith(f"{target.__qualname__}.")):
+            found.append(member)
+    return found
 
 
 OWNER_CLASSES = (PilotDataStore, pd_models.SecurityMasterRow)
@@ -723,9 +769,7 @@ def uncovered_dependencies() -> list[str]:
     whole_classes = {getattr(owner, attr) for _, owner, attr in cs.FINGERPRINTED if inspect.isclass(getattr(owner, attr))}
     problems: list[str] = []
     for name, owner, attr in cs.FINGERPRINTED:
-        for fn in _functions_of(getattr(owner, attr)):
-            names = _global_names(fn.__code__)
-            module_globals = fn.__globals__
+        for names, _, module_globals in _units_of(getattr(owner, attr)):
             used = {n for n in names if n in module_globals and not n.startswith("__")
                     and not isinstance(module_globals[n], types.ModuleType)}
             problems += [f"{name}: global {n}" for n in sorted(used - covered)]
@@ -783,12 +827,11 @@ def uncovered_module_attribute_reads() -> list[str]:
     covered_names = set(cs.FINGERPRINTED_VALUE_NAMES) | set(cs.INERT_GLOBALS) | set(cs.INERT_METHODS)
     problems: list[str] = []
     for name, owner, attr in cs.FINGERPRINTED:
-        for fn in _functions_of(getattr(owner, attr)):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        for _, tree, module_globals in _units_of(getattr(owner, attr)):
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Attribute):
                     continue
-                module = _module_object(node.value, fn.__globals__)
+                module = _module_object(node.value, module_globals)
                 if module is None or not _repo_local(module) or node.attr in covered_names:
                     continue
                 target = getattr(module, node.attr, None)
@@ -805,8 +848,7 @@ def local_imports_in_fingerprinted() -> list[str]:
     """
     problems: list[str] = []
     for name, owner, attr in cs.FINGERPRINTED:
-        for fn in _functions_of(getattr(owner, attr)):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        for _, tree, _ in _units_of(getattr(owner, attr)):
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
                     problems.append(f"{name}: local import {ast.unparse(node)}")
@@ -849,7 +891,7 @@ def test_cas_procedure_fingerprint_walk_catches_a_local_import(monkeypatch: pyte
     assert uncovered_module_attribute_reads() == []  # the gap this check closes
 
 
-class _DescriptorHolder:  # defined in this file, so _functions_of keeps its members (same source file)
+class _DescriptorHolder:  # defined in this file, so inspect.getsource reads it like a real fingerprinted class
     @classmethod
     def as_classmethod(cls) -> Any:
         import pilot_data.core as helper
@@ -869,14 +911,135 @@ class _DescriptorHolder:  # defined in this file, so _functions_of keeps its mem
         return helper.utc_now()
 
 
+def _function_names(target: Any) -> set[str]:
+    return {
+        node.name
+        for _, tree, _ in _units_of(target)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _fingerprint_only(monkeypatch: pytest.MonkeyPatch, label: str, holder: type) -> None:
+    monkeypatch.setattr(cs, "FINGERPRINTED", ((label, sys.modules[__name__], holder.__name__),))
+
+
 def test_cas_procedure_fingerprint_walk_sees_descriptor_methods(monkeypatch: pytest.MonkeyPatch) -> None:
     """Round 4 counterexample: classmethod, staticmethod and property members of a fingerprinted class are walked."""
-    names = {fn.__name__ for fn in _functions_of(_DescriptorHolder)}
-    assert names == {"as_classmethod", "as_staticmethod", "as_property"}
-    monkeypatch.setattr(cs, "FINGERPRINTED", (("test.DescriptorHolder", sys.modules[__name__], "_DescriptorHolder"),))
+    assert _function_names(_DescriptorHolder) == {"as_classmethod", "as_staticmethod", "as_property"}
+    _fingerprint_only(monkeypatch, "test.DescriptorHolder", _DescriptorHolder)
     assert local_imports_in_fingerprinted() == [
         "test.DescriptorHolder: local import import pilot_data.core as helper"
     ]
+
+
+class _PropertySetterHolder:
+    @property
+    def value(self) -> int:
+        return 1
+
+    @value.setter
+    def value(self, new: int) -> None:
+        import pilot_data.core as helper
+
+        helper.utc_now()
+
+
+class _PropertyDeleterHolder:
+    @property
+    def value(self) -> int:
+        return 1
+
+    @value.deleter
+    def value(self) -> None:
+        import pilot_data.core as helper
+
+        helper.utc_now()
+
+
+class _CachedPropertyHolder:
+    @functools.cached_property
+    def value(self) -> Any:
+        import pilot_data.core as helper
+
+        return helper.utc_now()
+
+
+class _NestedClassHolder:
+    class Inner:
+        def method(self) -> Any:
+            import pilot_data.core as helper
+
+            return helper.utc_now()
+
+
+class _ImportFromHolder:
+    def method(self) -> Any:
+        from pilot_data.core import utc_now
+
+        return utc_now()
+
+
+class _AsyncMethodHolder:
+    async def method(self) -> Any:
+        import pilot_data.core as helper
+
+        return helper.utc_now()
+
+
+class _LambdaHolder:
+    reader = lambda self: pd_core.utc_now()  # noqa: E731  (a lambda is a function the walk must see)
+
+
+@pytest.mark.parametrize(
+    ("holder", "planted"),
+    [
+        (_PropertySetterHolder, "import pilot_data.core as helper"),
+        (_PropertyDeleterHolder, "import pilot_data.core as helper"),
+        (_CachedPropertyHolder, "import pilot_data.core as helper"),
+        (_NestedClassHolder, "import pilot_data.core as helper"),
+        (_ImportFromHolder, "from pilot_data.core import utc_now"),
+        (_AsyncMethodHolder, "import pilot_data.core as helper"),
+    ],
+    ids=["property_setter", "property_deleter", "cached_property", "nested_class_method", "import_from", "async_method"],
+)
+def test_cas_procedure_fingerprint_walk_reads_the_whole_class_source(
+    monkeypatch: pytest.MonkeyPatch, holder: type, planted: str
+) -> None:
+    """#625 P3: a class is walked from its source, so a local import in any function inside it is reported, whatever
+    descriptor or nesting wraps the function. The ImportFrom form is pinned here too: nothing else exercised it."""
+    assert local_imports_in_fingerprinted() == []
+    _fingerprint_only(monkeypatch, "test.Holder", holder)
+    assert local_imports_in_fingerprinted() == [f"test.Holder: local import {planted}"]
+
+
+def _assigned_helper(self: Any) -> Any:
+    import pilot_data.core as helper
+
+    return helper.utc_now()
+
+
+class _AssignedMethodHolder:
+    method = _assigned_helper
+    as_static = staticmethod(_assigned_helper)
+
+
+def test_cas_procedure_fingerprint_walk_reads_a_same_file_function_assigned_into_a_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#627 round 1 counterexample: ``method = helper`` has no def in the class source but is still walked."""
+    assert "_assigned_helper" in _function_names(_AssignedMethodHolder)
+    _fingerprint_only(monkeypatch, "test.AssignedMethodHolder", _AssignedMethodHolder)
+    assert local_imports_in_fingerprinted() == [
+        "test.AssignedMethodHolder: local import import pilot_data.core as helper"
+    ]
+
+
+def test_cas_procedure_fingerprint_walk_reads_a_lambda_in_a_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lambda assigned in a class body is a function the walk reads: its module read is reported."""
+    assert uncovered_module_attribute_reads() == []
+    _fingerprint_only(monkeypatch, "test.Holder", _LambdaHolder)
+    assert uncovered_module_attribute_reads() == ["test.Holder: module read pd_core.utc_now"]
 
 
 def test_cas_procedure_fingerprint_walk_catches_an_uncovered_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
