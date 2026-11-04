@@ -264,10 +264,13 @@ class OrderStack(Stack):
         key: bool | int = True,
         state_dir: bool = True,
         holidays: frozenset[date] | None = frozenset(),
+        special_sessions: frozenset[date] | None = frozenset(),
     ) -> None:
         # The fixtures run on a synthetic October 2026 where every weekday trades. Default to no holidays so
         # the real NSE table (which lists Dussehra 2026-10-20) never leaks in; None means the packaged table.
+        # Special sessions default to none for the same reason (the table lists Sunday 2026-11-08).
         self.holidays = holidays
+        self.special_sessions = special_sessions
         self.tmp = tmp_path
         self.metadata = metadata
         self.state_dir = tmp_path / "state"
@@ -332,6 +335,7 @@ class OrderStack(Stack):
                 allow_test_key=True,
                 kill_base_url=self.metadata.base,
                 holidays=self.holidays,
+                special_sessions=self.special_sessions,
             ),
             session=self.session,
             breeze=self.breeze,
@@ -831,6 +835,35 @@ def test_the_service_uses_the_packaged_nse_table_when_no_holidays_are_given(tmp_
     seed_abc_stopped(stack)
     stack.mint(token)
     assert stack.state(token)["last_evaluated_session"] == "2026-10-19"
+    assert stack.transport.non_get() == [] and set(metadata.methods) <= {"GET"}
+
+
+def test_the_service_replays_the_packaged_sunday_muhurat_session_when_no_special_sessions_are_given(tmp_path, metadata):
+    """Production builds pass special_sessions=None, so the packaged table decides: Sunday 2026-11-08 is a session.
+
+    Friday 6 Nov closes 500, the Sunday Muhurat close is 440 (-12%), and the quote on Monday 9 Nov shows 440.
+    If the Sunday is skipped the replay stops at Friday and the stop latch never sets.
+    """
+    stack = OrderStack(tmp_path, metadata, holidays=None, special_sessions=None)
+    stack.clock.now = datetime(2026, 11, 9, 4, 30, tzinfo=timezone.utc)  # Monday 10:00 IST
+    for row in stack.transport.quote_book.values():
+        row["ltt"] = "09-Nov-2026 09:59:30"
+    stack.transport.quote_book["ABC"]["previous_close"] = 440.0
+    token = stack.login()
+    t = stack.transport
+    t.holdings = HttpResponse(200, {}, breeze_body([holding_row(ISIN_B, 20)]))
+    t.trades = HttpResponse(200, {}, breeze_body([trade_row("ord-buy-1", "ABC", "Buy", 20, 500, "06-Oct-2026")]))
+    bars = {date(2026, 9, 30): 500.0}
+    day = date(2026, 10, 6)
+    while day <= date(2026, 11, 6):
+        if day.weekday() < 5 and day != date(2026, 10, 20):  # Dussehra: no session, no bar
+            bars[day] = 500.0
+        day += timedelta(days=1)
+    bars[date(2026, 11, 8)] = 440.0
+    t.bar_book["ABC"] = bars
+    assert code_of(stack.mint(token)) == (423, "ORDERS_BLOCKED", "stop_open")
+    state = stack.state(token)
+    assert state["last_evaluated_session"] == "2026-11-08" and state["latches"] == ["stop"]
     assert stack.transport.non_get() == [] and set(metadata.methods) <= {"GET"}
 
 
