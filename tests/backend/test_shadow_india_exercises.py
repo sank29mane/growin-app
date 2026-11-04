@@ -16,6 +16,7 @@ run class is a skip too (it does not exist in ``evidence.RUN_CLASSES``). This fi
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import dataclasses
 import inspect
@@ -355,12 +356,27 @@ def test_an_exit_is_admitted_and_reserved_on_the_mac_and_refused_by_the_kill_fla
     assert ex.vm.http.count("POST", "/v1/orders/authorize") == 0
 
 
-# Buys are blocked by the stop and halt latches (and run pauses) an exit leaves behind, not by the open exit itself:
-# ``entry_block_reasons`` never reads ``open_exits``. The rows below assert the reason the runner really reports.
+def halve_after_release_setup(ex: Exercise) -> None:
+    """The halve is raised and its sells are admitted and reserved (kill-refused), then the operator releases the halt."""
+
+    halve_setup(ex)
+    ex.script.result = rt.evaluated(entries=False)
+    ex.decide()
+    assert {int(r["quantity"]) for r in rt.intents_of(ex.world, "SELL")} == {80}
+    ex.runner._portfolio.release_halt("operator", "accept the loss", rebase_halt_anchor=True)
+    assert not ex.world.latch.load().halt and policy.run_state(ex.evidence).open_pauses == ()
+
+
+# D-37 (operator, 2026-11-05): while the shadow latch holds an open stop, halve or flatten exit, the runner refuses every
+# buy ``exit_open`` until fill evidence closes it. A latch reset or ``release_halt`` does not release it and time never
+# does. The 63 admission gate does not enforce it: the refusal is the runner's, before any intent is minted. An exit held
+# out under a Q-6 corporate-action pause blocks only that ISIN (``instrument_paused``). The rows assert the reasons the
+# runner really reports; ``halve_after_release`` is the one with no latch left but the open exit.
 NO_BUY = [
-    pytest.param(stop_setup, {"stop_open"}, id="stop"),
-    pytest.param(halve_setup, {"halt_latch"}, id="halve"),
-    pytest.param(flatten_setup, {"halt_latch", "stop_open"}, id="flatten"),
+    pytest.param(stop_setup, {"stop_open", "exit_open"}, id="stop"),
+    pytest.param(halve_setup, {"halt_latch", "exit_open"}, id="halve"),
+    pytest.param(flatten_setup, {"halt_latch", "stop_open", "exit_open"}, id="flatten"),
+    pytest.param(halve_after_release_setup, {"exit_open"}, id="halve_after_release"),
 ]
 
 
@@ -383,7 +399,7 @@ def assert_a_slot_is_free(ex: Exercise) -> None:
 
 
 @pytest.mark.parametrize("setup,expected", NO_BUY)
-def test_no_buy_is_admitted_while_the_latches_an_exit_leaves_are_open(make_exercise, setup, expected):
+def test_no_buy_is_admitted_while_an_exit_or_the_latches_it_leaves_are_open(make_exercise, setup, expected):
     """Break-proof: have the runner ignore ``entry_block_reasons`` (``reasons = ()``) and a new entry is admitted: this fails."""
     ex = make_exercise()
     setup(ex)
@@ -394,6 +410,99 @@ def test_no_buy_is_admitted_while_the_latches_an_exit_leaves_are_open(make_exerc
     assert expected <= entry_blocked_reasons(report, rt.ISINS["DDD"])  # the runner refused the entry, for the real reason
     assert {r["intent_id"] for r in rt.intents_of(ex.world, "BUY")} == seeds  # only the seed buys: no new entry
     assert ex.runner._portfolio.buys_blocked()
+
+
+def test_a_halve_owed_after_the_release_refuses_the_entry_once_and_mints_no_intent(make_exercise):
+    """Row ``halve_after_release`` (D-37). Break-proof: drop ``exit_open`` from the runner's early-return tuple and the
+    second ranked name is refused too (two skip lines); set ``reasons = ()`` and a BUY intent is minted: this fails."""
+    ex = make_exercise()
+    halve_after_release_setup(ex)
+    intents = {r["intent_id"] for r in ex.records("intent")}
+    posts = len(ex.order_posts())
+    ex.script.result = rt.evaluated("DDD", "EEE")
+    report = ex.decide()
+    assert [(isin, why) for isin, why in report.skipped if why.startswith("entry_blocked")] == [
+        (rt.ISINS["DDD"], "entry_blocked:exit_open")  # one line: the runner stops at the first run-wide reason
+    ]
+    assert {r["intent_id"] for r in ex.records("intent")} == intents  # no intent record, so D-23 has nothing to compare
+    assert len(ex.order_posts()) == posts and report.intents == []  # and no mint reached the VM
+    assert [r for r in rt.intents_of(ex.world, "BUY") if r["symbol"] in ("DDD", "EEE")] == []
+    assert ex.world.latch.load().halt is False and len(ex.world.latch.load().open_exits) == 3  # the latch is released
+
+
+def held_out_halve_world(ex: Exercise) -> str:
+    """After a release, AAA owes a halve held out under a Q-6 pause; BBB and CCC filled theirs. Returns AAA's ISIN."""
+
+    halve_setup(ex)
+    ex.script.result = rt.evaluated(entries=False)
+    ex.decide()
+    sells = exit_sells(ex)
+    for symbol in ("BBB", "CCC"):
+        ex.runner._prep.book_fill(
+            proposal_id=sells[symbol]["intent_id"], cumulative_quantity=Decimal(80), price=Decimal("89"),
+            charges=Decimal(0), schedule_sha256=rt.sha("schedule"), scenario_set_sha256=rt.sha("scenario"),
+            attempt_id=f"att-{symbol}",
+        )
+    ex.script.quarantined = {rt.ISINS["AAA"]}  # the held-name read finds an unrecorded corporate action on AAA
+    ex.script.result = rt.evaluated(entries=False)
+    ex.decide()  # AAA is paused (Q-6); its halve is held out
+    ex.runner._portfolio.release_halt("operator", "accept the loss", rebase_halt_anchor=True)
+    isin = rt.ISINS["AAA"]
+    assert sorted(ex.world.latch.load().open_exits) == [isin]
+    assert ex.runner._portfolio.exit_proposals(date(2026, 10, 23)).held_out == (isin,)
+    assert ex.runner._portfolio.snapshot().open_sells[isin] == 80  # its sell still rests: the shares stay reserved
+    return isin
+
+
+def test_a_held_out_halve_blocks_only_its_own_name_so_other_entries_reach_the_runner_and_the_held_out_name_keeps_its_slot(
+    make_exercise,
+):
+    """Row ``slot`` through ``_entries`` (D-37 option D). The held-out name still holds a slot because it is still held;
+    break-proof: free the slot of a name that has a sell resting (``held`` minus ``open_sells``) and the entry is
+    admitted past the limit: this fails."""
+    ex = make_exercise()
+    isin = held_out_halve_world(ex)
+    snapshot = ex.runner._portfolio.snapshot()
+    assert sorted(h.instrument.symbol for h in snapshot.holdings) == ["AAA", "BBB", "CCC"]
+    assert ex.runner._portfolio.entry_block_reasons(rt.ISINS["DDD"]) == ()  # the run is not blocked ...
+    assert ex.runner._portfolio.entry_block_reasons(isin) == ("instrument_paused",)  # ... only the held-out name
+    buys = len(rt.intents_of(ex.world, "BUY"))
+    full = SimpleNamespace(  # three slots: AAA (held out), BBB and CCC use them all
+        strategy=SimpleNamespace(
+            params=SimpleNamespace(max_positions=3, liquidity_adv_fraction=Decimal("0.05")),
+            limits=ex.world.inputs.strategy.limits,
+        )
+    )
+    report = runner_module.DecideReport(S)
+    asyncio.run(ex.runner._entries(S, rt.AS_OF, rt.evaluated("DDD"), full, set(), report))
+    assert report.skipped == [] and report.intents == []  # nothing blocks it, and no slot is free
+    assert len(rt.intents_of(ex.world, "BUY")) == buys
+    roomy = SimpleNamespace(
+        strategy=SimpleNamespace(
+            params=SimpleNamespace(max_positions=4, liquidity_adv_fraction=Decimal("0.05")),
+            limits=ex.world.inputs.strategy.limits,
+        )
+    )
+    again = runner_module.DecideReport(S)
+    asyncio.run(ex.runner._entries(S, rt.AS_OF, rt.evaluated("DDD"), roomy, set(), again))
+    assert len(rt.intents_of(ex.world, "BUY")) == buys + 1  # one more slot, one entry: the limit was the only thing
+
+
+def test_a_held_out_halve_credits_no_cash_to_an_entry_that_runs_beside_it(make_exercise):
+    """Row ``cash`` through ``_entries`` (D-37 option D). Break-proof: credit the held-out halve's shares to
+    ``deployable`` (80 x 89 more) and the entry is sized larger than the account's own cash allows: this fails."""
+    ex = make_exercise()
+    held_out_halve_world(ex)
+    snapshot = ex.runner._portfolio.snapshot()
+    deployable = snapshot.cash - snapshot.reserved
+    limits = ex.world.inputs.strategy.limits
+    assert deployable < Decimal(limits.per_position_cap)  # cash, not the cap, is what binds
+    buys = {r["intent_id"] for r in rt.intents_of(ex.world, "BUY")}
+    ex.script.result = rt.evaluated("DDD")
+    ex.decide()
+    (new,) = [r for r in rt.intents_of(ex.world, "BUY") if r["intent_id"] not in buys]
+    assert new["symbol"] == "DDD" and int(new["quantity"]) * Decimal(new["limit_price"]) <= deployable
+    assert int(new["quantity"]) >= 1
 
 
 def test_an_unfilled_exit_keeps_its_shares_reserved_until_the_day_expires_then_stays_owed_and_the_stop_latch_blocks_buys(make_exercise):

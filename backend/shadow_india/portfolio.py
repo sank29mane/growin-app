@@ -8,7 +8,9 @@ re-implements a threshold:
 - equity is cash plus quantity times the raw close (62 D-05), so it is cost inclusive and carries open exposure;
 - the -8% halt, the floor(q / 2) halves, the -15% flatten and the -12% close-based stop are
   ``risk_india.drawdown.evaluate_session``, driven through the same ``LatchStore`` file the admission guard
-  reads, so a buy is refused ``halt_latch`` / ``pilot_ended`` / ``stop_open`` by the real gate;
+  reads, so a buy is refused ``halt_latch`` / ``pilot_ended`` / ``stop_open`` by the real gate. The shadow adds one
+  refusal the gate does not have: ``exit_open`` (D-37) while any open latch exit is not held out under a Q-6 pause,
+  until a fill closes it. A latch reset or ``release_halt`` does not clear it and time never does;
 - the peak and the drawdown in every ``mark`` record are the latch's high-water mark. They are never taken from
   ``ShadowAdmissionAdapter.portfolio_state()``: that figure is seed-relative at cost, so when it is recorded it
   is a separate field stamped with ``SIMULATOR_DRAWDOWN_BASIS``;
@@ -976,8 +978,27 @@ class ShadowPortfolio:
 
     # -- entry blocks ----------------------------------------------------------------------------
 
+    def _exit_blocks_buys(self, state: RiskState) -> bool:
+        """True when any open latch exit is outside the corporate-action freeze (D-37).
+
+        A stop, halve or flatten that is ``waiting`` on a resting sell, ``ambiguous`` or still owed blocks the run until
+        a fill closes it (``_sync_exits`` removes it from the latch only on the holding). A reset or ``release_halt``
+        leaves ``open_exits`` alone, and no session count reads it. An exit on a name with an open Q-6 corporate-action
+        pause is held out: it blocks only that ISIN, through ``instrument_paused``, so an operator who must not take a
+        false-loss sale is not forced to freeze every other buy.
+        """
+
+        held = {h.instrument.isin for h in self.snapshot().holdings}
+        frozen = self._frozen_isins(held)
+        return any(isin not in frozen for isin in state.open_exits)
+
     def entry_block_reasons(self, isin: str | None = None) -> tuple[str, ...]:
-        """Why a buy is blocked right now. Empty means nothing here blocks it. Fails closed on a bad latch."""
+        """Why a buy is blocked right now. Empty means nothing here blocks it. Fails closed on a bad latch.
+
+        ``exit_open`` (D-37) is run-wide: while the latch holds an open stop, halve or flatten exit that is not held out
+        under a Q-6 pause, no buy runs, whether or not the latch that raised it is still set. This is the shadow
+        runner's rule; the 63 admission gate does not enforce it.
+        """
 
         reasons: set[str] = set()
         try:
@@ -991,6 +1012,8 @@ class ShadowPortfolio:
                 reasons.add("pilot_ended")
             if state.stops:
                 reasons.add("stop_open")
+            if state.open_exits and self._exit_blocks_buys(state):
+                reasons.add("exit_open")
         run = policy.run_state(self._store)
         if run.aborted:
             reasons.add("run_aborted")

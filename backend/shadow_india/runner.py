@@ -15,7 +15,9 @@ Order of a decide, with the reason for each step:
 5. the mark of S-1 at raw closes through the portfolio (peak and drawdown come from the 63 latch);
 6. exits, then strategy sells, then entries, one intent at a time. Each intent is admitted and reserved before the
    next is sized, so cash, slots and the cap are read fresh. The policy table is asked before every admission and mint,
-   and an open pause with scope ``all`` ends the invocation.
+   and an open pause with scope ``all`` ends the invocation. Before an entry is sized the runner refuses it for any
+   run-wide reason, ``exit_open`` (D-37: an open stop, halve or flatten exit not held out under a Q-6 pause) among them.
+   That refusal is the runner's: the 63 admission gate does not enforce ``exit_open``.
 
 The VM leg: the body is built and checked locally first (a body the VM would refuse never costs a round trip), the
 VM-side identity is written to evidence (``vm_intent``) before the POST, and the answer is classified code first
@@ -957,7 +959,7 @@ class ShadowRunner:
             reasons = self._portfolio.entry_block_reasons(isin)
             if reasons:
                 report.skipped.append((isin, "entry_blocked:" + ",".join(reasons)))
-                if any(r in reasons for r in ("halt_latch", "pilot_ended", "stop_open", "run_ended", "run_paused", "run_aborted")):
+                if any(r in reasons for r in ("halt_latch", "pilot_ended", "stop_open", "exit_open", "run_ended", "run_paused", "run_aborted")):
                     return
                 continue
             snap = self._portfolio.snapshot()  # reservations of the intents before this one are already in it
