@@ -66,7 +66,7 @@ from gateway_vm.orders import (  # noqa: E402
 )
 from gateway_vm.orders.alerts import FileAlertPort  # noqa: E402
 from gateway_vm.orders.risk import StopExitAlert  # noqa: E402
-from gateway_vm.orders.routes import OrderSettings, build_order_service  # noqa: E402
+from gateway_vm.orders.routes import AUDIT_PAGE, OrderSettings, build_order_service  # noqa: E402
 from gateway_vm.orders.store import StateStore  # noqa: E402
 from gateway_vm.transport import HttpResponse  # noqa: E402
 
@@ -957,8 +957,27 @@ def revoke_on_read(stack: OrderStack, token: str, nth: int) -> list[str]:
     return seen
 
 
+def durable_audit(stack: OrderStack) -> list[dict]:
+    """The durable audit chain, read the way audit_page reads it (routes.py), not through the route.
+
+    Tests that read the chain after a revoke or an egress suspension use this: the route now
+    refuses a caller with no live session (64-11), the chain itself must still be checked.
+    """
+    with stack.service.store.lock():
+        return stack.service.audit.entries_after(0, AUDIT_PAGE)
+
+
 def decisions(stack: OrderStack, token: str) -> list[str]:
-    return [entry["decision"] for entry in stack.audit(token)]
+    return [entry["decision"] for entry in durable_audit(stack)]
+
+
+def test_durable_audit_helper_matches_the_audit_route_on_a_live_session(stack, token):
+    """D0: the migrated tests read the chain directly. On a live session that read is the route's own."""
+    assert stack.verify_ok(token).status_code == 200
+    assert stack.post("/v1/orders/halt", {}, token).status_code == 200
+    direct = durable_audit(stack)
+    assert direct == stack.audit(token)
+    assert [e["decision"] for e in direct] == ["CHALLENGED", "VERIFIED_NOT_FORWARDED", "HALTED"]
 
 
 def test_a_session_revoked_during_authorize_stops_the_next_read_and_never_verifies(stack, token):
@@ -967,7 +986,7 @@ def test_a_session_revoked_during_authorize_stops_the_next_read_and_never_verifi
     resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert len(seen) == 1  # trades, orders, quote and bars never left on the dead session
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     # The intent was consumed before the check. The refusal is the audit line.
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["no_session"]
@@ -992,7 +1011,7 @@ def test_a_session_revoked_during_the_last_read_is_caught_before_the_decision(st
         resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert len(seen) == 5  # every read ran; only the final decision was left to stop
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     if route == "mint":
         assert len(entries) == before  # the intent was not consumed, so nothing is recorded
     else:
@@ -1052,7 +1071,7 @@ def test_a_session_revoked_after_the_authorize_recheck_returns_is_not_verified(s
         stack, token, lambda: stack.authorize(token, challenge_id, signature)
     )
     assert code_of(resp)[:2] == (503, "NO_SESSION")
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == [
         "CHALLENGED",
         "VERIFIED_NOT_FORWARDED",
@@ -1067,7 +1086,7 @@ def test_a_session_revoked_after_the_mint_recheck_returns_issues_no_challenge(st
     resp = call_while_recheck_is_paused(stack, token, lambda: stack.mint(token))
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert "challenge_id" not in resp.json()
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["no_session"]
     assert entries[-1]["route"] == "intents"
@@ -1103,7 +1122,7 @@ def egress_drift_on_read(stack: OrderStack, nth: int) -> list[str]:
 
 def assert_chain_verifies(stack: OrderStack, token: str) -> None:
     seq, _head = stack.service.pipeline._audit.verify()
-    assert seq == len(stack.audit(token))
+    assert seq == len(durable_audit(stack))
 
 
 def test_budget_refusal_during_the_authorize_check_is_audited_as_budget_exhausted(stack, token):
@@ -1129,7 +1148,7 @@ def test_egress_mismatch_during_the_authorize_check_is_audited_as_egress_mismatc
     resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
     assert len(seen) == nth
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["egress_mismatch"]
     assert entries[-1]["route"] == "authorize"
@@ -1145,7 +1164,7 @@ def test_egress_mismatch_after_the_authorize_recheck_returns_is_audited_as_egres
         disturb=lambda: drift_egress(stack),
     )
     assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "VERIFIED_NOT_FORWARDED", "REFUSED"]
     assert entries[-1]["codes"] == ["egress_mismatch"]
     assert stack.service.pipeline._forward.calls == 0
@@ -1158,7 +1177,7 @@ def test_egress_mismatch_after_the_mint_recheck_returns_is_audited_as_egress_mis
     )
     assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
     assert "challenge_id" not in resp.json()
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["egress_mismatch"]
     assert entries[-1]["route"] == "intents"
@@ -1170,7 +1189,7 @@ def test_a_real_session_death_during_the_check_is_still_audited_as_no_session(st
     revoke_on_read(stack, token, 1)
     resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["no_session"]
     assert_chain_verifies(stack, token)
