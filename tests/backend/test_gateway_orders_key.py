@@ -409,17 +409,37 @@ def _key_handlers(tree: ast.AST) -> list[ast.FunctionDef]:
     ]
 
 
+def _is_none(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _tests_failure(test: ast.expr) -> bool:
+    """`authorization.failure` or `authorization.failure is not None`; never a negation."""
+    if _dotted(test) == "authorization.failure":
+        return True
+    return (
+        isinstance(test, ast.Compare)
+        and _dotted(test.left) == "authorization.failure"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.IsNot)
+        and _is_none(test.comparators[0])
+    )
+
+
 def _is_failure_gate(stmt: ast.stmt) -> bool:
-    """`if authorization.failure: raise authorization.failure`, matched by node, not by text."""
+    """`if authorization.failure: raise authorization.failure`, matched by node, not by text.
+
+    The honest spellings `is not None` and `raise ... from None` keep the gate, so they match.
+    """
     return (
         isinstance(stmt, ast.If)
-        and _dotted(stmt.test) == "authorization.failure"
+        and _tests_failure(stmt.test)
         and not stmt.orelse
         and len(stmt.body) == 1
         and isinstance(stmt.body[0], ast.Raise)
         and stmt.body[0].exc is not None
         and _dotted(stmt.body[0].exc) == "authorization.failure"
-        and stmt.body[0].cause is None
+        and (stmt.body[0].cause is None or _is_none(stmt.body[0].cause))
     )
 
 
@@ -543,10 +563,39 @@ def _gate_after_read(body: list[ast.stmt]) -> None:
     body.insert(gate, ast.parse("pipeline()").body[0])
 
 
+def _gate_from_none(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.body[0].cause = ast.Constant(value=None)
+
+
+def _gate_is_not_none(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.test = ast.parse("authorization.failure is not None", mode="eval").body
+
+
+def _gate_is_none(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.test = ast.parse("authorization.failure is None", mode="eval").body
+
+
 @pytest.mark.parametrize(
     "mutate",
-    [_drop_gate, _hollow_gate, _inverted_gate, _gate_after_read],
-    ids=["dropped", "hollow", "inverted", "after_read"],
+    [_gate_from_none, _gate_is_not_none],
+    ids=["raise_from_none", "is_not_none"],
+)
+def test_k11_an_honest_respelling_of_the_failure_gate_stays_clean(mutate):
+    # Controls for the gate check: these keep the gate working, so the scan must not cry wolf.
+    source = VM_ROUTES_FILE.read_text(encoding="utf-8")
+    assert key_handler_violations(mutate_key_handler(source, mutate)) == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_drop_gate, _hollow_gate, _inverted_gate, _gate_is_none, _gate_after_read],
+    ids=["dropped", "hollow", "inverted", "is_none", "after_read"],
 )
 def test_k11_a_handler_without_a_working_failure_gate_turns_the_scan_red(mutate):
     source = VM_ROUTES_FILE.read_text(encoding="utf-8")
