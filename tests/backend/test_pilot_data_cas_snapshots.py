@@ -11,6 +11,7 @@ only for this procedure and are pinned by its fingerprint.
 from __future__ import annotations
 
 import ast
+import sys
 import dataclasses
 import hashlib
 import inspect
@@ -706,7 +707,9 @@ def _functions_of(target: Any) -> list[types.FunctionType]:
     if inspect.isfunction(target):
         return [target]
     home = inspect.getsourcefile(target)  # skip functions a framework (pydantic) attaches to the class
-    return [m for m in vars(target).values() if inspect.isfunction(m) and m.__code__.co_filename == home]
+    members = [m.__func__ if isinstance(m, (classmethod, staticmethod)) else m for m in vars(target).values()]
+    members += [m.fget for m in vars(target).values() if isinstance(m, property) and m.fget is not None]
+    return [m for m in members if inspect.isfunction(m) and m.__code__.co_filename == home]
 
 
 OWNER_CLASSES = (PilotDataStore, pd_models.SecurityMasterRow)
@@ -844,6 +847,36 @@ def test_cas_procedure_fingerprint_walk_catches_a_local_import(monkeypatch: pyte
         "security_master.lookup_stock_code: local import import pilot_data.core as helper"
     ]
     assert uncovered_module_attribute_reads() == []  # the gap this check closes
+
+
+class _DescriptorHolder:  # defined in this file, so _functions_of keeps its members (same source file)
+    @classmethod
+    def as_classmethod(cls) -> Any:
+        import pilot_data.core as helper
+
+        return helper.utc_now()
+
+    @staticmethod
+    def as_staticmethod() -> Any:
+        import pilot_data.core as helper
+
+        return helper.utc_now()
+
+    @property
+    def as_property(self) -> Any:
+        import pilot_data.core as helper
+
+        return helper.utc_now()
+
+
+def test_cas_procedure_fingerprint_walk_sees_descriptor_methods(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 4 counterexample: classmethod, staticmethod and property members of a fingerprinted class are walked."""
+    names = {fn.__name__ for fn in _functions_of(_DescriptorHolder)}
+    assert names == {"as_classmethod", "as_staticmethod", "as_property"}
+    monkeypatch.setattr(cs, "FINGERPRINTED", (("test.DescriptorHolder", sys.modules[__name__], "_DescriptorHolder"),))
+    assert local_imports_in_fingerprinted() == [
+        "test.DescriptorHolder: local import import pilot_data.core as helper"
+    ]
 
 
 def test_cas_procedure_fingerprint_walk_catches_an_uncovered_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
