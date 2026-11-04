@@ -73,8 +73,11 @@ SHAPES: tuple[tuple[str, str, bytes, int], ...] = (
     (
         SESSION_CODE,
         "api_session",
-        rb'(?:apisession|api_session)"{0,1}[ \t]{0,8}[=:][ \t]{0,8}"{0,1}[0-9]{6,64}(?![A-Za-z0-9_])',
-        11 + 1 + 8 + 1 + 8 + 1 + 64,
+        # The relay's own contract is ^[A-Za-z0-9]{6,64}$ (contract.py API_SESSION_RE). At least one digit is
+        # required so source like `api_session=apisession` is not a hit; quotes and `%3D` are allowed.
+        rb"(?:apisession|api_session)[\x27\"]{0,1}[ \t]{0,8}(?:[=:]|%3d)[ \t]{0,8}[\x27\"]{0,1}"
+        rb"(?=[A-Za-z]{0,63}[0-9])[A-Za-z0-9]{6,64}(?![A-Za-z0-9_])",
+        11 + 1 + 8 + 3 + 8 + 1 + 64,
     ),
     (
         SDK_HEADER,
@@ -151,6 +154,9 @@ class Spec:
         self.shapes = shapes
         self.skip = skip
         self.forms: dict[str, tuple[bytes, ...]] = {}
+        # A value under the floor loses its raw form (only its longer encodings are searched), so a plain
+        # occurrence would pass. Such a class is never "covered": the target reports INCOMPLETE.
+        self.short = frozenset(cls for cls, value in self.values.items() if len(value) < MIN_FORM)
         for cls, value in self.values.items():
             forms = tuple(f.encode("utf-8") for f in expand_forms(value))
             if forms and cls not in skip:
@@ -170,6 +176,8 @@ class Spec:
         return Spec(self.values, shapes=self.shapes, skip=self.skip | skip)
 
     def covered(self, cls: str) -> bool:
+        if cls in self.short:
+            return False
         if cls in self.forms:
             return True
         if not self.shapes:
@@ -380,7 +388,7 @@ class _SpecCache:
 
 def _safe_name(path_text: str, spec: Spec, index: int) -> str:
     """A path is printed only if it does not itself carry a value."""
-    if scan_text(path_text, Spec(spec.values, shapes=False)):
+    if scan_text(path_text, Spec(spec.values, shapes=True)):  # values and runtime shapes, whatever the target
         return f"<redacted-path-{index}>"
     return path_text
 
@@ -561,11 +569,11 @@ def scan_git_history(
     label: str = "git-history",
     max_bytes: int | None = None,
 ) -> Report:
-    """`git log -p --all --no-color`, streamed. A command that fails leaves the target INCOMPLETE."""
+    """`git log -p --all --no-color --text`, streamed (`--text` so binary diffs are searched too). A command that fails leaves the target INCOMPLETE."""
     report = Report(label)
     try:
         out = scan_chunks(
-            run_git(["log", "-p", "--all", "--no-color"], Path(repo)), spec, max_bytes=max_bytes, count_commits=True
+            run_git(["log", "-p", "--all", "--no-color", "--text"], Path(repo)), spec, max_bytes=max_bytes, count_commits=True
         )
     except Exception:  # noqa: BLE001 - a failed or injected-failing runner is an incomplete target, never a pass
         report.failed = "git"
@@ -649,7 +657,7 @@ def default_fetch_secrets(names: Mapping[str, str]) -> dict[str, str]:
 # --------------------------------------------------------------------------- modes
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VM_REQUIRED_ROOTS = ("/etc/growin-gateway", "/var/lib/private/growin-gateway", "/opt/growin-gateway")
+VM_REQUIRED_ROOTS = ("/etc", "/etc/growin-gateway", "/var/lib/private/growin-gateway", "/opt/growin-gateway")
 VM_OPTIONAL_ROOTS = ("/var/log", "/tmp", "/var/tmp", "/run", "/home", "/root")
 VM_USER_ID_DIRS = ("/etc/growin-gateway", "/run/credentials")
 
@@ -693,7 +701,8 @@ def run_mac(
         runtime_spec = Spec(values, shapes=True)
         notes: list[str] = []
         if not repo_spec.covered(SESSION_CODE):
-            notes.append("uncovered: session_code (no value entered)")
+            why = "value under 8 characters" if SESSION_CODE in repo_spec.short else "no value entered"
+            notes.append(f"uncovered: session_code ({why})")
         repo_gaps = repo_spec.uncovered(REPO_REQUIRED)
         runtime_gaps = runtime_spec.uncovered(RUNTIME_REQUIRED)
         repo_excl = Exclusions(

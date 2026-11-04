@@ -872,3 +872,185 @@ def test_the_script_runs_as_a_program_and_refuses_without_a_terminal():
         [sys.executable, "-I", str(SCRIPT), "mac"], capture_output=True, text=True, stdin=subprocess.DEVNULL
     )
     assert proc.returncode == 3 and proc.stdout.startswith("REFUSED")
+
+
+# ------------------------------------------------- round 1 fixes
+
+
+def _session_code_cases() -> dict[str, tuple[str, str]]:
+    """Forms the relay's own contract allows (^[A-Za-z0-9]{6,64}$), in the shapes a log can hold."""
+    mixed = "AB" + _digits(2) + "cd" + _digits(2)
+    tail = _digits(8) + "abc"
+    plain = _digits(8)
+    return {
+        "mixed case": (f"apisession={mixed}", mixed),
+        "digits then letters": (f"apisession={tail}", tail),
+        "single quoted": (f"apisession='{plain}'", plain),
+        "python dict repr": (f"{{'apisession': '{plain}'}}", plain),
+        "url encoded equals": (f"apisession%3D{plain}", plain),
+        "url encoded equals lower": (f"GET /x?apisession%3d{plain} 200", plain),
+        "api_session underscore": (f"api_session={mixed}&x=1", mixed),
+        "double quoted json": (f'{{"apisession": "{plain}"}}', plain),
+    }
+
+
+def test_d11_api_session_forms_are_found_by_shape_alone():
+    spec = scan.Spec({scan.USER_ID: "FK" + secrets.token_hex(4).upper()}, shapes=True)  # no code known
+    for name, (text, _) in _session_code_cases().items():
+        assert scan.SESSION_CODE in scan.scan_text(text, spec), name
+
+
+def test_d11_api_session_forms_are_found_by_value_alone():
+    for name, (text, code) in _session_code_cases().items():
+        spec = scan.Spec({scan.SESSION_CODE: code}, shapes=False)  # repo targets: value only
+        assert scan.SESSION_CODE in scan.scan_text(text, spec), name
+
+
+def test_d11_api_session_forms_are_found_with_both_value_and_shape():
+    for name, (text, code) in _session_code_cases().items():
+        spec = scan.Spec({scan.SESSION_CODE: code}, shapes=True)
+        assert scan.SESSION_CODE in scan.scan_text(text, spec), name
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "api_session=apisession",  # the relay's own keyword argument: no digit
+        "apisession=abcdefgh",
+        "apisession=12345",  # under the relay's lower bound of 6
+        "api_session=st.api_session",
+        "apisession=" + "1" * 65,  # over the upper bound: not a code
+        "apisession: Callable[[], str]",
+    ],
+)
+def test_d11_api_session_innocent_text_is_not_flagged(text, fakes):
+    assert scan.scan_text(text, scan.Spec({scan.USER_ID: fakes.user_id}, shapes=True)) == set()
+
+
+def test_d11_the_relay_sources_are_clean_of_the_widened_api_session_shape(fakes):
+    spec = scan.Spec({scan.USER_ID: fakes.user_id}, shapes=True)
+    relay = scan.scan_tree(ROOT / "gateway" / "vm" / "gateway_vm", spec, label="relay-src")
+    assert relay.hits == {}, relay.hits
+
+
+def test_d21_api_session_is_found_across_a_chunk_edge_in_every_form(tmp_path, fakes):
+    spec = scan.Spec({scan.USER_ID: fakes.user_id}, shapes=True)
+    for name, (text, _) in _session_code_cases().items():
+        match = (" " + text + " ").encode()
+        for where, start in _offsets(len(match)).items():
+            path = _edge_file(tmp_path, f"api-{name.replace(' ', '-')}-{where}.bin", match, start)
+            report = scan.scan_files([path], spec, label="edge")
+            assert scan.SESSION_CODE in report.hits.get(str(path), set()), f"{name} at {where}"
+
+
+def test_item2_a_path_carrying_a_header_shape_is_redacted(tmp_path, fakes, capsys):
+    other = secrets.token_urlsafe(32)  # not a known value: only the runtime shape can recognise it
+    name = f"Authorization: Bearer {other}.log"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / name).write_text(fakes.app_key)
+    report = scan.scan_tree(logs, scan.Spec(fakes.values, shapes=False), label="t")  # a repo-style spec too
+    text = "\n".join(report.lines())
+    assert other not in text and "<redacted-path-1>" in text and report.status == "FAIL"
+
+
+def test_item2_the_mac_run_never_prints_a_token_carried_by_a_filename(tmp_path, fakes, capsys):
+    env = _mac_env(tmp_path, fakes)
+    other = secrets.token_urlsafe(32)
+    logs = env["home"] / ".config" / "gcloud" / "logs"
+    logs.mkdir(parents=True)
+    (logs / f"X-SessionToken: {fakes.breeze_token}.log").write_text(fakes.app_key)
+    (logs / f"Authorization: Bearer {other}.log").write_text(fakes.app_key)
+    (logs / f"apisession={fakes.session_code}.log").write_text(fakes.app_key)
+    code, out = run_scan(capsys, ["mac"], **env)
+    assert code == 1 and "FAIL gcloud-logs hits=3" in out
+    for leaked in (other, fakes.breeze_token, fakes.session_code):
+        assert leaked not in out
+    assert out.count("<redacted-path-") == 3
+
+
+def test_item3_the_vm_scans_etc_and_finds_an_appkey_in_a_unit_drop_in(tmp_path, fakes, capsys):
+    env = _vm_env(tmp_path, fakes)
+    drop_in = env["fs_root"] / "etc/systemd/system/growin-gateway.service.d"
+    drop_in.mkdir(parents=True)
+    (drop_in / "override.conf").write_text(f"[Service]\nEnvironment=K={fakes.app_key}\n")
+    code, out = run_scan(capsys, ["vm"], **env)
+    assert code == 1 and "FAIL etc hits=1" in out
+    assert "  hit systemd/system/growin-gateway.service.d/override.conf app_key" in out
+    assert fakes.app_key not in out
+
+
+def test_item3_a_token_in_etc_environment_is_found_by_shape(tmp_path, fakes, capsys):
+    env = _vm_env(tmp_path, fakes)
+    (env["fs_root"] / "etc" / "environment").write_text(f"AUTH=Authorization: Bearer {secrets.token_urlsafe(32)}\n")
+    code, out = run_scan(capsys, ["vm"], **env)
+    assert code == 1 and "  hit environment relay_token" in out
+
+
+def test_item3_etc_keeps_the_user_id_exclusion_for_the_gateway_directory(tmp_path, fakes, capsys):
+    env = _vm_env(tmp_path, fakes)  # relay.json holds the user id by design
+    (env["fs_root"] / "etc" / "motd").write_text(fakes.user_id)
+    code, out = run_scan(capsys, ["vm"], **env)
+    assert code == 1 and "  hit motd user_id" in out and "hit growin-gateway/relay.json" not in out
+    (env["fs_root"] / "etc" / "motd").unlink()
+    assert run_scan(capsys, ["vm"], **env)[0] == 0
+
+
+def test_item3_a_missing_etc_is_incomplete(tmp_path, fakes, capsys):
+    import shutil
+
+    env = _vm_env(tmp_path, fakes)
+    shutil.rmtree(env["fs_root"] / "etc")
+    code, out = run_scan(capsys, ["vm"], **env)
+    assert code == 2 and "INCOMPLETE etc missing" in out
+
+
+def test_item4_a_value_under_the_floor_is_never_covered():
+    short = "AB" + _digits(5)  # seven characters: the raw form falls under the 8-character floor
+    spec = scan.Spec({scan.USER_ID: short}, shapes=True)
+    assert spec.uncovered([scan.USER_ID]) == [scan.USER_ID]
+    assert scan.expand_forms(short) != []  # its base64 form is still searched, but that is not coverage
+    assert scan.Spec({scan.USER_ID: "AB" + _digits(6)}).uncovered([scan.USER_ID]) == []
+
+
+def test_item4_a_short_user_id_is_incomplete_on_the_mac_and_on_the_vm(tmp_path, fakes, capsys):
+    fakes.user_id = "AB" + _digits(5)
+    (tmp_path / "m").mkdir()
+    env = _mac_env(tmp_path / "m", fakes)
+    (env["repo_root"] / "plain.txt").write_text(f"user={fakes.user_id}\n")  # the raw form passes unseen
+    code, out = run_scan(capsys, ["mac"], **env)
+    assert code == 2 and "uncovered=user_id" in out and out.splitlines()[-1] == "RESULT INCOMPLETE"
+    (tmp_path / "v").mkdir()
+    code, out = run_scan(capsys, ["vm"], **_vm_env(tmp_path / "v", fakes))
+    assert code == 2 and "uncovered=user_id" in out
+
+
+def test_item4_a_short_session_code_says_why_it_is_uncovered(tmp_path, fakes, capsys):
+    fakes.session_code = _digits(7)
+    code, out = run_scan(capsys, ["mac"], **_mac_env(tmp_path, fakes))
+    assert "uncovered: session_code (value under 8 characters)" in out.splitlines()
+    assert code == 2
+
+
+def _binary_repo(repo: Path, payload: bytes) -> None:
+    _git(repo, "init", "-q")
+    (repo / "blob.bin").write_bytes(b"\x00\x01\x02" + payload + b"\x00")
+    _git(repo, "add", "blob.bin")
+    _git(repo, "commit", "-qm", "binary")
+
+
+def test_item7_a_secret_in_a_binary_diff_is_found_in_git_history(tmp_path, fakes):
+    _binary_repo(tmp_path, fakes.secret_key.encode())
+    report = scan.scan_git_history(tmp_path, scan.Spec(fakes.values))
+    assert report.status == "FAIL" and set(report.hits) == {"history:secret_key"}
+
+
+def test_item7_the_git_command_asks_for_text_diffs(tmp_path, fakes):
+    seen = []
+
+    def runner(args, cwd):
+        seen.append(list(args))
+        return [b"commit " + b"a" * 40 + b"\n"]
+
+    scan.scan_git_history(tmp_path, scan.Spec(fakes.values), run_git=runner)
+    assert seen == [["log", "-p", "--all", "--no-color", "--text"]]
