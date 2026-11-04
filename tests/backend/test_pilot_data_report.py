@@ -4,7 +4,7 @@
 import json
 import shutil
 import stat
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -15,6 +15,7 @@ from pilot_data.bhavcopy import ingest_pr_zip
 from pilot_data.core import PilotDataError, SourceDescriptor, standard_caveats
 from pilot_data.corporate_actions import derive_corporate_actions
 from pilot_data.dataset import build_dataset_snapshot
+from pilot_data.security_master import ingest_security_master
 from pilot_data.report import (
     Part2Report, build_part2_report, latest_session, main, run_part1, write_part2_report, write_report,
 )
@@ -308,6 +309,20 @@ def test_a_call_the_client_refused_before_sending_is_not_counted(relay_store, re
     after = part2(relay_store).backfill
     assert after.calls_by_ist_date["2026-10-21"] == before["2026-10-21"] + 1  # only the sent call
     assert after.max_calls_one_day == after.calls_by_ist_date["2026-10-21"]
+
+
+def test_only_a_relay_fetched_master_counts_as_the_refresh(relay_store, relay, clock_time):
+    bf.refresh_security_master(relay_store, relay.client(), workspace="india", clock=lambda: NOW)
+    fetched = part2(relay_store).master_refresh
+    declared = [row for row in relay.master_rows if row is not kit.MASTER_JAIBAL]  # a later, hand-declared file
+    ingest_security_master(
+        relay_store,
+        SourceDescriptor(source="local_file", kind="security_master", locator="operator/NSEScripMaster.txt",
+                         fetched_at=datetime(2026, 10, 22, 8, 0, tzinfo=timezone.utc)),
+        kit.security_master_bytes(declared), snapshot_date=date(2026, 10, 22), snapshot_date_basis="operator_declared",
+    )
+    assert relay_store.query("SELECT count(*) FROM security_master_snapshots")[0][0] == 2
+    assert part2(relay_store).master_refresh == fetched and fetched.changes_by_kind == {}
 
 
 def test_an_unfinished_backfill_shows_its_pending_windows(relay_store, relay, clock_time):
