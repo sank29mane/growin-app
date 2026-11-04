@@ -84,6 +84,9 @@ def _parser() -> argparse.ArgumentParser:
     offline.add_argument("--saved", required=True, type=Path)
     offline.add_argument("--pilot-store", required=True, type=Path)
     offline.add_argument("--probe-date", type=_day, help="default: the latest saved probe date")
+    offline.add_argument(
+        "--procedure-version", required=True, type=int, help="approved CAS snapshot procedure version (no default)"
+    )
     sub.add_parser("orders-state", help="VM order state: kill, latches, drawdown (read only)")
     audit = sub.add_parser("orders-audit", help="VM order audit entries (read only)")
     audit.add_argument("--after-seq", type=int, default=0)
@@ -154,7 +157,10 @@ def main(
             return _login(args, factory, getpass_fn, opener, isatty, say)
         if args.command == "probe-intraday" and args.probe_mode == "compare":
             # Offline: no client factory, no HTTP, no tunnel.
-            return compare(args.saved, args.pilot_store, say, window=day_window(), probe_date=args.probe_date)
+            return compare(
+                args.saved, args.pilot_store, say, window=day_window(), procedure_version=args.procedure_version,
+                probe_date=args.probe_date,
+            )
         with factory() as relay:
             if args.command == "health":
                 health = relay.health()

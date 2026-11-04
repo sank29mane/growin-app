@@ -24,7 +24,8 @@ approval reference are present; even then this module applies the conservative r
 relaxation itself is a later approved task.
 
 Pure: no I/O beyond the schedule loader, no clock, no network, no randomness, Decimal only.
-The caller fetches the evidence, reads the bhavcopy and the CAS-class table, and owns the clock.
+The caller fetches the evidence, reads the bhavcopy, resolves the CAS class from the session-dated snapshot
+(``pilot_data.cas_snapshots``, D-34) and owns the clock.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .cas_class import CAS, CAS_CLASSES, NON_CAS, CasClassRow
+from .cas_class import CAS, CAS_CLASSES, NON_CAS, CasClassRow, CasUnresolved, cas_record
 from .core import (
     COST_CONTEXT,
     IST,
@@ -577,6 +578,7 @@ class IntradayAttempt:
     isin: str
     series: str
     stock_code: str
+    nse_symbol: str
     session_date: date
     side: Side
     quantity: int
@@ -591,6 +593,7 @@ class IntradayAttempt:
         require_text(self.isin, "isin")
         require_text(self.series, "series")
         require_text(self.stock_code, "stock_code")
+        require_text(self.nse_symbol, "nse_symbol")
         require_date(self.session_date, "session_date")
         if not isinstance(self.side, Side):
             raise InputError("side must be a Side")
@@ -630,6 +633,7 @@ class DayIntegrity:
     isin: str
     series: str
     stock_code: str
+    nse_symbol: str
     session_date: date
     source_sha256: str
     interval: str
@@ -643,8 +647,17 @@ class DayIntegrity:
     evidence_fetch_rule: str | None
     session_timing_version: str
     cas_class: str | None
-    cas_table_version: str | None
-    cas_source_ref: str | None
+    cas_sub_reason: str | None
+    cas_detail: str | None
+    cas_snapshot_date: str | None
+    cas_snapshot_sha256: str | None
+    cas_index_sha256: str | None
+    cas_procedure_version: int | None
+    cas_spec_sha256: str | None
+    cas_impl_sha256: str | None
+    cas_u24_status: str | None
+    cas_u24_evidence_ref: str | None
+    cas_icici_ref: dict[str, Any] | None
     continuous_end: str | None
     volume_sum: int | None
     bhavcopy_total: int | None
@@ -732,6 +745,29 @@ def _freshness(evidence: IntradayEvidence, schedule: IntradayScenarioSet) -> tup
     return EVIDENCE_FETCHED_TOO_LATE, None
 
 
+def _cas_facts(
+    verdict: CasClassRow | CasUnresolved | None, nse_symbol: str, sub_reason: str | None = None, detail: str | None = None
+) -> dict[str, Any]:
+    """The CAS field list as ``DayIntegrity`` fields. A forced ``sub_reason`` replaces the class (R-9, D-34)."""
+    record = cas_record(verdict, nse_symbol)
+    if sub_reason is not None:
+        record.update(cas_class=None, sub_reason=sub_reason, detail=detail)
+    return {
+        "cas_class": record["cas_class"],
+        "cas_sub_reason": record["sub_reason"],
+        "cas_detail": record["detail"],
+        "cas_snapshot_date": record["snapshot_date"],
+        "cas_snapshot_sha256": record["snapshot_sha256"],
+        "cas_index_sha256": record["index_sha256"],
+        "cas_procedure_version": record["procedure_version"],
+        "cas_spec_sha256": record["spec_sha256"],
+        "cas_impl_sha256": record["impl_sha256"],
+        "cas_u24_status": record["u24_status"],
+        "cas_u24_evidence_ref": record["u24_evidence_ref"],
+        "cas_icici_ref": record["icici_ref"],
+    }
+
+
 def assess_day(
     evidence: IntradayEvidence,
     *,
@@ -739,19 +775,25 @@ def assess_day(
     isin: str,
     series: str,
     stock_code: str,
+    nse_symbol: str,
     session_date: date,
     tick: TickSize,
     band: PriceBand | BandUnavailable,
     session: SessionFacts | None,
-    cas_row: CasClassRow | None,
+    cas_row: CasClassRow | CasUnresolved | None,
     bhavcopy: BhavcopyDay | None,
     daily_bar_volume: int | None = None,
 ) -> DayIntegrity:
-    """Stage A (R-2 to R-9, R-15 to R-19, R-27, R-33). Reads no attempt field."""
+    """Stage A (R-2 to R-9, R-15 to R-19, R-27, R-33). Reads no attempt field.
+
+    ``cas_row`` is the resolved class row or the typed unresolved verdict of ``pilot_data.cas_snapshots`` (D-34);
+    this function reads no file.
+    """
     with decimal.localcontext(COST_CONTEXT):
         require_text(isin, "isin")
         require_text(series, "series")
         require_text(stock_code, "stock_code")
+        require_text(nse_symbol, "nse_symbol")
         require_date(session_date, "session_date")
         _check_tick(tick, session_date)
         if not isinstance(band, (PriceBand, BandUnavailable)):
@@ -759,7 +801,7 @@ def assess_day(
         if daily_bar_volume is not None:
             strict_int(daily_bar_volume, "daily_bar_volume", minimum=0)
         return _assess_day(
-            evidence, schedule, isin, series, stock_code, session_date, tick, band,
+            evidence, schedule, isin, series, stock_code, nse_symbol, session_date, tick, band,
             session, cas_row, bhavcopy, daily_bar_volume,
         )
 
@@ -770,20 +812,19 @@ def _assess_day(
     isin: str,
     series: str,
     stock_code: str,
+    nse_symbol: str,
     session_date: date,
     tick: TickSize,
     band: PriceBand | BandUnavailable,
     session: SessionFacts | None,
-    cas_row: CasClassRow | None,
+    cas_row: CasClassRow | CasUnresolved | None,
     bhavcopy: BhavcopyDay | None,
     daily_bar_volume: int | None,
 ) -> DayIntegrity:
     facts: dict[str, Any] = {
         "verdict_code": None,
         "evidence_fetch_rule": None,
-        "cas_class": None,
-        "cas_table_version": None,
-        "cas_source_ref": None,
+        **_cas_facts(None, nse_symbol),
         "continuous_end": None,
         "volume_sum": None,
         "bhavcopy_total": None,
@@ -806,6 +847,7 @@ def _assess_day(
             isin=isin,
             series=series,
             stock_code=stock_code,
+            nse_symbol=nse_symbol,
             session_date=session_date,
             source_sha256=evidence.source_sha256,
             interval=evidence.interval,
@@ -870,11 +912,30 @@ def _assess_day(
         or session.timing_version != schedule.session_timing_version
     ):
         return finish(SESSION_NOT_STANDARD)
-    if cas_row is None or cas_row.isin != isin or cas_row.session_date != session_date:
+    # Every failure below records the one CAS field list (D-34 e) with its sub-reason and detail; none defaults.
+    if cas_row is None:
+        facts.update(_cas_facts(None, nse_symbol, "snapshot_missing", "cas_row_not_supplied"))
         return finish(SESSION_SCOPE_UNKNOWN)
-    facts["cas_class"] = cas_row.cas_class
-    facts["cas_table_version"] = cas_row.table_version
-    facts["cas_source_ref"] = f"{cas_row.publication_id}:{cas_row.source_sha256}"
+    if isinstance(cas_row, CasUnresolved):
+        if cas_row.session_date != session_date:
+            facts.update(_cas_facts(cas_row, nse_symbol, "snapshot_wrong_date", "verdict_is_for_another_date"))
+        else:
+            facts.update(_cas_facts(cas_row, nse_symbol))
+        return finish(SESSION_SCOPE_UNKNOWN)
+    if not isinstance(cas_row, CasClassRow):
+        raise InputError("cas_row must be a CasClassRow, a CasUnresolved or None")
+    if cas_row.snapshot_date != session_date:
+        facts.update(_cas_facts(cas_row, nse_symbol, "snapshot_wrong_date", "row_date_differs_from_session"))
+        return finish(SESSION_SCOPE_UNKNOWN)
+    if (cas_row.isin, cas_row.nse_symbol, cas_row.series) != (isin, nse_symbol, series):
+        facts.update(_cas_facts(cas_row, nse_symbol, "identity_mismatch", "row_instrument_differs_from_pinned"))
+        return finish(SESSION_SCOPE_UNKNOWN)
+    # Only ``resolve_broker`` yields a row with the Breeze code and the ICICI master pin. A row shaped like the
+    # display path's (``resolve_symbol``: no code, no pin) never feeds a decision.
+    if cas_row.stock_code != stock_code or cas_row.icici_ref is None:
+        facts.update(_cas_facts(cas_row, nse_symbol, "identity_mismatch", "row_not_from_resolve_broker"))
+        return finish(SESSION_SCOPE_UNKNOWN)
+    facts.update(_cas_facts(cas_row, nse_symbol))
     facts["continuous_end"] = schedule.continuous_end_for(cas_row.cas_class).strftime("%H:%M")
     # R-15: sum over every bar in D, admitted by any attempt or not.
     if (
@@ -1009,8 +1070,8 @@ def admit_bars(day: DayIntegrity, attempt: IntradayAttempt, schedule: IntradaySc
         raise InputError(f"admit_bars needs a passing DayIntegrity, got {day.verdict_code!r}")
     if attempt.scenario_set_hash != schedule.schedule_hash or day.schedule_hash != schedule.schedule_hash:
         raise InputError("attempt, verdict and schedule must pin the same scenario-set hash")
-    if (attempt.isin, attempt.series, attempt.stock_code, attempt.session_date) != (
-        day.isin, day.series, day.stock_code, day.session_date,
+    if (attempt.isin, attempt.series, attempt.stock_code, attempt.nse_symbol, attempt.session_date) != (
+        day.isin, day.series, day.stock_code, day.nse_symbol, day.session_date,
     ):
         raise InputError("attempt does not belong to this symbol-day")
     submitted = attempt.submitted_at.astimezone(IST)
@@ -1073,6 +1134,7 @@ class IntradayAttemptResult:
     intent_id: str
     isin: str
     stock_code: str
+    nse_symbol: str
     session_date: date
     side: Side
     requested_quantity: int
@@ -1087,7 +1149,17 @@ class IntradayAttemptResult:
     day_integrity_hash: str | None
     day_verdict_code: str | None
     cas_class: str | None
-    cas_table_version: str | None
+    cas_sub_reason: str | None
+    cas_detail: str | None
+    cas_snapshot_date: str | None
+    cas_snapshot_sha256: str | None
+    cas_index_sha256: str | None
+    cas_procedure_version: int | None
+    cas_spec_sha256: str | None
+    cas_impl_sha256: str | None
+    cas_u24_status: str | None
+    cas_u24_evidence_ref: str | None
+    cas_icici_ref: dict[str, Any] | None
     continuous_end: str | None
     evidence_fetch_rule: str | None
     gap_policy: str
@@ -1143,6 +1215,7 @@ def _build_result(
         intent_id=attempt.intent_id,
         isin=attempt.isin,
         stock_code=attempt.stock_code,
+        nse_symbol=attempt.nse_symbol,
         session_date=attempt.session_date,
         side=attempt.side,
         requested_quantity=attempt.quantity,
@@ -1157,7 +1230,17 @@ def _build_result(
         day_integrity_hash=None if day is None else day.day_hash,
         day_verdict_code=None if day is None else day.verdict_code,
         cas_class=None if day is None else day.cas_class,
-        cas_table_version=None if day is None else day.cas_table_version,
+        cas_sub_reason=None if day is None else day.cas_sub_reason,
+        cas_detail=None if day is None else day.cas_detail,
+        cas_snapshot_date=None if day is None else day.cas_snapshot_date,
+        cas_snapshot_sha256=None if day is None else day.cas_snapshot_sha256,
+        cas_index_sha256=None if day is None else day.cas_index_sha256,
+        cas_procedure_version=None if day is None else day.cas_procedure_version,
+        cas_spec_sha256=None if day is None else day.cas_spec_sha256,
+        cas_impl_sha256=None if day is None else day.cas_impl_sha256,
+        cas_u24_status=None if day is None else day.cas_u24_status,
+        cas_u24_evidence_ref=None if day is None else day.cas_u24_evidence_ref,
+        cas_icici_ref=None if day is None else day.cas_icici_ref,
         continuous_end=None if day is None else day.continuous_end,
         evidence_fetch_rule=None if day is None else day.evidence_fetch_rule,
         gap_policy=schedule.gap_policy,
@@ -1316,8 +1399,8 @@ def simulate_intraday(
         verify_day_integrity(day)
         ordered = _check_attempts(attempts, schedule)
         for attempt in ordered:
-            if (attempt.isin, attempt.series, attempt.stock_code, attempt.session_date) != (
-                day.isin, day.series, day.stock_code, day.session_date,
+            if (attempt.isin, attempt.series, attempt.stock_code, attempt.nse_symbol, attempt.session_date) != (
+                day.isin, day.series, day.stock_code, day.nse_symbol, day.session_date,
             ):
                 raise InputError(f"attempt {attempt.intent_id!r} does not belong to this symbol-day")
             if attempt.tick != day.tick or attempt.band != day.band:
