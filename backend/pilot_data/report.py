@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import tempfile
 from collections import Counter
 from datetime import date, timedelta
@@ -38,7 +39,7 @@ from .core import (
     standard_caveats,
 )
 from .corporate_actions import EVENTS_TABLE
-from .crosscheck import CrossCheckReport
+from .crosscheck import CrossCheckReport, universe_report_digest
 from .dataset import verify_dataset
 from .history_quality import compute_span, record_history_quarantines
 from .lineage import lineage_for_target, primary_bars_for_lineage
@@ -244,13 +245,19 @@ def _write_json_report(root: Path, prefix: str, report: CaveatedResult, as_of: d
     reports = root / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     path = reports / f"{prefix}-{as_of.isoformat()}-{digest[:12]}.json"
-    if path.exists():
-        return path
     dumped = report.model_dump(mode="json")
     ordered = {"caveats": dumped.pop("caveats"), **dumped}
+    text = json.dumps(ordered, indent=2)
+    if path.exists():
+        # Never trust or overwrite what is already there: it must be exactly this report, and read-only.
+        if path.read_text(encoding="utf-8") != text:
+            raise PilotDataError("report_file_altered", f"{path.name} exists and differs from this report")
+        if stat.S_IMODE(path.stat().st_mode) != 0o444:
+            raise PilotDataError("report_file_writable", f"{path.name} exists but is not read-only (0444)")
+        return path
     fd, tmp = tempfile.mkstemp(dir=reports, prefix=".tmp-")
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(ordered, indent=2))
+        handle.write(text)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp, path)
@@ -273,6 +280,7 @@ REFUSAL_CROSSCHECK_MISSING = "crosscheck_missing"
 REFUSAL_ADJUSTED = "breeze_adjusted_detected"
 REFUSAL_NOT_BUILT = "dataset_not_built"
 REFUSAL_RUN_MISMATCH = "dataset_run_mismatch"
+REFUSAL_WINDOW_MISMATCH = "dataset_window_mismatch"
 
 
 class ProbeSummary(BaseModel):
@@ -419,14 +427,26 @@ def _load_crosscheck(
         rows = [row for row in rows if row[0] == run_id]
         if not rows:
             raise PilotDataError("crosscheck_run_missing", "no cross-check run with that id")
-    for _, result_json, result_sha256 in rows:
+    for row_run_id, result_json, result_sha256 in rows:
         payload = json.loads(result_json)
         if "members" not in payload:
             if run_id is not None:
                 raise PilotDataError("crosscheck_run_unsupported", "run is not a universe-wide cross-check")
             continue  # a single-member tracer run
         found = CrossCheckReport.model_validate(payload)
-        if found.report_sha256 != result_sha256:
+        # Recompute the hash from the stored content with the function the cross-check wrote it with. Comparing the
+        # two stored copies alone would pass a row whose content was edited and both hashes left alone.
+        recomputed = universe_report_digest(
+            run_id=found.run_id, targets_sha256=found.targets_sha256, window_start=found.window_start,
+            window_end=found.window_end, as_of=found.as_of, members=found.members,
+            totals_by_reason=found.totals_by_reason, rawness_counts=found.rawness_counts, caveats=found.caveats,
+        )
+        if (
+            row_run_id != found.run_id
+            or recomputed != found.report_sha256
+            or recomputed != result_sha256
+            or found.accepted_total != sum(m.accepted_count for m in found.members)
+        ):
             raise PilotDataError("crosscheck_record_corrupt", "a stored cross-check no longer matches its hash")
         if (found.as_of, found.window_start, found.window_end) != (as_of, window_start, window_end):
             if run_id is not None:
@@ -452,8 +472,12 @@ def _dataset_state(
         manifest = verify_dataset(dataset_dir, workspace=workspace)
     except PilotDataError as exc:
         return None, exc.code
-    if manifest.crosscheck_run_id != check.run_id:
+    if (manifest.crosscheck_run_id, manifest.report_sha256, manifest.targets_sha256) != (
+        check.run_id, check.report_sha256, check.targets_sha256
+    ):
         return None, REFUSAL_RUN_MISMATCH
+    if (manifest.as_of, manifest.window_start, manifest.window_end) != (check.as_of, check.window_start, check.window_end):
+        return None, REFUSAL_WINDOW_MISMATCH
     return (
         DatasetSummary(
             dataset_sha256=manifest.dataset_sha256, row_count=manifest.row_count,

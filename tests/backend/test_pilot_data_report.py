@@ -9,12 +9,16 @@ from decimal import Decimal
 
 import pytest
 
+import duckdb
+
 from pilot_data import backfill as bf
 from pilot_data import report as report_mod
 from pilot_data.bhavcopy import ingest_pr_zip
 from pilot_data.core import PilotDataError, SourceDescriptor, standard_caveats
 from pilot_data.corporate_actions import derive_corporate_actions
+from pilot_data.crosscheck import run_crosscheck
 from pilot_data.dataset import build_dataset_snapshot
+from pilot_data.models import CrossCheckTolerances
 from pilot_data.security_master import ingest_security_master
 from pilot_data.report import (
     Part2Report, build_part2_report, latest_session, main, run_part1, write_part2_report, write_report,
@@ -214,11 +218,19 @@ def relay_store(calendar_template, tmp_path):
         yield opened
 
 
+def empty_answer(index, params):
+    """The first window's answer and its one retry come back empty: that window ends empty_flagged."""
+    return kit.breeze_v2_json([]) if index in (0, 1) else None
+
+
 def backfill_two_days(store, relay, clock_time):
-    """Master, probe and plan on IST day 1; a cap of 5 stops the run after two windows, day 2 finishes it."""
-    eng, plan = ready(store, relay, clock_time, codes=CODES2, daily_call_cap=5)
+    """Master, probe and plan on IST day 1. The cap of 7 stops the run after the probe (3 calls), the empty window
+    (2 calls) and two good windows; day 2 sends the last window."""
+    eng, plan = ready(store, relay, clock_time, codes=CODES2, daily_call_cap=7)
+    relay.bars_script = empty_answer
     first = eng.run(plan, today_ist=TODAY)
-    assert first.status == "daily_cap_reached" and first.counts["done"] == 2
+    assert first.status == "daily_cap_reached" and first.counts["done"] == 2 and first.counts["empty_flagged"] == 1
+    relay.bars_script = None
     return eng, plan
 
 
@@ -227,9 +239,9 @@ def finish_on_day_two(store, relay, clock_time, plan):
     relay.master_rows = [row for row in relay.master_rows if row is not kit.MASTER_JAIBAL]  # one row leaves the master
     bf.refresh_security_master(store, relay.client(), workspace="india", clock=lambda: NEXT_DAY)
     nxt = bf.BackfillEngine(store, relay.client(), workspace="india", clock=lambda: NEXT_DAY,
-                            monotonic=clock_time.monotonic, sleeper=clock_time.sleep, daily_call_cap=5)
+                            monotonic=clock_time.monotonic, sleeper=clock_time.sleep, daily_call_cap=7)
     resumed = nxt.run(plan, today_ist=TODAY + timedelta(days=1))
-    assert resumed.status == "complete"
+    assert resumed.status == "complete_with_flags" and resumed.counts["empty_flagged"] == 1
     return nxt
 
 
@@ -270,9 +282,9 @@ def test_part2_fills_every_field_from_a_store_loaded_through_the_relay(relay_sto
     assert master.snapshot_date == TODAY + timedelta(days=1) and master.changes_by_kind == {"row_removed": 1}
     back = report.backfill
     assert back.plan_sha256 == world["plan"].plan_sha256
-    assert back.windows_by_status == {"pending": 0, "done": 4, "empty_flagged": 0, "failed": 0, "failed_exhausted": 0,
+    assert back.windows_by_status == {"pending": 0, "done": 3, "empty_flagged": 1, "failed": 0, "failed_exhausted": 0,
                                       "stored_unverified": 0, "stored_with_gaps": 0}
-    assert back.calls_by_ist_date == {"2026-10-21": 5, "2026-10-22": 2}
+    assert back.calls_by_ist_date == {"2026-10-21": 7, "2026-10-22": 1}
     check = report.crosscheck
     assert check.run_id == world["check"].run_id and check.accepted_total == world["check"].accepted_total == 10
     assert check.rawness_counts == {"raw_confirmed": 1, "unverified": 1}
@@ -290,8 +302,8 @@ def test_max_calls_one_day_is_the_busiest_day_and_matches_the_engines_own_count(
     eng, plan = backfill_two_days(relay_store, relay, clock_time)
     nxt = finish_on_day_two(relay_store, relay, clock_time, plan)
     back = part2(relay_store).backfill
-    assert back.calls_by_ist_date == {"2026-10-21": 5, "2026-10-22": 2}
-    assert back.max_calls_one_day == 5  # not the last day (2) and not the sum (7)
+    assert back.calls_by_ist_date == {"2026-10-21": 7, "2026-10-22": 1}
+    assert back.max_calls_one_day == 7  # not the last day (1) and not the sum (8)
     # the report counts a day the way the daily cap does
     assert nxt._ledger.used_today(TODAY) == back.calls_by_ist_date["2026-10-21"]
     assert nxt._ledger.used_today(TODAY + timedelta(days=1)) == back.calls_by_ist_date["2026-10-22"]
@@ -328,8 +340,9 @@ def test_only_a_relay_fetched_master_counts_as_the_refresh(relay_store, relay, c
 def test_an_unfinished_backfill_shows_its_pending_windows(relay_store, relay, clock_time):
     backfill_two_days(relay_store, relay, clock_time)
     back = part2(relay_store).backfill
-    assert back.windows_by_status["done"] == 2 and back.windows_by_status["pending"] == 2
-    assert back.calls_by_ist_date == {"2026-10-21": 5}
+    assert back.windows_by_status["done"] == 2 and back.windows_by_status["pending"] == 1
+    assert back.windows_by_status["empty_flagged"] == 1
+    assert back.calls_by_ist_date == {"2026-10-21": 7}
 
 
 def test_a_store_with_no_stage_run_reports_every_section_as_absent(tmp_path):
@@ -567,3 +580,146 @@ def test_write_part2_report_is_idempotent(relay_store, tmp_path):
     report = part2(relay_store)
     first = write_part2_report(tmp_path / "out", report)
     assert write_part2_report(tmp_path / "out", report) == first and first.name.startswith("part2-")
+
+
+def rewrite_manifest(dataset_dir, copy_root, **edits):
+    """A copy of a published dataset whose manifest.json carries other values (rows.parquet untouched)."""
+    copy = copy_root / dataset_dir.name
+    shutil.copytree(dataset_dir, copy)
+    copy.chmod(0o755)
+    manifest = copy / "manifest.json"
+    manifest.chmod(0o644)
+    body = json.loads(manifest.read_text())
+    body.update(edits)
+    manifest.write_text(json.dumps(body, sort_keys=True, indent=2))
+    return copy
+
+
+def test_a_valid_export_built_for_another_as_of_is_refused(relay_store, tmp_path):
+    load_bhavcopy(relay_store)
+    load_breeze(relay_store, "STEADY", breeze_rows("STEADY", STEADY))
+    check = cc_run(relay_store, make_targets(STEADY_MEMBER))
+    later = AS_OF + timedelta(days=1)
+    other_run = run_crosscheck(relay_store, targets=make_targets(STEADY_MEMBER), window_start=CC_START,
+                               window_end=CC_END, as_of=later, tolerances=CrossCheckTolerances(), workspace="india")
+    assert other_run.run_id != check.run_id
+    built = build_dataset_snapshot(relay_store, crosscheck_run_id=other_run.run_id, as_of=later, workspace="india",
+                                   export_root=tmp_path / "datasets")
+    assert built.as_of == later
+    refused = part2(relay_store, dataset_dir=tmp_path / "datasets" / built.dataset_sha256)  # verifies, but not ours
+    assert refused.dataset is None and refused.dataset_refusal_code == "dataset_run_mismatch"
+    fitting, _ = publish(relay_store, check, tmp_path / "datasets")
+    assert part2(relay_store, dataset_dir=fitting).dataset is not None
+
+
+@pytest.mark.parametrize(
+    "edits",
+    [{"as_of": "2025-03-08"}, {"window_start": "2025-03-04"}, {"window_end": "2025-03-08"}],
+    ids=["as_of", "window_start", "window_end"],
+)
+def test_a_dataset_manifest_for_the_same_run_but_another_as_of_or_window_is_refused(relay_store, tmp_path, edits):
+    load_bhavcopy(relay_store)
+    load_breeze(relay_store, "STEADY", breeze_rows("STEADY", STEADY))
+    check = cc_run(relay_store, make_targets(STEADY_MEMBER))
+    dataset_dir, _ = publish(relay_store, check, tmp_path / "datasets")
+    edited = rewrite_manifest(dataset_dir, tmp_path / "copy", **edits)  # still verifies: rows are untouched
+    refused = part2(relay_store, dataset_dir=edited)
+    assert refused.dataset is None and refused.dataset_refusal_code == "dataset_window_mismatch"
+
+
+@pytest.mark.parametrize("field", ["report_sha256", "targets_sha256"])
+def test_a_dataset_manifest_naming_another_report_or_targets_is_refused(relay_store, tmp_path, field):
+    load_bhavcopy(relay_store)
+    load_breeze(relay_store, "CANBAN", breeze_rows("CANBAN", CANBK))
+    check = cc_run(relay_store, make_targets(CANBK_MEMBER))
+    dataset_dir, _ = publish(relay_store, check, tmp_path / "datasets")
+    edited = rewrite_manifest(dataset_dir, tmp_path / "copy", **{field: "e" * 64})
+    refused = part2(relay_store, dataset_dir=edited)
+    assert refused.dataset is None and refused.dataset_refusal_code == "dataset_run_mismatch"
+
+
+def _edit_stored_run(root, run_id, edit):
+    """Change a stored cross-check's JSON in place and leave both stored hashes alone."""
+    con = duckdb.connect(str(root / "pilot_india.duckdb"))
+    try:
+        body = json.loads(con.execute("SELECT result_json FROM crosscheck_runs WHERE run_id = ?", [run_id]).fetchone()[0])
+        edit(body)
+        con.execute("UPDATE crosscheck_runs SET result_json = ? WHERE run_id = ?", [json.dumps(body, sort_keys=True), run_id])
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda body: body.update(rawness_counts={"raw_confirmed": 5}),
+        lambda body: body.update(totals_by_reason={"close_tolerance": 1}),
+        lambda body: body["members"][0].update(rawness_overall="unverified"),
+        lambda body: body.update(accepted_total=body["accepted_total"] + 100),
+    ],
+    ids=["rawness_counts", "totals_by_reason", "member_rawness", "accepted_total"],
+)
+def test_a_cross_check_edited_in_place_with_its_hashes_untouched_is_refused(tmp_path, edit):
+    root = tmp_path / "root"
+    with PilotDataStore(root, workspace="india") as store:
+        load_bhavcopy(store)
+        load_breeze(store, "CANBAN", breeze_rows("CANBAN", CANBK))
+        check = cc_run(store, make_targets(CANBK_MEMBER))
+        assert part2(store).crosscheck.run_id == check.run_id  # sound before the edit
+    stored = (check.report_sha256,)
+    _edit_stored_run(root, check.run_id, edit)
+    with PilotDataStore(root, workspace="india") as store:
+        row = store.query("SELECT result_sha256 FROM crosscheck_runs WHERE run_id = ?", [check.run_id])[0]
+        assert row == stored  # the stored hash is exactly what it was
+        with pytest.raises(PilotDataError) as caught:
+            part2(store)
+        assert caught.value.code == "crosscheck_record_corrupt"
+        with pytest.raises(PilotDataError) as named:
+            part2(store, run_id=check.run_id)
+        assert named.value.code == "crosscheck_record_corrupt"
+
+
+def test_a_report_file_that_already_exists_is_checked_not_trusted(relay_store, tmp_path):
+    report = part2(relay_store)
+    first = write_part2_report(tmp_path / "out", report)
+    good = first.read_text()
+    assert write_part2_report(tmp_path / "out", report) == first  # identical and 0444: reused
+
+    first.chmod(0o644)  # a writable leftover
+    with pytest.raises(PilotDataError) as writable:
+        write_part2_report(tmp_path / "out", report)
+    assert writable.value.code == "report_file_writable" and first.read_text() == good
+
+    first.write_text(good.replace("crosscheck_missing", "dataset_published"))  # altered content, then read-only again
+    first.chmod(0o444)
+    with pytest.raises(PilotDataError) as altered:
+        write_part2_report(tmp_path / "out", report)
+    assert altered.value.code == "report_file_altered" and "dataset_published" in first.read_text()  # not overwritten
+
+
+def test_the_part1_writer_shares_the_same_check(store, tmp_path):
+    build_world(store)
+    report = run(store)
+    path = write_report(tmp_path / "out", report)
+    path.chmod(0o644)
+    path.write_text("{}")
+    path.chmod(0o444)
+    with pytest.raises(PilotDataError) as altered:
+        write_report(tmp_path / "out", report)
+    assert altered.value.code == "report_file_altered" and path.read_text() == "{}"
+
+
+def test_the_part2_cli_fails_closed_on_a_writable_existing_report(tmp_path, capsys):
+    root = tmp_path / "root"
+    with PilotDataStore(root, workspace="india") as store:
+        load_bhavcopy(store)
+        load_breeze(store, "CANBAN", breeze_rows("CANBAN", CANBK))
+        cc_run(store, make_targets(CANBK_MEMBER))
+    argv = ["part2", "--root", str(root), "--workspace", "india", "--as-of", AS_OF.isoformat(),
+            "--window-start", CC_START.isoformat(), "--window-end", CC_END.isoformat()]
+    assert main(argv) == 0
+    path = next((root / "reports").glob("part2-*.json"))
+    capsys.readouterr()
+    path.chmod(0o644)
+    assert main(argv) == 2
+    assert json.loads(capsys.readouterr().out)["error_code"] == "report_file_writable"

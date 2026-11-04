@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -30,6 +30,7 @@ from .breeze_bars import BreezeBarsView, breeze_bars_for, ensure_breeze_tables
 from .bhavcopy import ensure_bhavcopy_tables
 from .core import (
     BREEZE_RAW_UNVERIFIED_CAVEAT,
+    Caveat,
     CaveatedResult,
     PilotDataError,
     canonical_sha256,
@@ -292,6 +293,29 @@ class CrossCheckReport(CaveatedResult):
     rawness_counts: dict[str, int]
     accepted_total: int
     report_sha256: str
+
+
+def universe_report_digest(
+    *,
+    run_id: str,
+    targets_sha256: str,
+    window_start: date,
+    window_end: date,
+    as_of: date,
+    members: Sequence[MemberCrossCheck],
+    totals_by_reason: Mapping[str, int],
+    rawness_counts: Mapping[str, int],
+    caveats: Sequence[Caveat],
+) -> str:
+    """The hash a universe run stores as `report_sha256`. Also used to re-check a stored run."""
+    return canonical_sha256(
+        {
+            "run_id": run_id, "targets": targets_sha256, "window": [window_start.isoformat(), window_end.isoformat()],
+            "as_of": as_of.isoformat(), "members": [m.model_dump(mode="json") for m in members],
+            "totals": dict(totals_by_reason), "rawness": dict(rawness_counts),
+            "caveats": [c.code for c in caveats],
+        }
+    )
 
 
 class AcceptedBar(BaseModel):
@@ -573,13 +597,10 @@ def run_crosscheck(
         "totals_by_reason": dict(sorted(totals.items())), "rawness_counts": dict(sorted(rawness_counts.items())),
         "accepted_total": sum(m.accepted_count for m in members_out),
     }
-    digest = canonical_sha256(
-        {
-            "run_id": run_id, "targets": targets.target_sha256, "window": [window_start.isoformat(), window_end.isoformat()],
-            "as_of": as_of.isoformat(), "members": [m.model_dump(mode="json") for m in members_out],
-            "totals": fields["totals_by_reason"], "rawness": fields["rawness_counts"],
-            "caveats": [c.code for c in caveats],
-        }
+    digest = universe_report_digest(
+        run_id=run_id, targets_sha256=targets.target_sha256, window_start=window_start, window_end=window_end,
+        as_of=as_of, members=members_out, totals_by_reason=fields["totals_by_reason"],
+        rawness_counts=fields["rawness_counts"], caveats=caveats,
     )
     report = CrossCheckReport(workspace="india", caveats=caveats, report_sha256=digest, **fields)
     store.record_quarantine(records)
