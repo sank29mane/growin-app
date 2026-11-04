@@ -1489,6 +1489,206 @@ def _ro_uri(path: Path) -> str:
     return path.resolve().as_uri() + "?mode=ro"
 
 
+def _require_simulation_path_for(path: Path, workspace: Workspace, simulation: SimulationInit) -> None:
+    """A simulation ledger lives only under ``india-shadow/<run_id>/``, never a live or paper path."""
+
+    parent = path.parent
+    if parent.name != simulation.run_id or parent.parent.name != SIMULATION_RUN_DIRECTORY:
+        raise LedgerVenueMismatch(
+            f"a simulation ledger lives only under {SIMULATION_RUN_DIRECTORY}/<run_id>/"
+        )
+    spec = spec_for(simulation.binding.venue)
+    for forbidden in (default_ledger_path(workspace), spec.ledger_path() if spec else None):
+        if forbidden is not None and _same_file_path(path, forbidden):
+            raise LedgerVenueMismatch("a simulation ledger must not use a live or paper ledger path")
+
+
+def _probe_identity_at(path: Path) -> Optional[LedgerIdentity]:
+    """Read the identity on a mode=ro connection. None means the file does not exist."""
+
+    if not path.exists():
+        return None
+    probe = sqlite3.connect(_ro_uri(path), uri=True)
+    try:
+        _require_sqlite_capabilities(probe)
+        return _read_identity(probe)
+    finally:
+        probe.close()
+
+
+def _enforce_identity_for(path: Path, workspace: Workspace, identity: LedgerIdentity) -> None:
+    if identity.kind == "newer":
+        raise LedgerError(
+            f"ledger schema {identity.user_version} is newer than supported version "
+            f"{SCHEMA_VERSION}"
+        )
+    if identity.kind == "unpinned":
+        raise LedgerUnpinned(
+            f"ledger {path} (schema {identity.user_version}) has no workspace pin. "
+            "Ownership is never inferred. The operator must run "
+            "scripts/ledger_tool.py inspect and then apply with an explicit "
+            "confirmation."
+        )
+    if identity.kind == "pinned" and identity.workspace != workspace:
+        pinned = identity.workspace.value if identity.workspace else "unknown"
+        raise WorkspaceMismatch(
+            f"ledger {path} is pinned to workspace {pinned}; "
+            f"requested {workspace.value}"
+        )
+
+
+def _enforce_venue_for(path: Path, binding: Optional[VenueBinding], identity: LedgerIdentity) -> None:
+    if identity.kind != "pinned":
+        return
+    if identity.binding != binding:
+        raise LedgerVenueMismatch(
+            f"ledger {path} venue binding does not match the requested venue"
+        )
+
+
+def _probe_simulation_file(
+    path: Path, workspace: Workspace, binding: Optional[VenueBinding], init: Optional[SimulationInit]
+) -> None:
+    probe = sqlite3.connect(_ro_uri(path), uri=True)
+    try:
+        probe.row_factory = sqlite3.Row
+        _validate_simulation_marker(probe, workspace, binding, init)
+    finally:
+        probe.close()
+
+
+def _validate_simulation_marker(
+    connection: sqlite3.Connection,
+    workspace: Workspace,
+    binding: Optional[VenueBinding],
+    init: Optional[SimulationInit],
+) -> bool:
+    """Whether the file is a simulation ledger; ``LedgerError`` for anything partial or mismatched. Never repairs."""
+
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    present = tables & set(_SIMULATION_TABLES)
+    account = binding.account_id if binding is not None else ""
+    if not present:
+        if init is not None or account.startswith(SIM_ACCOUNT_PREFIX):
+            raise LedgerError("simulation ledger marker is missing")
+        return False
+    if _SIM_MARKER_TABLE not in tables:
+        raise LedgerError("simulation tables exist without the simulation marker")
+    if init is None:
+        raise LedgerError("a simulation ledger must be opened with its SimulationInit")
+    if present != set(_SIMULATION_TABLES):
+        raise LedgerError("simulation ledger is missing a table")
+    triggers = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        ).fetchall()
+    }
+    if not _SIMULATION_TRIGGERS <= triggers:
+        raise LedgerError("simulation ledger is missing a trigger")
+    marker = connection.execute(
+        f"SELECT run_id, workspace, venue, account_id, currency FROM {_SIM_MARKER_TABLE} "
+        "WHERE singleton = 1"
+    ).fetchone()
+    if marker is None:
+        raise LedgerError("simulation ledger marker row is missing")
+    if (
+        binding is None
+        or str(marker["workspace"]) != workspace.value
+        or str(marker["venue"]) != binding.venue
+        or str(marker["account_id"]) != binding.account_id
+        or str(marker["currency"]) != binding.currency
+        or not binding.account_id.startswith(SIM_ACCOUNT_PREFIX)
+        or str(marker["run_id"]) != init.run_id
+        or binding != init.binding
+    ):
+        raise LedgerError("simulation marker does not match the ledger identity")
+    cash = connection.execute(
+        f"SELECT workspace, account, currency, seed FROM {_SIM_CASH_TABLE} WHERE singleton = 1"
+    ).fetchone()
+    if cash is None:
+        raise LedgerError("simulation ledger cash row is missing")
+    try:
+        seed_matches = _decimal(cash["seed"]) == init.seed
+    except LedgerError:
+        seed_matches = False
+    if (
+        str(cash["workspace"]) != workspace.value
+        or str(cash["account"]) != init.account
+        or str(cash["currency"]) != binding.currency
+        or not seed_matches
+    ):
+        raise LedgerError("simulation cash row does not match the simulation identity")
+    return True
+
+
+class SimulationProbeRefused(LedgerError):
+    """A simulation ledger file the read-only probe refuses. ``reason`` is a closed word and carries no value."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def probe_simulation_ledger(
+    path: os.PathLike[str] | str, *, workspace: Workspace | str, simulation: SimulationInit
+) -> None:
+    """Refuse, read-only, a file ``ExecutionLedger`` would refuse before it opens a writer connection (64-09 Task B).
+
+    The checks are the constructor's own, in its order and through the same functions: the simulation path rule
+    (``path``), the identity probe and its enforcement (``schema_newer``, ``unpinned``, ``workspace_mismatch``), the
+    venue binding (``venue_mismatch``) and the simulation marker validation (``simulation``). One check the
+    constructor lacks: a ``fresh`` file (zero bytes, no schema) is ``not_pinned``, because a fresh file would be
+    created by the writable open and the caller expects an existing ledger. Mode=ro: no writer lock, no pragma, no
+    chmod, no directory and no row written (SQLite sidecars on a WAL file are open housekeeping). Raises
+    ``SimulationProbeRefused``; returns None for a file the constructor would accept.
+    """
+
+    target = Path(path)
+    try:
+        coerced = coerce_workspace(workspace)
+    except ValueError:
+        raise SimulationProbeRefused("workspace_mismatch") from None
+    if simulation.workspace != coerced:
+        raise SimulationProbeRefused("workspace_mismatch")
+    binding = simulation.binding
+    try:
+        _require_simulation_path_for(target, coerced, simulation)
+    except LedgerError:
+        raise SimulationProbeRefused("path") from None
+    if target.is_symlink():
+        raise SimulationProbeRefused("path")
+    try:
+        identity = _probe_identity_at(target)
+    except (sqlite3.Error, LedgerError):
+        raise SimulationProbeRefused("unreadable") from None
+    if identity is None:
+        raise SimulationProbeRefused("missing")
+    try:
+        _enforce_identity_for(target, coerced, identity)
+    except LedgerUnpinned:
+        raise SimulationProbeRefused("unpinned") from None
+    except WorkspaceMismatch:
+        raise SimulationProbeRefused("workspace_mismatch") from None
+    except LedgerError:
+        raise SimulationProbeRefused("schema_newer") from None
+    try:
+        _enforce_venue_for(target, binding, identity)
+    except LedgerError:
+        raise SimulationProbeRefused("venue_mismatch") from None
+    if identity.kind == "fresh":
+        raise SimulationProbeRefused("not_pinned")
+    try:
+        _probe_simulation_file(target, coerced, binding, simulation)
+    except (sqlite3.Error, LedgerError):
+        raise SimulationProbeRefused("simulation") from None
+
+
 class ExecutionLedger:
     """SQLite-backed execution authority for one local workspace."""
 
@@ -1642,34 +1842,10 @@ class ExecutionLedger:
     def _probe_identity(self) -> Optional[LedgerIdentity]:
         """Read the identity on a mode=ro connection. None means the file does not exist."""
 
-        if not self.path.exists():
-            return None
-        probe = sqlite3.connect(_ro_uri(self.path), uri=True)
-        try:
-            _require_sqlite_capabilities(probe)
-            return _read_identity(probe)
-        finally:
-            probe.close()
+        return _probe_identity_at(self.path)
 
     def _enforce_identity(self, identity: LedgerIdentity) -> None:
-        if identity.kind == "newer":
-            raise LedgerError(
-                f"ledger schema {identity.user_version} is newer than supported version "
-                f"{SCHEMA_VERSION}"
-            )
-        if identity.kind == "unpinned":
-            raise LedgerUnpinned(
-                f"ledger {self.path} (schema {identity.user_version}) has no workspace pin. "
-                "Ownership is never inferred. The operator must run "
-                "scripts/ledger_tool.py inspect and then apply with an explicit "
-                "confirmation."
-            )
-        if identity.kind == "pinned" and identity.workspace != self.workspace:
-            pinned = identity.workspace.value if identity.workspace else "unknown"
-            raise WorkspaceMismatch(
-                f"ledger {self.path} is pinned to workspace {pinned}; "
-                f"requested {self.workspace.value}"
-            )
+        _enforce_identity_for(self.path, self.workspace, identity)
 
     def _enforce_venue(self, identity: LedgerIdentity) -> None:
         """Refuse a venue binding that is not exactly the one requested.
@@ -1679,12 +1855,7 @@ class ExecutionLedger:
         real ledger of the workspace) never opens as practice.
         """
 
-        if identity.kind != "pinned":
-            return
-        if identity.binding != self.venue_binding:
-            raise LedgerVenueMismatch(
-                f"ledger {self.path} venue binding does not match the requested venue"
-            )
+        _enforce_venue_for(self.path, self.venue_binding, identity)
 
     def _pin_fresh_file(self) -> None:
         with self._transaction() as connection:
@@ -1704,15 +1875,7 @@ class ExecutionLedger:
     def _require_simulation_path(self, simulation: SimulationInit) -> None:
         """A simulation ledger lives only under ``india-shadow/<run_id>/``, never a live or paper path."""
 
-        parent = self.path.parent
-        if parent.name != simulation.run_id or parent.parent.name != SIMULATION_RUN_DIRECTORY:
-            raise LedgerVenueMismatch(
-                f"a simulation ledger lives only under {SIMULATION_RUN_DIRECTORY}/<run_id>/"
-            )
-        spec = spec_for(simulation.binding.venue)
-        for forbidden in (default_ledger_path(self.workspace), spec.ledger_path() if spec else None):
-            if forbidden is not None and _same_file_path(self.path, forbidden):
-                raise LedgerVenueMismatch("a simulation ledger must not use a live or paper ledger path")
+        _require_simulation_path_for(self.path, self.workspace, simulation)
 
     def _initialize_simulation_locked(self, connection: sqlite3.Connection, now: str) -> None:
         """Marker, tables, triggers and the one seed row, in the caller's transaction (fresh file only)."""
@@ -1753,69 +1916,9 @@ class ExecutionLedger:
         (c) Anything else aborts with ``LedgerError`` and writes nothing.
         """
 
-        tables = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            ).fetchall()
-        }
-        present = tables & set(_SIMULATION_TABLES)
-        account = self.venue_binding.account_id if self.venue_binding is not None else ""
-        init = self._simulation_init
-        if not present:
-            if init is not None or account.startswith(SIM_ACCOUNT_PREFIX):
-                raise LedgerError("simulation ledger marker is missing")
-            self._simulation_active = False
-            return
-        if _SIM_MARKER_TABLE not in tables:
-            raise LedgerError("simulation tables exist without the simulation marker")
-        if init is None:
-            raise LedgerError("a simulation ledger must be opened with its SimulationInit")
-        if present != set(_SIMULATION_TABLES):
-            raise LedgerError("simulation ledger is missing a table")
-        triggers = {
-            str(row[0])
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
-            ).fetchall()
-        }
-        if not _SIMULATION_TRIGGERS <= triggers:
-            raise LedgerError("simulation ledger is missing a trigger")
-        marker = connection.execute(
-            f"SELECT run_id, workspace, venue, account_id, currency FROM {_SIM_MARKER_TABLE} "
-            "WHERE singleton = 1"
-        ).fetchone()
-        if marker is None:
-            raise LedgerError("simulation ledger marker row is missing")
-        binding = self.venue_binding
-        if (
-            binding is None
-            or str(marker["workspace"]) != self.workspace.value
-            or str(marker["venue"]) != binding.venue
-            or str(marker["account_id"]) != binding.account_id
-            or str(marker["currency"]) != binding.currency
-            or not binding.account_id.startswith(SIM_ACCOUNT_PREFIX)
-            or str(marker["run_id"]) != init.run_id
-            or binding != init.binding
-        ):
-            raise LedgerError("simulation marker does not match the ledger identity")
-        cash = connection.execute(
-            f"SELECT workspace, account, currency, seed FROM {_SIM_CASH_TABLE} WHERE singleton = 1"
-        ).fetchone()
-        if cash is None:
-            raise LedgerError("simulation ledger cash row is missing")
-        try:
-            seed_matches = _decimal(cash["seed"]) == init.seed
-        except LedgerError:
-            seed_matches = False
-        if (
-            str(cash["workspace"]) != self.workspace.value
-            or str(cash["account"]) != init.account
-            or str(cash["currency"]) != binding.currency
-            or not seed_matches
-        ):
-            raise LedgerError("simulation cash row does not match the simulation identity")
-        self._simulation_active = True
+        self._simulation_active = _validate_simulation_marker(
+            connection, self.workspace, self.venue_binding, self._simulation_init
+        )
 
     @property
     def is_simulation_ledger(self) -> bool:
@@ -5804,6 +5907,7 @@ __all__ = [
     "SimulatedCashInsufficient",
     "SimulatedCashNegative",
     "SimulationInit",
+    "SimulationProbeRefused",
     "practice_ledger_path",
     "Workspace",
     "WorkspaceControl",
@@ -5813,4 +5917,5 @@ __all__ = [
     "default_ledger_path",
     "intent_hash",
     "simulated_booking_id",
+    "probe_simulation_ledger",
 ]

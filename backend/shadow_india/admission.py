@@ -233,15 +233,21 @@ def simulation_binding(run_id: str) -> VenueBinding:
     return VenueBinding(venue=SHADOW_VENUE, account_id=f"sim-{run_id}", currency="INR")
 
 
-def open_simulation_ledger(root: Path, run_id: str, seed: Decimal) -> ExecutionLedger:
-    """Open (creating on first use) the run's simulation ledger under ``<root>/india-shadow/<run_id>/``."""
+def simulation_init(run_id: str, seed: Decimal) -> SimulationInit:
+    """The one ``SimulationInit`` for a run: the open path and the read-only probe build it here."""
 
-    init = SimulationInit(
+    return SimulationInit(
         run_id=run_id,
         workspace=Workspace.INDIA,
         binding=simulation_binding(run_id),
         seed=seed,
     )
+
+
+def open_simulation_ledger(root: Path, run_id: str, seed: Decimal) -> ExecutionLedger:
+    """Open (creating on first use) the run's simulation ledger under ``<root>/india-shadow/<run_id>/``."""
+
+    init = simulation_init(run_id, seed)
     path = simulation_ledger_path(root, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     return ExecutionLedger(

@@ -1,24 +1,24 @@
-"""Operator commands for the shadow runner (64-03 Task 3): ``python -m shadow_india <command>``.
+"""Operator commands for the shadow runner: ``python -m shadow_india <command>``.
 
-``resume`` and ``status`` read and write only the evidence of one run. ``open-run``, ``decide``, ``close`` and
-``hand-flatten`` need a runtime (relay link, session store, calendar, reference prices) that this module does not build:
-the production runtime is deliberately not wired here, so run as shipped they refuse with ``production_runtime_not_wired``
-and touch nothing. A test or the operator's own wrapper passes ``runtime_factory`` to ``main``.
+``status`` reads the evidence of one run and builds no runtime. ``open-run``, ``decide``, ``close`` and ``hand-flatten``
+build the production runtime (``runtime.production_runtime``: a read-only preflight, a relay activation with the VM key
+check, then the writable opens); ``resume``, ``release-halt`` and ``release-corporate-action`` build the release runtime
+(``runtime.release_runtime``: the same preflight with no relay and no calendar, then the portfolio only). Both are reached
+through the ``runtime`` module attribute, so a test can replace either builder, and ``main``'s ``runtime_factory`` still
+overrides both. A refusal is ``{"refused": <code>}`` with exit 1 and nothing opened for writing.
 
-Every command that opens the evidence store (``resume``, ``status``) opens it with the registered forbidden literals
-(``_forbidden_literals``): an operator-typed ``--reason`` is the one free-text field that reaches a hash-chained record, and
-a literal that slips past the pattern layer is kept forever. With no registered source the command refuses
-(``forbidden_literals_not_registered``) and opens nothing. The future production runtime must call the same helper for
-its own ``EvidenceStore.open`` and ``EvidenceStore.create`` and pass the result as ``forbidden=``.
+Every command that opens the evidence store opens it with the registered forbidden literals (``_forbidden_literals``): an
+operator-typed ``--reason`` is the one free-text field that reaches a hash-chained record, and a literal that slips past
+the pattern layer is kept forever. With no registered source the command refuses (``forbidden_literals_not_registered``)
+and opens nothing. The runtime passes the same helper's result as ``forbidden=`` to its own ``EvidenceStore.open`` and
+``create``.
 
 No command authorizes, signs or sends an order. ``resume`` never clears a halt or a corporate-action pause: they are
 released only by ``release-halt`` and ``release-corporate-action`` (64-09 Task A), which call nothing but
 ``ShadowPortfolio.release_halt`` and ``ShadowPortfolio.release_corporate_action``. Before the portfolio is built they
 screen the reason and the actor (grammar, registered literals, the evidence pattern layer: ``release_halt`` resets the
 latch, which stores the actor, before its evidence append) and refuse from read-only reads of the evidence and the latch
-file, with no runtime factory call. The production latch path is not wired until 64-09 Task B, so as shipped both
-commands refuse ``production_runtime_not_wired``; a test or the operator's wrapper passes ``latch_path_source`` and
-``runtime_factory``.
+file, with no runtime factory call.
 """
 
 from __future__ import annotations
@@ -33,13 +33,19 @@ from typing import Any, Callable, Collection, Optional, Sequence, TextIO
 from brokers.breeze_gateway.errors import RelayError
 
 from market_data.models import is_valid_isin
-from private_config.errors import PrivateConfigError
-from private_config.loader import load_shadow_forbidden_literals
 from risk_india.state import StateUnreadable, read_state
 
 from . import policy, vm_codes
+from . import runtime as runtime_module
 from .evidence import EvidenceCorrupt, EvidenceError, EvidenceStore, read_records, validate_payload
 from .portfolio import PortfolioAborted, PortfolioError, ShadowPortfolio
+from .runtime import (
+    NO_FORBIDDEN_SOURCE,  # noqa: F401 (re-exported: the CLI's public names)
+    ForbiddenLiteralsRefused,
+    RuntimeRefused,
+    _default_forbidden_literals,  # noqa: F401
+    _forbidden_literals,
+)
 from .runner import (
     DecideRefused,
     OpenRunRefused,
@@ -52,7 +58,6 @@ EXIT_REFUSED = 1
 EXIT_USAGE = 2
 EXIT_ABORTED = 3
 NOT_WIRED = "production_runtime_not_wired"
-NO_FORBIDDEN_SOURCE = "forbidden_literals_not_registered"
 RELEASE_COMMANDS = ("release-halt", "release-corporate-action")
 # An operator name written to the latch: lowercase ASCII, short. ``\Z`` so a trailing newline does not pass.
 _ACTOR = re.compile(r"[a-z][a-z0-9_.-]{0,31}\Z")
@@ -64,14 +69,6 @@ class RuntimeNotWired(Exception):
 
 class ReleaseRefused(Exception):
     """A release command refused from its arguments or a read-only read, before any runtime is built."""
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-class ForbiddenLiteralsRefused(Exception):
-    """No usable registered forbidden literals: the evidence store is not opened."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -90,18 +87,18 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--root", required=True, help="evidence root (outside the repository)")
         command.add_argument("--run-id", required=True)
         command.add_argument("--session", required=True, type=_day, help="session date, YYYY-MM-DD")
-        if name in ("resume", "status"):
-            command.add_argument(
-                "--private-dir", default=None,
-                help="private/ directory holding india/shadow_forbidden.json (the registered forbidden literals). "
-                     "Required: resume and status refuse without it (forbidden_literals_not_registered)",
-            )
         if name in RELEASE_COMMANDS:
             command.add_argument(
                 "--private-dir", required=True,
-                help="private/ directory holding india/shadow_forbidden.json (the registered forbidden literals)",
+                help="private/ directory holding the india/ config files (forbidden literals, runtime, strategy, limits)",
             )
             command.add_argument("--reason", required=True, help="why the pause is released (screened, then recorded)")
+        else:
+            command.add_argument(
+                "--private-dir", default=None,
+                help="private/ directory holding the india/ config files. Every command refuses without it "
+                     "(forbidden_literals_not_registered)",
+            )
         if name == "release-halt":
             command.add_argument("--actor", required=True, help="who releases it: [a-z][a-z0-9_.-]{0,31}")
             command.add_argument(
@@ -174,40 +171,17 @@ def _ambiguous_isins(
         runtime = (runtime_factory or _default_runtime)(args)
     except RuntimeNotWired:
         return None
-    runner: ShadowRunner = runtime.runner if hasattr(runtime, "runner") else runtime
-    return runner.ambiguous_exit_isins()
-
-
-def _default_forbidden_literals(args: argparse.Namespace) -> Sequence[str]:
-    """The registered literals from ``<private-dir>/india/shadow_forbidden.json`` through the fail-closed loader."""
-
-    private_dir = getattr(args, "private_dir", None)
-    if private_dir is None:
-        raise ForbiddenLiteralsRefused(NO_FORBIDDEN_SOURCE)
     try:
-        return load_shadow_forbidden_literals(private_dir)
-    except PrivateConfigError as error:
-        raise ForbiddenLiteralsRefused(f"forbidden_literals_refused:{error.code}") from None
-
-
-def _forbidden_literals(
-    args: argparse.Namespace, source: Optional[Callable[[argparse.Namespace], Sequence[str]]] = None
-) -> tuple[str, ...]:
-    """The literals every CLI ``EvidenceStore.open`` passes as ``forbidden=``. Never empty: an empty list is a refusal.
-
-    ``source`` is the explicit seam for a test or the operator's own wrapper, like ``runtime_factory``. It does not
-    bypass the empty check."""
-
-    literals = tuple((source or _default_forbidden_literals)(args))
-    if not literals or not all(isinstance(item, str) and item for item in literals):
-        raise ForbiddenLiteralsRefused("forbidden_literals_empty")
-    return literals
+        runner: ShadowRunner = runtime.runner if hasattr(runtime, "runner") else runtime
+        return runner.ambiguous_exit_isins()
+    finally:
+        _shutdown(runtime)
 
 
 def _default_latch_path(args: argparse.Namespace) -> Any:
-    """The production latch path is wired with the production runtime (64-09 Task B): until then, refuse."""
+    """The run's latch file, from the runtime's read-only preflight (no relay, no calendar, nothing written)."""
 
-    raise RuntimeNotWired(NOT_WIRED)
+    return runtime_module.release_latch_path(args)
 
 
 def _screen_release_text(text: str, literals: Sequence[str]) -> None:
@@ -263,7 +237,9 @@ def _release_read_only_state(
         return False
     if latch is None:
         raise ReleaseRefused("latch_missing")
-    latched = "halt" in latch.latch_names()  # the flag by name: the runner's source scan bans the bare attribute
+    # ``latch_names()`` is the latch's public read. The bare attribute is banned in this file (the source scan forbids it
+    # so ``OrdersClient`` cannot be reached through it), so the flag is read by name.
+    latched = "halt" in latch.latch_names()
     if releasing_halt:
         if latch.ended:
             raise policy.PolicyError("resume_refused_run_ended")
@@ -274,6 +250,16 @@ def _release_read_only_state(
     return latched
 
 
+def _rebased_by_last_reset(latch_path: Any) -> bool:
+    """Whether the reset just written rebased the halt anchor: the latch's own last reset record, read after the reset."""
+
+    try:
+        state = read_state(latch_path)
+    except StateUnreadable:
+        return False
+    return bool(state is not None and state.resets and state.resets[-1].rebase_halt_anchor)
+
+
 def _release(
     args: argparse.Namespace,
     runtime_factory: Optional[Callable[[argparse.Namespace], Any]],
@@ -282,23 +268,35 @@ def _release(
 ) -> dict[str, Any]:
     literals = _forbidden_literals(args, forbidden_source)  # 1
     reason = _release_checks(args, literals)  # 2, 3
-    latch_halted = _release_read_only_state(args, latch_path_source)  # 4
+    _release_read_only_state(args, latch_path_source)  # 4
     runtime = (runtime_factory or _default_runtime)(args)  # 5
-    portfolio = getattr(runtime, "portfolio", None)
-    if portfolio is None:
-        portfolio = getattr(getattr(runtime, "runner", runtime), "portfolio", None)
-    if not isinstance(portfolio, ShadowPortfolio):  # 6: a duck-typed stand-in could clear anything
-        raise ReleaseRefused("release_requires_portfolio")
-    if args.command == "release-halt":  # 7
-        record = portfolio.release_halt(args.actor, reason, rebase_halt_anchor=args.rebase_halt_anchor)
-        kind, rebased = "halt", bool(args.rebase_halt_anchor and latch_halted)
-    else:
-        record = portfolio.release_corporate_action(args.isin, reason)
-        kind, rebased = "corporate_action", False
+    try:
+        portfolio = getattr(runtime, "portfolio", None)
+        if portfolio is None:
+            portfolio = getattr(getattr(runtime, "runner", runtime), "portfolio", None)
+        if not isinstance(portfolio, ShadowPortfolio):  # 6: a duck-typed stand-in could clear anything
+            raise ReleaseRefused("release_requires_portfolio")
+        if args.command == "release-halt":  # 7
+            record = portfolio.release_halt(args.actor, reason, rebase_halt_anchor=args.rebase_halt_anchor)
+            kind, rebased = "halt", _rebased_by_last_reset((latch_path_source or _default_latch_path)(args))
+        else:
+            record = portfolio.release_corporate_action(args.isin, reason)
+            kind, rebased = "corporate_action", False
+    finally:
+        _shutdown(runtime)
     return {
         "released": kind, "cleared_pause_seqs": list(record.get("cleared_pause_seqs", [])), "seq": record.get("seq"),
         "rebased": rebased,
     }
+
+
+def _shutdown(runtime: Any) -> None:
+    """Release what a runtime holds (the ledger writer, the stores, the link). Not ``close``: a runner's own ``close`` is
+    the session close."""
+
+    shutdown = getattr(runtime, "shutdown", None)
+    if callable(shutdown):
+        shutdown()
 
 
 def _print(out: TextIO, payload: dict[str, Any]) -> None:
@@ -306,7 +304,11 @@ def _print(out: TextIO, payload: dict[str, Any]) -> None:
 
 
 def _default_runtime(args: argparse.Namespace) -> Any:
-    raise RuntimeNotWired(NOT_WIRED)
+    """The production builders, reached through the ``runtime`` module attribute so a test can replace either."""
+
+    if args.command in ("resume", *RELEASE_COMMANDS):
+        return runtime_module.release_runtime(args)
+    return runtime_module.production_runtime(args)
 
 
 def main(
@@ -322,6 +324,8 @@ def main(
         args = _parser().parse_args(argv)
     except SystemExit as exc:
         return EXIT_USAGE if exc.code else EXIT_OK
+    args.forbidden_source = forbidden_source  # the runtime's own preflight reads the literals through the same seam
+    runtime: Any = None
     try:
         if args.command in ("resume", "status"):
             store = EvidenceStore.open(
@@ -346,8 +350,12 @@ def main(
         runner: ShadowRunner = runtime.runner if hasattr(runtime, "runner") else runtime
         if args.command == "decide":
             report = runner.decide(args.session)
-            _print(out, {"status": report.status, "stopped": report.stopped, "intents": report.intents,
-                         "skipped": report.skipped, "marked": report.marked})
+            decided = {"status": report.status, "stopped": report.stopped, "intents": report.intents,
+                       "skipped": report.skipped, "marked": report.marked}
+            gaps = getattr(runtime, "reference_gaps", None)
+            if gaps:  # a name the reference prices could not give a close for: said, never guessed
+                decided["reference_gaps"] = gaps
+            _print(out, decided)
             return EXIT_ABORTED if report.status == "aborted" else EXIT_OK
         if args.command == "close":
             closed = runner.close(args.session)
@@ -366,7 +374,7 @@ def main(
     except RuntimeNotWired as exc:
         _print(out, {"refused": str(exc)})
         return EXIT_REFUSED
-    except ForbiddenLiteralsRefused as exc:
+    except (ForbiddenLiteralsRefused, RuntimeRefused) as exc:
         _print(out, {"refused": exc.code})
         return EXIT_REFUSED
     except PortfolioAborted as exc:  # the portfolio recorded an abort event: terminal, exit 3
@@ -391,6 +399,8 @@ def main(
     except EvidenceError as exc:
         _print(out, {"refused": exc.code})
         return EXIT_REFUSED
+    finally:
+        _shutdown(runtime)
     return EXIT_USAGE
 
 

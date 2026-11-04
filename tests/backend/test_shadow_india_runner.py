@@ -2039,7 +2039,7 @@ def test_a_restart_cannot_shift_the_cadence_anchor(world):
 # the transport, the opened paths, the fill port and the CLI
 # =====================================================================================================================
 
-SOURCE_FILES = ("runner.py", "vm_codes.py", "__main__.py")
+SOURCE_FILES = ("runner.py", "vm_codes.py", "__main__.py", "runtime.py")
 
 
 class Fills:
@@ -2313,11 +2313,12 @@ def test_the_cli_default_source_reads_the_private_dir_and_refuses_a_canary(world
     assert cli.main(cli_args(world, "status", "--private-dir", str(private)), out=out) == 0
 
 
-def test_the_cli_commands_that_need_a_runtime_refuse_when_none_is_wired_and_touch_nothing(world):
+def test_the_cli_commands_that_need_a_runtime_refuse_without_a_private_dir_and_touch_nothing(world):
+    """No factory and no ``--private-dir``: the production runtime refuses at its first read (64-09 Task B)."""
     before = world.evidence.records()
     for command, extra in (("decide", ()), ("close", ()), ("hand-flatten", ("--reason", "x")), ("open-run", ())):
         code, refused = run_cli(cli_args(world, command, *extra))
-        assert (code, refused) == (1, {"refused": "production_runtime_not_wired"}), command
+        assert (code, refused) == (1, {"refused": "runtime_config_refused:PRIVATE_DIR_MISSING"}), command
     assert world.evidence.records() == before and world.order_posts() == []
 
 
@@ -2461,8 +2462,8 @@ def test_the_default_resume_clears_the_other_pauses_and_lists_the_ambiguous_one_
     assert open_events(world) == [policy.DRAWDOWN_HALT]
 
 
-def test_the_cli_without_a_wired_runtime_keeps_an_ambiguous_exit_fill_pause_open(world):
+def test_the_cli_without_a_buildable_runtime_keeps_an_ambiguous_exit_fill_pause_open(world):
     seq = ambiguous_world(world)
     code, refused = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", str(seq)))
-    assert (code, refused) == (1, {"refused": "ambiguous_exit_resume_requires_portfolio"})
+    assert (code, refused) == (1, {"refused": "runtime_config_refused:PRIVATE_DIR_MISSING"})
     assert policy.AMBIGUOUS_EXIT_FILL in open_events(world)

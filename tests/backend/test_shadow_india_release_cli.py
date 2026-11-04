@@ -56,6 +56,7 @@ pytestmark = pytest.mark.usefixtures("frozen_service_clock")
 
 REPO = Path(__file__).resolve().parents[2]
 S = date(2026, 10, 22)
+NO_RUNTIME_CONFIG = "runtime_config_refused:SHADOW_RUNTIME_MISSING"  # the test private dir holds no shadow_runtime.json
 D1 = date(2026, 10, 9)
 FIXED = datetime(2026, 10, 22, 4, 0, tzinfo=timezone.utc)
 SCHEDULE = sha("schedule")
@@ -459,25 +460,25 @@ def test_release_corporate_action_refuses_from_read_only_reads_before_any_factor
         assert not planted.latch_path.exists()
 
 
-def test_the_production_latch_path_is_not_wired_until_task_b_and_nothing_is_read_before_it_refuses(planted):
+def test_the_production_latch_path_comes_from_the_runtime_preflight_and_nothing_is_read_before_it_refuses(planted):
     planted.raise_event(HALT, "halted")
     planted.plant_latch(halt=True, drawdown=Decimal("-0.04"))
     planted.tear()
     for run in (lambda: halt(planted, latch=None), lambda: action(planted, latch=None)):
-        assert assert_untouched(planted, run) == (1, {"refused": cli.NOT_WIRED})
+        assert assert_untouched(planted, run) == (1, {"refused": NO_RUNTIME_CONFIG})
     # an unreadable evidence root would raise a different code if the read ran first
     out = io.StringIO()
     argv = argv_for(planted, "release-halt", "--actor", "ops", "--reason", "why")
     argv[2] = str(planted.tmp / "no-such-evidence-root")
     assert cli.main(argv, forbidden_source=lambda a: LITERALS, out=out) == 1
-    assert json.loads(out.getvalue()) == {"refused": cli.NOT_WIRED}
+    assert json.loads(out.getvalue()) == {"refused": NO_RUNTIME_CONFIG}
 
 
-def test_with_no_runtime_factory_a_release_that_passes_every_cli_check_still_refuses_not_wired(planted):
+def test_with_no_runtime_factory_a_release_that_passes_every_cli_check_builds_the_production_runtime_and_refuses_its_preflight(planted):
     planted.raise_event(HALT, "halted")
     planted.plant_latch(halt=True, drawdown=Decimal("-0.04"))
     code, out = halt(planted, factory=None)
-    assert (code, out) == (1, {"refused": cli.NOT_WIRED})
+    assert (code, out) == (1, {"refused": NO_RUNTIME_CONFIG})
     assert read_state(planted.latch_path).halt
 
 
@@ -613,12 +614,12 @@ def test_the_literals_come_first_then_the_grammar_then_the_pre_screen_then_the_r
     assert assert_untouched(planted, lambda: halt(planted, actor="Bad Actor", reason=CANARY_ACCOUNT, latch=None)) == (
         1, {"refused": "actor_invalid"}
     )
-    # 3 before 4: a canary reason beats the unwired latch path
+    # 3 before 4: a canary reason beats the production latch path
     assert assert_untouched(planted, lambda: halt(planted, reason=CANARY_ACCOUNT, latch=None)) == (
         1, {"refused": "canary_refused"}
     )
-    # 4 before 5: the unwired latch path refuses before the factory
-    assert assert_untouched(planted, lambda: halt(planted, latch=None)) == (1, {"refused": cli.NOT_WIRED})
+    # 4 before 5: the production latch path (the runtime preflight) refuses before the factory
+    assert assert_untouched(planted, lambda: halt(planted, latch=None)) == (1, {"refused": NO_RUNTIME_CONFIG})
 
 
 def test_the_default_literal_source_reads_the_private_dir_and_a_canary_in_the_reason_is_refused(world, tmp_path):
