@@ -122,7 +122,9 @@ wins and this file is wrong.
 - **Order of a Breeze-backed route** (`intents`, `authorize`): relay bearer, order configuration ready, body
   validation (a malformed or LIVE intent is answered here, before any session or read), the Breeze session
   (`require_active`), then the pipeline, whose ports charge the relay budget before every Breeze GET. `halt`,
-  `state` and `audit` need only the bearer: they never read Breeze, and `halt` only restricts (body `{}`).
+  `state`, `audit` and `key` need the bearer of a live session (64-10, 64-11) and never read Breeze; `halt` only
+  restricts (body `{}`). All six order routes need a bound session: with none bound they answer 503 `NO_SESSION`,
+  `SESSION_EXPIRED` or `EGRESS_MISMATCH` (see the 64-11 bullet).
 - **Errors.** O6 body: `{contract, error: {code: CATEGORY, reason: o6_code, breeze_status: null, retryable: false,
   retry_after_s: null, fields: null}}`. `code` is the category (`LIMIT_REJECTED`), `reason` the O6 code
   (`capital_cap`). Inherited relay errors (401, 403, 400, 422 validation, 503 `NO_SESSION`) keep their relay shape
@@ -142,6 +144,19 @@ wins and this file is wrong.
   rotation (replace the file, restart the service) changes the field and the mint check together. The Mac reads it
   once before it writes anything (`OrdersClient.current_key()`, CLI `orders-key`); an older VM answers 404 and the
   Mac treats that as `route_unavailable`, with no fallback to the audit read. The mint check stays the second line.
+- **`halt`, `state` and `audit` need a live session** (64-11, R-1 / DF-64-10-1; the same gate as `key`, O2 text stays
+  as written). Each runs `session.authorize(token)` and raises its failure before anything else: before the
+  pipeline, the body check, any kill read, any audit read and any write. With no relay token bound (never logged
+  in, revoked, past the IST deadline, egress-suspended, or the VM restarted) the three answer 503 `NO_SESSION`,
+  `SESSION_EXPIRED` (reason `deadline`) or `EGRESS_MISMATCH` (reason `egress_mismatch`), carry no order data and
+  write no `mac_halt` latch and no `HALTED` audit entry; the request event is the same one `key` gets. A wrong or
+  missing bearer while a session is bound stays 401. The gate does not call `require_active`, so it never
+  refreshes egress, and a live caller sees the answers it saw before. The relay restart drops the session
+  (`main.build_app` builds a new `SessionManager`), so after a restart the operator reads (`orders-state`,
+  `orders-audit`, `orders-key`) need a fresh `login --paste` first. While logged out the Mac cannot set the VM's
+  `mac_halt`: the Mac's own workspace control stays engaged and the VM keeps the kill flag, the limits guard and the
+  latches it has. Re-sending the halt after a login is deferred (DF-64-11-1), to be reassessed before any plan
+  enables live forwarding.
 - **Alert channel.** The external channel is deferred by the operator, so `session_end_check` writes each alert to
   `alerts.jsonl` (append only, mode 0600, fsynced, ISIN and session date and quantity, nothing else). The Mac reads
   the `stop_exit_open` and `alert_failed` entries from the audit and the count from `state`. An unreadable alert
