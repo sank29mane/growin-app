@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -118,8 +118,15 @@ class CasClassRow:
     u24_evidence_ref: str | None
     stock_code: str | None
     icici_ref: IciciRef | None
+    # The implementation that ran this resolution; ``impl_sha256`` is the one the stored index was built under. Evidence
+    # only: not part of equality and not in ``cas_record`` (the shared R-28 and R-31 field list).
+    running_impl_sha256: str | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
+        if self.running_impl_sha256 is not None and not (
+            isinstance(self.running_impl_sha256, str) and _SHA256.fullmatch(self.running_impl_sha256)
+        ):
+            raise InputError("cas row running_impl_sha256 must be 64 lowercase hex characters or None")
         for name in ("isin", "nse_symbol", "series"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():

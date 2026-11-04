@@ -132,6 +132,18 @@ def test_cas_class_row_carries_the_provenance_and_has_no_default():
         CasClassRow(isin="INE0REL01005")  # type: ignore[call-arg]
 
 
+def test_running_impl_sha256_is_evidence_not_identity():
+    """O-P3a: the hash of the code that ran is optional, validated, outside equality and outside the R-28 field list."""
+    plain, ran = row(), row(running_impl_sha256="f" * 64)
+    assert plain.running_impl_sha256 is None and ran.running_impl_sha256 == "f" * 64
+    assert plain == ran and hash(plain) == hash(ran)
+    assert cas_record(plain, "RELIANCE") == cas_record(ran, "RELIANCE")
+    assert "running_impl_sha256" not in cas_record(ran, "RELIANCE")
+    for bad in ("", "F" * 64, "f" * 63, 7):
+        with pytest.raises(InputError):
+            row(running_impl_sha256=bad)
+
+
 @pytest.mark.parametrize(
     "changes",
     [

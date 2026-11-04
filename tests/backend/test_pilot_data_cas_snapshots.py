@@ -11,6 +11,7 @@ only for this procedure and are pinned by its fingerprint.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import hashlib
 import inspect
 import io
@@ -19,6 +20,7 @@ import re
 import shutil
 import socket
 import subprocess
+import textwrap
 import types
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +44,7 @@ from costs.cas_class import (
     load_procedure_log,
     parse_procedure_log,
 )
+import pilot_data.core
 from market_data import models as market_models
 from pilot_data import cas_snapshots as cs
 from pilot_data import core as pd_core
@@ -443,6 +446,108 @@ def test_cas_v1_replays_after_an_implementation_change_is_approved(
     assert isinstance(world.resolve("RELIND"), CasUnresolved)
 
 
+def _tighten_isin_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A behaviour-changing validator: the shape now admits INF and IN9 ids only, so every INE id turns invalid."""
+    monkeypatch.setattr(market_models, "_ISIN_SHAPE", re.compile("IN[F9][A-Z0-9]{8}[0-9]"))
+
+
+def test_cas_v1_replay_ignores_a_newer_validator(world: ck.World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T1: replay under the recorded version returns what that version's index decided, not what the running validator says.
+
+    Terra's repro: import under v1, approve a v2 whose ISIN pattern rejects INE ids, replay v1. v1 stays a class, v2 has
+    its own verdict, and the v1 result is unchanged field for field.
+    """
+    world.import_()
+    first = world.resolve("RELIND")
+    first_dvr = world.resolve("DVRCO")
+    assert isinstance(first, CasClassRow) and first.cas_class == CAS and isinstance(first_dvr, CasClassRow)
+    before = index_path(world).read_bytes()
+    _tighten_isin_shape(monkeypatch)
+    assert not market_models.is_valid_isin(ck.ISIN_REL) and market_models.is_valid_isin(ck.ISIN_DVR)
+    world.log.approve(2)
+    outcome = cs.reindex(world.root, D, 2)
+    assert outcome.index_written
+    second = world.resolve("RELIND", version=2)
+    assert isinstance(second, CasUnresolved)
+    assert (second.sub_reason, second.detail) == ("identity_invalid", "isin_fails_validator")
+    assert isinstance(world.resolve("DVRCO", version=2), CasClassRow)  # the id the new pattern still accepts
+    replay = world.resolve("RELIND")
+    assert replay == first and cas_class.cas_record(replay, "RELIANCE") == cas_class.cas_record(first, "RELIANCE")
+    assert world.resolve("DVRCO") == first_dvr
+    assert index_path(world).read_bytes() == before
+    # What differs is only the evidence of which code ran: the entry's hash stays v1's, the running one is v2's.
+    assert replay.impl_sha256 == first.impl_sha256 != cs.impl_sha256()
+    assert replay.running_impl_sha256 == cs.impl_sha256() != first.running_impl_sha256
+    assert second.impl_sha256 == cs.impl_sha256()
+
+
+def test_cas_v1_replay_keeps_a_recorded_invalid_verdict_under_a_looser_validator(
+    world: ck.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: v1 recorded the id as invalid, a later validator accepts it, v1 replay stays invalid."""
+    committed_shape = market_models._ISIN_SHAPE
+    _tighten_isin_shape(monkeypatch)
+    world.log.entries.clear()
+    world.log.flush()
+    world.log.approve(1)
+    world.import_()
+    recorded = world.resolve("RELIND")
+    assert isinstance(recorded, CasUnresolved) and recorded.sub_reason == "identity_invalid"
+    monkeypatch.setattr(market_models, "_ISIN_SHAPE", committed_shape)  # back to the committed validator
+    assert market_models.is_valid_isin(ck.ISIN_REL)
+    world.log.approve(2)
+    cs.reindex(world.root, D, 2)
+    assert isinstance(world.resolve("RELIND", version=2), CasClassRow)
+    replay = world.resolve("RELIND")
+    assert isinstance(replay, CasUnresolved)
+    assert (replay.sub_reason, replay.detail) == ("identity_invalid", "isin_fails_validator")
+
+
+def test_cas_v1_replay_after_a_newer_approval_still_refuses_a_tampered_index(
+    world: ck.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay trusts the recorded verdict only because the index hash is checked: edit a v1 row and it refuses."""
+    world.import_()
+    _tighten_isin_shape(monkeypatch)
+    world.log.approve(2)
+    cs.reindex(world.root, D, 2)
+    assert isinstance(world.resolve("RELIND"), CasClassRow)
+    v1 = index_path(world)
+    doc = json.loads(v1.read_bytes())
+    doc["isins"][ck.ISIN_REL]["sub_reason"] = "identity_invalid"  # turn a recorded class into a recorded refusal
+    doc["isins"][ck.ISIN_REL]["cas_class"] = None
+    v1.write_bytes(cs.index_bytes(doc))
+    tampered = world.resolve("RELIND")
+    assert isinstance(tampered, CasUnresolved) and tampered.sub_reason == "snapshot_hash_mismatch"
+    assert isinstance(world.resolve("DVRCO", version=2), CasClassRow)  # v2 is a separate, intact index
+
+
+def test_cas_replay_records_which_implementation_ran(world: ck.World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """O-P3a: ``impl_sha256`` is the entry's, ``running_impl_sha256`` is the code that ran the ICICI cross-check."""
+    world.import_()
+    row = world.resolve("RELIND")
+    assert isinstance(row, CasClassRow)
+    assert row.impl_sha256 == row.running_impl_sha256 == cs.impl_sha256()
+    original = market_models.is_valid_isin
+
+    def is_valid_isin_v2(value: object) -> bool:  # same behaviour, different source
+        return bool(original(value)) is True
+
+    monkeypatch.setattr(market_models, "is_valid_isin", is_valid_isin_v2)
+    world.log.approve(2)
+    replay = world.resolve("RELIND")
+    assert isinstance(replay, CasClassRow) and replay == row
+    assert replay.impl_sha256 == row.impl_sha256 != cs.impl_sha256()
+    assert replay.running_impl_sha256 == cs.impl_sha256()
+    shown = cs.resolve_symbol(world.root, D, 1, "RELIANCE")
+    assert isinstance(shown, CasClassRow) and shown.running_impl_sha256 == cs.impl_sha256()
+    assert f"running_impl_sha256 {cs.impl_sha256()}" in cs.describe(replay)
+    # The shared R-28 and R-31 field list is unchanged: the running hash is evidence on the row, not in cas_record.
+    assert "running_impl_sha256" not in cas_class.cas_record(replay, "RELIANCE")
+    with pytest.raises(cas_class.InputError):
+        dataclasses.replace(replay, running_impl_sha256="not-a-hash")
+
+
 def test_cas_index_replace_refused(world: ck.World) -> None:
     world.import_()
     folder = cs.cas_dir(world.root, D) / "index"
@@ -642,6 +747,54 @@ def uncovered_module_reads(source: str | None = None) -> list[str]:
     return sorted(set(problems))
 
 
+REPO_BACKEND = REPO / "backend"
+
+
+def _repo_local(module: types.ModuleType) -> bool:
+    """Under ``backend/`` and not a virtualenv: the uv venv lives in ``backend/.venv``, so third parties sit below it too."""
+    home = getattr(module, "__file__", None)
+    if home is None or not Path(home).resolve().is_relative_to(REPO_BACKEND):
+        return False
+    return not {".venv", "site-packages"} & set(Path(home).resolve().relative_to(REPO_BACKEND).parts)
+
+
+def _module_object(node: ast.expr, scope: dict[str, Any]) -> types.ModuleType | None:
+    """The module a ``name`` or ``name.sub`` expression denotes in ``scope``, else None (instances are not followed)."""
+    if isinstance(node, ast.Name):
+        found = scope.get(node.id)
+    elif isinstance(node, ast.Attribute):
+        parent = _module_object(node.value, scope)
+        found = None if parent is None else getattr(parent, node.attr, None)
+    else:
+        return None
+    return found if isinstance(found, types.ModuleType) else None
+
+
+def uncovered_module_attribute_reads() -> list[str]:
+    """T2: ``somemodule.helper`` read by any fingerprinted callable, where somemodule is repo-local and helper is not in
+    the fingerprint. ``uncovered_dependencies`` skips module-typed globals, so this closes that gap. A read that lands on
+    a fingerprinted callable is fine (that callable is walked itself, so the closure is transitive); a nested module
+    (``pkg.sub``) is followed to the attribute read through it.
+    """
+    covered_objects = {id(getattr(owner, attr)) for _, owner, attr in cs.FINGERPRINTED}
+    covered_names = set(cs.FINGERPRINTED_VALUE_NAMES) | set(cs.INERT_GLOBALS) | set(cs.INERT_METHODS)
+    problems: list[str] = []
+    for name, owner, attr in cs.FINGERPRINTED:
+        for fn in _functions_of(getattr(owner, attr)):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute):
+                    continue
+                module = _module_object(node.value, fn.__globals__)
+                if module is None or not _repo_local(module) or node.attr in covered_names:
+                    continue
+                target = getattr(module, node.attr, None)
+                if isinstance(target, types.ModuleType) or id(target) in covered_objects:
+                    continue
+                problems.append(f"{name}: module read {ast.unparse(node)}")
+    return sorted(set(problems))
+
+
 def uncovered_helper() -> None:  # a global of this test module, used by the planted dependency below
     return None
 
@@ -658,6 +811,7 @@ def test_cas_procedure_fingerprint_covers_dependencies() -> None:
     assert {"store.PilotDataStore.read_blob", "models.SecurityMasterRow", "core.canonical_sha256"} <= set(parts)
     assert uncovered_dependencies() == []
     assert uncovered_module_reads() == []
+    assert uncovered_module_attribute_reads() == []
 
 
 def test_cas_procedure_fingerprint_walk_catches_an_uncovered_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -672,6 +826,36 @@ def test_cas_procedure_fingerprint_walk_catches_an_uncovered_dependency(monkeypa
     assert "security_master.lookup_stock_code: method PilotDataStore.table_exists" in problems
     planted = Path(cs.__file__).read_text() + "\n_x = _sm.require_fresh_snapshot\n_y = store.table_exists\n"
     assert uncovered_module_reads(planted) == ["_sm.require_fresh_snapshot", "store.table_exists"]
+
+
+def test_cas_procedure_fingerprint_walk_catches_a_repo_local_module_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T2 counterexample: a fingerprinted callable that calls ``somemodule.helper()`` outside the fingerprint is reported."""
+
+    def lookup_calling_module_helper(store: Any, snapshot: Any, stock_code: str) -> Any:
+        pd_core.utc_now()  # repo-local module, function nobody fingerprinted
+        sm.latest_snapshot(store)  # another module, another unfingerprinted function
+        pd_models.SecurityMasterRow  # a repo-local module attribute that is fingerprinted: not a problem
+        return sm.snapshot_by_sha(store, snapshot, stock_code)  # fingerprinted: not a problem
+
+    assert uncovered_module_attribute_reads() == []
+    monkeypatch.setattr(sm, "lookup_stock_code", lookup_calling_module_helper)
+    problems = uncovered_module_attribute_reads()
+    assert problems == [
+        "security_master.lookup_stock_code: module read pd_core.utc_now",
+        "security_master.lookup_stock_code: module read sm.latest_snapshot",
+    ]
+    # The global-name walk alone never sees it: both are module-typed globals, which it skips by design.
+    assert not any("pd_core" in p or "latest_snapshot" in p for p in uncovered_dependencies())
+
+
+def test_cas_procedure_fingerprint_walk_follows_nested_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+    def lookup_through_a_package(store: Any, snapshot: Any, stock_code: str) -> Any:
+        return pilot_data.core.utc_now()  # reached as package.module.attribute
+
+    monkeypatch.setattr(sm, "lookup_stock_code", lookup_through_a_package)
+    assert uncovered_module_attribute_reads() == [
+        "security_master.lookup_stock_code: module read pilot_data.core.utc_now"
+    ]
 
 
 def _changed_function(*_args: Any, **_kwargs: Any) -> Any:
@@ -916,7 +1100,7 @@ BRANCHES: dict[str, tuple[Callable[[ck.World], Any], str, str]] = {
     "procedure_version_revoked": (_sc_unapproved, "procedure_unapproved", "procedure_version_revoked"),
     "procedure_version_absent": (_sc_log_absent, "procedure_unapproved", "procedure_version_absent"),
     "icici_series_BE": (_imported("HDFBE"), "series_unsupported", "icici_series_BE"),
-    "icici_isin_fails_validator": (_imported("DUMMYC"), "identity_invalid", "icici_isin_fails_validator"),
+    "isin_fails_validator": (_imported("DUMMYC"), "identity_invalid", "isin_fails_validator"),
     "icici_unmapped": (_imported("NOSUCH"), "identity_mismatch", "icici_unmapped"),
     "isin_not_in_snapshot": (_imported("ABSENT"), "identity_mismatch", "isin_not_in_snapshot"),
     "icici_symbol_not_active_for_isin": (

@@ -823,8 +823,8 @@ def _unresolved(
     )
 
 
-def _check_procedure(version: int, cas: _CasState) -> tuple[ProcedureEntry | None, str | None]:
-    """(entry, detail). A detail means procedure_unapproved.
+def _check_procedure(version: int, cas: _CasState) -> tuple[ProcedureEntry | None, str | None, str | None]:
+    """(entry, detail, running impl_sha256). A detail means procedure_unapproved.
 
     The requested version must be approved and unrevoked, and the stored index must record exactly that entry.
     The running code only has to equal SOME approved, unrevoked entry: a result recorded under version N replays
@@ -834,21 +834,21 @@ def _check_procedure(version: int, cas: _CasState) -> tuple[ProcedureEntry | Non
     try:
         log = load_procedure_log()
     except (ValueError, OSError):
-        return None, "procedure_file_invalid"
+        return None, "procedure_file_invalid", None
     entry = approved_entry(log, version)
     if entry is None:
-        return None, "procedure_version_revoked" if version in log.revoked else "procedure_version_absent"
+        return None, "procedure_version_revoked" if version in log.revoked else "procedure_version_absent", None
     assert cas.index is not None
     if cas.index.get("procedure") != entry.as_dict():
-        return None, "index_identity_differs_from_entry"
+        return None, "index_identity_differs_from_entry", None
     spec, impl = running_identity()
     if not any(
         approval.spec_sha256 == spec and approval.impl_sha256 == impl
         for approval in log.approvals
         if approval.procedure_version not in log.revoked
     ):
-        return None, "running_implementation_differs_from_entry"
-    return entry, None
+        return None, "running_implementation_differs_from_entry", None
+    return entry, None, impl
 
 
 def _check_inputs(session_date: date, version: int) -> None:
@@ -872,8 +872,15 @@ def _group_row(
 
 def _group_result(
     group: Mapping[str, Any], *, isin: str, nse_symbol: str, series: str, session_date: date, version: int,
-    cas: _CasState, entry: ProcedureEntry, stock_code: str | None, icici: _IciciState | None,
+    cas: _CasState, entry: ProcedureEntry, stock_code: str | None, icici: _IciciState | None, running_impl: str | None,
 ) -> CasClassRow | CasUnresolved:
+    """The recorded verdict of one group, as a row.
+
+    ``impl_sha256`` is the implementation the stored index was built under (the approved entry's). ``running_impl_sha256``
+    is the implementation that ran this resolution, which only has to equal some approved entry; the two differ when an
+    older version is replayed under newer approved code. It is evidence beside the entry's hash, not part of the R-28
+    field list (``cas_record``) and not part of row equality.
+    """
     if group["sub_reason"] in ("flag_unknown", "flag_conflict"):
         return _unresolved(group["sub_reason"], f"{group['sub_reason']}_for_isin", session_date, version, cas, entry, stock_code, icici)
     if group["sub_reason"] == "identity_invalid":
@@ -889,6 +896,7 @@ def _group_result(
         snapshot_sha256=cas.raw_sha, index_sha256=cas.index_sha, procedure_version=version,
         spec_sha256=entry.spec_sha256, impl_sha256=entry.impl_sha256, u24_status=entry.u24_status,
         u24_evidence_ref=entry.u24_evidence_ref, stock_code=stock_code, icici_ref=ref,
+        running_impl_sha256=running_impl,
     )
 
 
@@ -902,6 +910,11 @@ def resolve_broker(
     decided in this order, first match wins: snapshot_missing, snapshot_wrong_date, snapshot_hash_mismatch,
     procedure_unapproved, series_unsupported, identity_invalid, identity_mismatch, identity_ambiguous, flag_unknown,
     flag_conflict.
+
+    Replay returns the verdict the stored index recorded under ``procedure_version``; no validator runs here, so a
+    newer approved version cannot change it. ``impl_sha256`` on the row is the implementation of the entry the index
+    was built under, ``running_impl_sha256`` the code that ran this call (the ICICI cross-check and the integrity
+    checks), which may be a newer approved one.
     """
     _check_inputs(session_date, procedure_version)
     if not isinstance(icici_pin, IciciPin):
@@ -929,7 +942,7 @@ def resolve_broker(
         return stop("snapshot_hash_mismatch", cas.hash_bad)
     if icici.hash_bad is not None:
         return stop("snapshot_hash_mismatch", icici.hash_bad)
-    entry, why = _check_procedure(version, cas)
+    entry, why, running_impl = _check_procedure(version, cas)
     if why is not None:
         return stop("procedure_unapproved", why)
     assert entry is not None and cas.index is not None
@@ -940,11 +953,11 @@ def resolve_broker(
     row = icici.row
     if row.series != "EQ":
         return stop("series_unsupported", f"icici_series_{row.series}", entry)
-    if not _models.is_valid_isin(row.isin):
-        return stop("identity_invalid", "icici_isin_fails_validator", entry)
     group, active_row = _group_row(cas.index, row.isin, row.nse_symbol)
-    # Guard, not dead code: the index was built under the recorded procedure, whose validator can differ from the
-    # running approved one when an older version is replayed. The row's own ISIN passed the running validator above.
+    # No validator runs here. Whether an id is valid is a verdict of the procedure version that built the index, and it
+    # is stored in the group (covered by ``index_sha256``). Replay returns that recorded verdict, so a newer approved
+    # validator cannot change what a version-N index resolves to; it only governs imports and reindexes under its own
+    # version. Integrity (blob, row digest, index hash, ICICI pin) is what replay re-checks.
     if group is not None and group["sub_reason"] == "identity_invalid":
         return stop("identity_invalid", "isin_fails_validator", entry)
     if group is None:
@@ -957,7 +970,7 @@ def resolve_broker(
         return stop("identity_ambiguous", "symbol_carries_more_than_one_isin", entry)
     return _group_result(
         group, isin=row.isin, nse_symbol=row.nse_symbol, series=row.series, session_date=session_date, version=version,
-        cas=cas, entry=entry, stock_code=stock_code, icici=icici,
+        cas=cas, entry=entry, stock_code=stock_code, icici=icici, running_impl=running_impl,
     )
 
 
@@ -974,7 +987,7 @@ def resolve_symbol(root: Path, session_date: date, procedure_version: int, nse_s
         return _unresolved("snapshot_wrong_date", cas.wrong_date, session_date, version, cas)
     if cas.hash_bad is not None:
         return _unresolved("snapshot_hash_mismatch", cas.hash_bad, session_date, version, cas)
-    entry, why = _check_procedure(version, cas)
+    entry, why, running_impl = _check_procedure(version, cas)
     if why is not None:
         return _unresolved("procedure_unapproved", why, session_date, version, cas)
     assert entry is not None and cas.index is not None
@@ -986,7 +999,7 @@ def resolve_symbol(root: Path, session_date: date, procedure_version: int, nse_s
     isin = isins[0]
     return _group_result(
         cas.index["isins"][isin], isin=isin, nse_symbol=nse_symbol, series="EQ", session_date=session_date,
-        version=version, cas=cas, entry=entry, stock_code=None, icici=None,
+        version=version, cas=cas, entry=entry, stock_code=None, icici=None, running_impl=running_impl,
     )
 
 
@@ -1008,8 +1021,8 @@ def describe(verdict: CasClassRow | CasUnresolved) -> str:
         f"class {verdict.cas_class} nse_symbol {verdict.nse_symbol} isin {verdict.isin} series {verdict.series} "
         f"snapshot_date {verdict.snapshot_date.isoformat()} snapshot_sha256 {verdict.snapshot_sha256} "
         f"index_sha256 {verdict.index_sha256} procedure_version {verdict.procedure_version} "
-        f"spec_sha256 {verdict.spec_sha256} impl_sha256 {verdict.impl_sha256} u24_status {verdict.u24_status} "
-        f"icici_pin {pin}"
+        f"spec_sha256 {verdict.spec_sha256} impl_sha256 {verdict.impl_sha256} "
+        f"running_impl_sha256 {verdict.running_impl_sha256} u24_status {verdict.u24_status} icici_pin {pin}"
     )
 
 
