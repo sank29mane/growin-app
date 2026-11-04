@@ -13,23 +13,29 @@ deletes the token file, so an after-run scan alone would miss any write-then-del
   layer 1, an audit hook (`HookCore`): every byte about to be deleted, truncated or replaced
            under a watched root is read at that moment and scanned. `file.truncate()` fires no
            audit event on CPython 3.11, so a profile hook (`sys.setprofile`, which sees the C call
-           to `truncate` and the file object it is bound to) flushes and reads the file first;
+           to `truncate` and the file object it is bound to) flushes and reads the file first.
+           Code that removes that hook cannot be out-raced, so it is checked instead: at every
+           stage boundary and at exit `sys.getprofile()` and `threading.getprofile()` must still
+           be the recorder's hook, a thread must start and run under it, and a Python child
+           checks at its exit; anything else is `profile-replaced`, a failure;
   layer 2, stage snapshots: every regular file under the watched root is read at each stage
            boundary, and once more immediately before `revoke` (the `pre-revoke` stage).
 
 Python children started during a run carry the same hooks through a generated `sitecustomize`.
 A Python child started so that it skips `sitecustomize` (-I, -E, -S) fails the run
 (`child-unwatched`), and so does `os.fork` / `os.forkpty` (a forked child keeps its records in its
-own memory and loses them at exit). A file larger than `HookCore.MAX_READ` fails the run
+own memory and loses them at exit). A thread whose `run` is overridden in a subclass is checked at
+start only, not around `run`. A file larger than `HookCore.MAX_READ` fails the run
 (`file-too-large`) instead of being cut off.
 
 Residuals, both reported in the PR:
   RS-1  native or non-Python children, and native code that writes without Python's os or io
         calls, are out of scope for same-stage write-then-delete detection; layer 2 still
         catches what they leave at a stage boundary.
-  RS-2  canary bytes overwritten in place with other bytes (seek or `os.lseek`/`os.pwrite`, then
-        write, or an mmap store) and then deleted: no audit event or C call names the old bytes.
-        Bytes present when a file is opened for truncating writing are read at the open.
+  RS-2  canary bytes overwritten in place through the same handle (seek or `os.lseek`/`os.pwrite`,
+        then write, or an mmap store) and then deleted: no audit event or C call names the old
+        bytes. Bytes already in a file when it is opened for writing (truncating or not) are read
+        at the open, so reopening to overwrite is covered.
 
 Every detector here is shown able to fail: a planted leak, a planted write-then-delete (several
 shapes) and a write the hook cannot see are each reported. Only canary values appear in this
@@ -99,7 +105,7 @@ TOKEN_REL = "home/.config/growin/relay-session.json"
 TOKEN_TEMP_RE = re.compile(r"^home/\.config/growin/\.relay-session\.json\.\d+\.[0-9a-f]{8}\.tmp$")
 SURFACE_FILE_RE = re.compile(r"^file(?:-lost)?:(?P<rel>.+?)@(?P<stage>[^@ ]+)(?: \(child\))?$")
 
-PROBLEM_KINDS = ("child-unwatched", "file-unresolved", "file-too-large", "hook-error")
+PROBLEM_KINDS = ("child-unwatched", "file-unresolved", "file-too-large", "hook-error", "profile-replaced")
 
 
 # =============================================================== the hook core
@@ -271,8 +277,7 @@ class HookCore:
         ) or any(char in mode for char in "wax+")
         if not writing:
             return
-        truncating = bool(flags & os.O_TRUNC) or "w" in mode
-        self._touch("open", target, lose=truncating)
+        self._touch("open", target)  # whatever the file holds now (truncating or not) is read first
 
     def on_os_remove(self, target, dir_fd=None):
         self._touch("os.remove", target, dir_fd)
@@ -314,6 +319,15 @@ class HookCore:
     def install_profile(self):
         sys.setprofile(self.profile)
         threading.setprofile(self.profile)  # threads started from now on
+
+    def check_hook(self, where, current):
+        """Fail closed: a hook that is no longer ours means truncates can go unseen."""
+        if self._active() and current != self.profile:
+            self._emit("profile-replaced", where)
+
+    def check_profile(self):
+        self.check_hook("sys", sys.getprofile())
+        self.check_hook("threading", threading.getprofile())
 
     def profile(self, frame, event, arg):
         """`file.truncate()` raises no audit event: read the file at the C call, before it runs."""
@@ -441,6 +455,9 @@ def _growin_install():
     )
     sys.addaudithook(core)
     core.install_profile()
+    import atexit
+
+    atexit.register(core.check_profile)
 
 
 _growin_install()
@@ -504,6 +521,7 @@ class FileRecorder:
         self._on = False
         self._saved_env: dict[str, str | None] = {}
         self._saved_profile: tuple = (None, None)
+        self._thread_orig: tuple = ()
         self.core = HookCore(
             roots=self.roots,
             ignored=[self.capture],
@@ -543,11 +561,36 @@ class FileRecorder:
             _Slot.installed = True
         self._saved_profile = (sys.getprofile(), threading.getprofile())
         self.core.install_profile()
+        self._patch_threads()
         self._on = True
         _Slot.recorder = self
         return self
 
+    def _patch_threads(self) -> None:
+        """A thread must start and run under the hook; one that does not is `profile-replaced`."""
+        core = self.core
+        orig_start, orig_run = threading.Thread.start, threading.Thread.run
+        self._thread_orig = (orig_start, orig_run)
+
+        def start(thread):
+            core.check_hook("thread-start", threading.getprofile())
+            return orig_start(thread)
+
+        def run(thread):
+            core.check_hook("thread-run", sys.getprofile())
+            try:
+                return orig_run(thread)
+            finally:
+                core.check_hook("thread-run", sys.getprofile())
+
+        threading.Thread.start, threading.Thread.run = start, run
+
+    def check_profile(self) -> None:
+        self.core.check_profile()
+
     def __exit__(self, *exc: object) -> None:
+        self.core.check_profile()  # the hook must have survived the whole run
+        threading.Thread.start, threading.Thread.run = self._thread_orig
         _Slot.recorder = None
         self._on = False
         sys.setprofile(self._saved_profile[0])
@@ -1085,6 +1128,7 @@ class World:
         try:
             yield
         finally:
+            self.recorder.check_profile()
             self._drain(name)
             self._snapshot_files(name)
 
@@ -1728,6 +1772,127 @@ def test_control_k_a_forked_child_fails_the_run(make_world, call):
     assert not any("forked.txt" in name for name in report.surfaces)  # the child's loss never arrived
     with pytest.raises(AssertionError, match="child-unwatched"):
         report.assert_clean()
+
+
+# ------------------------------------------ r2 review rows: the hook must still be installed
+
+
+def write_truncate_delete(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        handle.truncate(0)
+    path.unlink()
+
+
+def test_control_m_code_that_removes_the_profile_hook_fails_the_run(make_world):
+    world = make_world()
+    target = world.home / "scratch" / "blind.txt"
+
+    def plant(w: World) -> None:
+        sys.setprofile(None)
+        write_truncate_delete(target, w.canary.relay_tokens[-1])
+
+    world.plants["health"] = [plant]
+    report = executed(world, run_flow_a)
+    assert "profile-replaced:sys@health" in report.problems
+    assert all(p.startswith("profile-replaced:sys@") for p in report.problems), report.problems
+    assert report.problems[-1].endswith("@revoke")  # still reported at the exit check
+    assert not [leak for leak in report.leaks if "blind.txt" in leak[0]]  # the truncate went unseen  # the truncate really went unseen
+    with pytest.raises(AssertionError, match="profile-replaced"):
+        report.assert_clean()
+
+
+def test_control_m_a_thread_started_after_threading_setprofile_none_fails_the_run(make_world):
+    world = make_world()
+    target = world.home / "scratch" / "blind-thread.txt"
+
+    def plant(w: World) -> None:
+        threading.setprofile(None)
+        thread = threading.Thread(target=write_truncate_delete, args=(target, w.canary.relay_tokens[-1]))
+        thread.start()
+        thread.join()
+
+    world.plants["health"] = [plant]
+    report = executed(world, run_flow_a)
+    for expected in ("thread-start", "thread-run", "threading"):
+        assert f"profile-replaced:{expected}@health" in report.problems, (expected, report.problems)
+    assert not [leak for leak in report.leaks if "blind-thread.txt" in leak[0]]  # the truncate went unseen
+    with pytest.raises(AssertionError, match="profile-replaced"):
+        report.assert_clean()
+
+
+def test_control_m_a_thread_that_removes_the_hook_itself_fails_the_run(make_world):
+    world = make_world()
+    target = world.home / "scratch" / "blind-inner.txt"
+
+    def plant(w: World) -> None:
+        def body() -> None:
+            sys.setprofile(None)  # only this thread loses the hook
+            write_truncate_delete(target, w.canary.relay_tokens[-1])
+
+        thread = threading.Thread(target=body)
+        thread.start()
+        thread.join()
+
+    world.plants["health"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == ["profile-replaced:thread-run@health"]
+    assert not [leak for leak in report.leaks if "blind-inner.txt" in leak[0]]  # the truncate went unseen
+
+
+def test_control_m_a_python_child_that_removes_the_hook_fails_the_run(make_world):
+    world = make_world()
+    target = world.home / "py-blind.txt"
+    code = "import sys\nsys.setprofile(None)\n" + CHILD_TRUNCATES_AND_DELETES
+
+    def plant(w: World) -> None:
+        python_child(code, str(target), w.canary.relay_tokens[-1])
+
+    world.plants["orders-key"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == ["profile-replaced:sys@orders-key"]
+    assert not [leak for leak in report.leaks if "py-blind.txt" in leak[0]]  # the truncate went unseen
+
+
+@pytest.mark.parametrize("which", ["sys", "threading"])
+def test_the_exit_check_reports_a_hook_removed_during_the_run(tmp_path, tmp_path_factory, which):
+    recorder = FileRecorder([tmp_path], tmp_path_factory.mktemp("capture"), tmp_path / "child-hook")
+    with recorder:
+        recorder.set_stage("only")
+        (sys.setprofile if which == "sys" else threading.setprofile)(None)
+    recorder.finish()
+    assert recorder.problems() == [f"profile-replaced:{which}@only"]
+    assert sys.getprofile() is None and threading.getprofile() is None  # the outside world is restored
+
+
+@pytest.mark.parametrize("how", ["r+", "os.open"])
+def test_control_n_a_file_reopened_and_overwritten_in_place_is_read_at_the_open(make_world, how):
+    world = make_world()
+    target = world.home / "scratch" / "overwritten.txt"
+
+    def plant(w: World) -> None:
+        token = w.canary.relay_tokens[-1]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(token, encoding="utf-8")
+        filler = "X" * len(token)
+        if how == "r+":
+            with open(target, "r+", encoding="utf-8") as handle:
+                handle.write(filler)  # same length, in place: nothing is truncated
+        else:
+            descriptor = os.open(target, os.O_WRONLY)
+            try:
+                os.write(descriptor, filler.encode())
+            finally:
+                os.close(descriptor)
+        target.unlink()
+
+    world.plants["health"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == []
+    assert ("file-lost:home/scratch/overwritten.txt@health", "relay_token") in report.leaks
+    assert report.leaks_where(lambda name: name.startswith("file:")) == []
 
 
 def test_scrub_arm_response_strips_only_the_designed_values():
