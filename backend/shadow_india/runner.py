@@ -558,6 +558,12 @@ class ShadowRunner:
         self._by_isin = {i.isin: i for i in instruments}
         self._clock = clock
 
+    @property
+    def portfolio(self) -> ShadowPortfolio:
+        """The run's portfolio, read-only. The CLI's release commands reach the pauses only through it."""
+
+        return self._portfolio
+
     # -- refusals ---------------------------------------------------------------------------------------------
 
     def _state(self) -> policy.RunState:
