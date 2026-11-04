@@ -20,6 +20,7 @@ from market_context import ResearchData, NewsArticle
 from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional
 from utils.http_client import agent_http_client
+from utils.news_client import newsdata_headers, newsdata_error_summary
 import logging
 import os
 import asyncio
@@ -298,15 +299,13 @@ class ResearchAgent(BaseAgent):
             # 1. LSE RNS (Regulatory News Service) via NewsData.io
             if is_uk and self.newsdata_key:
                 params = {
-                    "apikey": self.newsdata_key,
                     "q": f"{ticker} RNS",
                     "country": "gb",
                     "category": "business"
                 }
                 try:
-                    data = await agent_http_client.execute_with_breaker(
-                        self._newsdata_cb, "GET", "https://newsdata.io/api/1/latest",
-                        params=params, timeout=10.0, raise_for_status=False
+                    data = await self._newsdata_get(
+                        "https://newsdata.io/api/1/latest", params, raise_for_status=False
                     )
 
                     for art in data.get('results', [])[:5]:
@@ -318,8 +317,7 @@ class ResearchAgent(BaseAgent):
                             'is_regulatory': True
                         })
                 except Exception as e:
-
-                    handle_error(e, "RNS newsData.io failed", logger, raise_error=False)
+                    logger.error(f"RNS newsData.io failed: {newsdata_error_summary(e, self.newsdata_key)}")
 
             # 2. SEC Filings / News via Search Plugin
             if not is_uk and self.tavily_key:
@@ -419,6 +417,14 @@ class ResearchAgent(BaseAgent):
             handle_error(e, "Search plugin failed", logger, raise_error=False)
             return []
 
+    async def _newsdata_get(self, url: str, params: Dict[str, Any], **kwargs) -> Any:
+        """GET a newsdata.io endpoint with the key in the X-ACCESS-KEY header, never the URL."""
+        clean = {k: v for k, v in params.items() if k.lower() != "apikey"}
+        return await agent_http_client.execute_with_breaker(
+            self._newsdata_cb, "GET", url,
+            params=clean, headers=newsdata_headers(self.newsdata_key), timeout=10.0, **kwargs
+        )
+
     async def _fetch_newsdata(self, ticker: str, company_name: str) -> List[Dict]:
         """
         Fetch from NewsData.io (business/economy focus).
@@ -430,7 +436,6 @@ class ResearchAgent(BaseAgent):
 
             # Base params
             params = {
-                "apikey": self.newsdata_key,
                 "language": "en",
                 "excludefield": "ai_summary" # simplified as per verification
             }
@@ -451,7 +456,6 @@ class ResearchAgent(BaseAgent):
             if not params:
                  logger.info("Smart query generation failed, using fallback logic.")
                  params = {
-                    "apikey": self.newsdata_key,
                     "language": "en",
                     "excludefield": "ai_summary"
                  }
@@ -467,7 +471,7 @@ class ResearchAgent(BaseAgent):
                      # Add 'in' for India support if requested, but architecture mandates US/UK partitioning
                      if "NSE" in ticker.upper(): params["country"] = "in"
 
-            data = await agent_http_client.execute_with_breaker(self._newsdata_cb, "GET", url, params=params, timeout=10.0)
+            data = await self._newsdata_get(url, params)
             
             # Normalize to common format
             articles = []
@@ -487,9 +491,7 @@ class ResearchAgent(BaseAgent):
             # provider is a failed research step, not an empty article list.
             raise
         except Exception as e:
-
-
-            handle_error(e, "NewsData.io failed", logger, raise_error=False)
+            logger.error(f"NewsData.io failed: {newsdata_error_summary(e, self.newsdata_key)}")
             return []
 
     async def _generate_smart_query(self, user_query: str) -> Optional[Dict]:
@@ -508,8 +510,7 @@ class ResearchAgent(BaseAgent):
             # Convert Pydantic object to dict for the API client
             params = params_obj.model_dump(exclude_none=True)
             
-            # Ensure API key and other required fields are present
-            params["apikey"] = self.newsdata_key
+            # Required fields. The API key travels in a header (see _newsdata_get), never in params.
             params["language"] = "en"
             params["excludefield"] = "ai_summary"
             
@@ -537,7 +538,6 @@ class ResearchAgent(BaseAgent):
     def _basic_news_query(self, user_query: str) -> Dict:
         return {
             "q": f"{user_query} stock market news",
-            "apikey": self.newsdata_key,
             "language": "en"
         }
 
