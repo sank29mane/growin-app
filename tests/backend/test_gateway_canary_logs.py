@@ -11,17 +11,25 @@ Files are inspected while the run happens, not only after it (the run ends with 
 deletes the token file, so an after-run scan alone would miss any write-then-delete):
 
   layer 1, an audit hook (`HookCore`): every byte about to be deleted, truncated or replaced
-           under a watched root is read at that moment and scanned;
+           under a watched root is read at that moment and scanned. `file.truncate()` fires no
+           audit event on CPython 3.11, so a profile hook (`sys.setprofile`, which sees the C call
+           to `truncate` and the file object it is bound to) flushes and reads the file first;
   layer 2, stage snapshots: every regular file under the watched root is read at each stage
            boundary, and once more immediately before `revoke` (the `pre-revoke` stage).
 
-Python children started during a run carry the same hook through a generated `sitecustomize`.
+Python children started during a run carry the same hooks through a generated `sitecustomize`.
 A Python child started so that it skips `sitecustomize` (-I, -E, -S) fails the run
-(`child-unwatched`). Native or non-Python children, and native code that writes without Python's
-os or io calls, are out of scope for same-stage write-then-delete detection (residual RS-1);
-layer 2 still catches what they leave at a stage boundary. Also unseen by the hook on CPython
-3.11: `file.truncate()` on a Python file object (no audit event). Bytes present when a file is
-opened for truncating writing are read at the open, which covers the common case.
+(`child-unwatched`), and so does `os.fork` / `os.forkpty` (a forked child keeps its records in its
+own memory and loses them at exit). A file larger than `HookCore.MAX_READ` fails the run
+(`file-too-large`) instead of being cut off.
+
+Residuals, both reported in the PR:
+  RS-1  native or non-Python children, and native code that writes without Python's os or io
+        calls, are out of scope for same-stage write-then-delete detection; layer 2 still
+        catches what they leave at a stage boundary.
+  RS-2  canary bytes overwritten in place with other bytes (seek or `os.lseek`/`os.pwrite`, then
+        write, or an mmap store) and then deleted: no audit event or C call names the old bytes.
+        Bytes present when a file is opened for truncating writing are read at the open.
 
 Every detector here is shown able to fail: a planted leak, a planted write-then-delete (several
 shapes) and a write the hook cannot see are each reported. Only canary values appear in this
@@ -52,6 +60,7 @@ from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Sequence
+from unittest.mock import patch
 from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
@@ -75,6 +84,7 @@ from gateway_vm.main import build_app  # noqa: E402
 from gateway_vm.orders import CONTRACT as ORDERS_CONTRACT  # noqa: E402
 from gateway_vm.orders.kill import KILL_PATH  # noqa: E402
 from gateway_vm.orders.routes import OrderSettings  # noqa: E402
+from gateway_vm.session import SessionManager  # noqa: E402
 from gateway_vm.transport import HttpResponse  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "backend" / "fixtures" / "relay_orders"
@@ -89,7 +99,7 @@ TOKEN_REL = "home/.config/growin/relay-session.json"
 TOKEN_TEMP_RE = re.compile(r"^home/\.config/growin/\.relay-session\.json\.\d+\.[0-9a-f]{8}\.tmp$")
 SURFACE_FILE_RE = re.compile(r"^file(?:-lost)?:(?P<rel>.+?)@(?P<stage>[^@ ]+)(?: \(child\))?$")
 
-PROBLEM_KINDS = ("child-unwatched", "file-unresolved", "hook-error")
+PROBLEM_KINDS = ("child-unwatched", "file-unresolved", "file-too-large", "hook-error")
 
 
 # =============================================================== the hook core
@@ -111,8 +121,12 @@ class HookCore:
         "shutil.rmtree",
         "subprocess.Popen",
         "os.posix_spawn",
+        "os.fork",
+        "os.forkpty",
     )
-    MAX_READ = 4 * 1024 * 1024
+    PROFILED = ("file.truncate",)
+    CHUNK = 1024 * 1024
+    MAX_READ = 64 * 1024 * 1024  # past this the run fails (`file-too-large`); never a silent cut
     PYTHON_NAME = re.compile(r"^python(\d+(\.\d+)*)?$")
     VALUE_OPTIONS = re.compile(r"[cmWX]")
 
@@ -190,7 +204,9 @@ class HookCore:
                 return root, os.path.relpath(path, root)
         return None
 
-    def _read(self, path):
+    def _read(self, path, rel):
+        """The whole file, read in bounded chunks and joined, so a value that straddles a chunk
+        boundary is still contiguous. A file past MAX_READ is a failure, not a short read."""
         try:
             if not stat.S_ISREG(os.lstat(path).st_mode):
                 return None
@@ -199,14 +215,17 @@ class HookCore:
             return None
         chunks, size = [], 0
         try:
-            while size < self.MAX_READ:
-                chunk = os.read(fd, 65536)
+            while True:
+                chunk = os.read(fd, self.CHUNK)
                 if not chunk:
                     break
                 chunks.append(chunk)
                 size += len(chunk)
+                if size > self.MAX_READ:
+                    self._emit("file-too-large", rel)
+                    break
         except OSError:
-            pass
+            self._emit("hook-error", "read:" + os.path.basename(path))
         finally:
             os.close(fd)
         return b"".join(chunks)
@@ -221,11 +240,11 @@ class HookCore:
             for dirpath, _dirs, files in os.walk(path):
                 for name in files:
                     full = os.path.join(dirpath, name)
-                    data = self._read(full)
+                    data = self._read(full, os.path.relpath(full, root))
                     if data is not None:
                         self._emit("file-lost", os.path.relpath(full, root), data)
             return
-        data = self._read(path)
+        data = self._read(path, rel)
         if data is not None:
             self._emit("file-lost", rel, data)
 
@@ -279,6 +298,55 @@ class HookCore:
     def on_os_posix_spawn(self, path, argv=None, env=None):
         self._emit("seen", "os.posix_spawn")
         self._child(path, list(argv or []), env)
+
+    def on_os_fork(self):
+        # A forked child inherits this hook but appends to its own copy of the records, which
+        # die with it. Fail closed in the parent, where the record survives.
+        self._emit("seen", "os.fork")
+        self._emit("child-unwatched", "os.fork")
+
+    def on_os_forkpty(self):
+        self._emit("seen", "os.forkpty")
+        self._emit("child-unwatched", "os.forkpty")
+
+    # ---------------------------------------------------------------- profile hook
+
+    def install_profile(self):
+        sys.setprofile(self.profile)
+        threading.setprofile(self.profile)  # threads started from now on
+
+    def profile(self, frame, event, arg):
+        """`file.truncate()` raises no audit event: read the file at the C call, before it runs."""
+        if event != "c_call" or getattr(arg, "__name__", "") != "truncate":
+            return
+        target = getattr(arg, "__self__", None)
+        if target is None or isinstance(target, type(sys)):  # os.truncate has its own audit event
+            return
+        if getattr(self._tls, "busy", False) or not self._active():
+            return
+        self._tls.busy = True
+        try:
+            try:
+                fd = target.fileno()
+            except (OSError, ValueError, AttributeError):
+                return  # not backed by a descriptor (BytesIO, StringIO): nothing on disk to lose
+            try:
+                target.flush()  # bytes still in Python's buffer reach the file, as truncate will do
+            except (OSError, ValueError):
+                pass
+            path = self._fd_path(fd)
+            if path is None:
+                self._emit("file-unresolved", f"fd{fd}")
+                return
+            located = self._locate(path)
+            if located is None:
+                return
+            self._emit("seen", "file.truncate " + located[1])
+            self._lose(path)
+        except Exception as exc:
+            self._emit("hook-error", "file.truncate:" + type(exc).__name__)
+        finally:
+            self._tls.busy = False
 
     # ---------------------------------------------------------------- children
 
@@ -372,6 +440,7 @@ def _growin_install():
         track_seen=False,
     )
     sys.addaudithook(core)
+    core.install_profile()
 
 
 _growin_install()
@@ -434,6 +503,7 @@ class FileRecorder:
         self.records: list[Record] = []
         self._on = False
         self._saved_env: dict[str, str | None] = {}
+        self._saved_profile: tuple = (None, None)
         self.core = HookCore(
             roots=self.roots,
             ignored=[self.capture],
@@ -471,6 +541,8 @@ class FileRecorder:
         if not _Slot.installed:
             sys.addaudithook(_dispatch)  # a process-wide hook cannot be removed; it stays inert
             _Slot.installed = True
+        self._saved_profile = (sys.getprofile(), threading.getprofile())
+        self.core.install_profile()
         self._on = True
         _Slot.recorder = self
         return self
@@ -478,6 +550,8 @@ class FileRecorder:
     def __exit__(self, *exc: object) -> None:
         _Slot.recorder = None
         self._on = False
+        sys.setprofile(self._saved_profile[0])
+        threading.setprofile(self._saved_profile[1])
         for key, value in self._saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -608,6 +682,23 @@ def canary_allowed(surface: str, name: str) -> bool:
     if name == "app_key":
         return surface == "opener-arg"
     return False
+
+
+RELAY_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{43}")  # secrets.token_urlsafe(32)
+
+
+def scrub_arm_response(data: dict, canary: "Canary") -> dict:
+    """Strip only the designed content from an arm response, and leave the rest to be scanned.
+
+    login_url may hold the AppKey, URL-quoted, and nothing else secret: only that exact form is
+    removed. relay_token is the token and nothing more: a field that is not exactly a token-shaped
+    value is left whole, so it is reported (its content is a leak by definition).
+    """
+    out = dict(data)
+    out["login_url"] = out["login_url"].replace(quote_plus(canary.app_key), "<designed: app key>")
+    if RELAY_TOKEN_SHAPE.fullmatch(out["relay_token"]):
+        out["relay_token"] = "<designed: relay token>"
+    return out
 
 
 @dataclass
@@ -953,9 +1044,8 @@ class World:
             self.canary.relay_tokens.append(data["relay_token"])
             assert data["relay_token"] not in data["login_url"]
             assert quote_plus(self.canary.app_key) in data["login_url"]
-            # The two designed places (login_url holds the AppKey, relay_token the token) are blanked.
-            data["login_url"], data["relay_token"] = "<designed place>", "<designed place>"
-            body = json.dumps(data).encode()
+            # Only the AppKey inside login_url and the token itself are stripped (see scrub_arm_response).
+            body = json.dumps(scrub_arm_response(data, self.canary)).encode()
         head = "\n".join(f"{key}: {value}" for key, value in response.headers.items())
         self.add(
             f"resp@{self.current}",
@@ -1505,6 +1595,204 @@ def test_a_watched_python_child_is_not_a_problem(tmp_path, tmp_path_factory):
     assert recorder.problems() == []
 
 
+
+# ------------------------------------------ r1 review rows: truncate, size, fork, arm fields
+
+# (mode, open kwargs, flush before truncate). `file.truncate()` fires no audit event on 3.11.
+TRUNCATE_SHAPES = {
+    "text-flushed": ("w", {}, True),
+    "text-unflushed": ("w", {}, False),
+    "buffered-binary": ("wb", {}, True),
+    "raw-unbuffered": ("wb", {"buffering": 0}, False),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(TRUNCATE_SHAPES))
+def test_control_h_a_value_written_truncated_and_unlinked_in_one_stage_is_found(make_world, shape):
+    mode, kwargs, flush = TRUNCATE_SHAPES[shape]
+    world = make_world()
+    target = world.home / "scratch" / "trunc.txt"
+
+    def plant(w: World) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        token = w.canary.relay_tokens[-1]
+        with open(target, mode, **kwargs) as handle:
+            handle.write(token if "b" not in mode else token.encode())
+            if flush:
+                handle.flush()
+            handle.truncate(0)  # no audit event; the file is empty from here
+        target.unlink()
+
+    world.plants["health"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == []
+    assert ("file-lost:home/scratch/trunc.txt@health", "relay_token") in report.leaks
+    assert "file.truncate" in world.recorder.seen_events()
+    # The stage snapshots cannot see it: the file is empty at the boundary, then gone.
+    assert report.leaks_where(lambda name: name.startswith("file:")) == []
+    assert not target.exists()
+
+
+CHILD_TRUNCATES_AND_DELETES = (
+    "import pathlib, sys\n"
+    "p = pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True, exist_ok=True)\n"
+    "with open(p, 'w') as handle:\n"
+    "    handle.write(sys.argv[2]); handle.truncate(0)\n"
+    "p.unlink()\n"
+)
+
+
+def test_control_h_a_python_child_that_truncates_and_deletes_is_found(make_world):
+    world = make_world()
+    target = world.home / "py-trunc.txt"
+
+    def plant(w: World) -> None:
+        python_child(CHILD_TRUNCATES_AND_DELETES, str(target), w.canary.relay_tokens[-1])
+
+    world.plants["orders-key"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == []
+    assert ("file-lost:home/py-trunc.txt@orders-key (child)", "relay_token") in report.leaks
+
+
+def test_a_file_object_with_no_descriptor_is_not_an_error(tmp_path, tmp_path_factory):
+    recorder = FileRecorder([tmp_path], tmp_path_factory.mktemp("capture"), tmp_path / "child-hook")
+    with recorder:
+        recorder.set_stage("memory")
+        buffer = io.BytesIO(b"canary-in-memory")
+        buffer.truncate(0)
+        text = io.StringIO("canary-in-memory")
+        text.truncate(0)
+    recorder.finish()
+    assert recorder.problems() == [] and recorder.lost_surfaces() == {}
+
+
+@pytest.mark.parametrize("padding", [4 * HookCore.CHUNK - 5, 5 * HookCore.CHUNK + 3])
+def test_control_j_a_value_past_the_old_4_mib_cut_is_still_found(make_world, padding):
+    world = make_world()
+    target = world.home / "scratch" / "big.bin"
+
+    def plant(w: World) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # With the smaller padding the value straddles both the old 4 MiB limit and a chunk boundary.
+        target.write_bytes(b"A" * padding + w.canary.api_session.encode() + b"B" * 64)
+        target.unlink()
+
+    world.plants["budget"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == []
+    assert ("file-lost:home/scratch/big.bin@budget", "api_session") in report.leaks
+
+
+def test_a_file_past_the_read_limit_fails_the_run_instead_of_being_cut_off(make_world, monkeypatch):
+    monkeypatch.setattr(HookCore, "MAX_READ", 1024 * 1024)
+    world = make_world()
+    target = world.home / "scratch" / "huge.bin"
+
+    def plant(w: World) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"A" * (2 * 1024 * 1024) + w.canary.api_session.encode())
+        target.unlink()
+
+    world.plants["budget"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == ["file-too-large:home/scratch/huge.bin@budget"]
+    with pytest.raises(AssertionError, match="file-too-large"):
+        report.assert_clean()
+
+
+@pytest.mark.parametrize("call", ["fork", "forkpty"])
+def test_control_k_a_forked_child_fails_the_run(make_world, call):
+    world = make_world()
+    target = world.home / "forked.txt"
+
+    def plant(w: World) -> None:
+        try:
+            result = os.fork() if call == "fork" else os.forkpty()
+        except OSError:
+            return  # the audit event fires before the call, which is what is under test
+        pid = result if call == "fork" else result[0]
+        if pid == 0:  # the child writes and deletes; its records die with it
+            try:
+                target.write_text(w.canary.relay_tokens[-1], encoding="utf-8")
+                target.unlink()
+            finally:
+                os._exit(0)
+        os.waitpid(pid, 0)
+        if call == "forkpty":
+            os.close(result[1])
+
+    world.plants["orders-key"] = [plant]
+    report = executed(world, run_flow_a)
+    assert report.problems == [f"child-unwatched:os.{call}@orders-key"]
+    assert not any("forked.txt" in name for name in report.surfaces)  # the child's loss never arrived
+    with pytest.raises(AssertionError, match="child-unwatched"):
+        report.assert_clean()
+
+
+def test_scrub_arm_response_strips_only_the_designed_values():
+    canary = Canary.new()
+    token = secrets.token_urlsafe(32)
+    login_url = "https://login.example/?api_key=" + quote_plus(canary.app_key)
+    clean = scrub_arm_response({"login_url": login_url, "relay_token": token, "attempt_id": "a"}, canary)
+    assert quote_plus(canary.app_key) not in clean["login_url"] and token not in clean["relay_token"]
+    assert clean["login_url"].startswith("https://login.example/?api_key=")
+    dirty = scrub_arm_response(
+        {"login_url": f"{login_url}&x={canary.api_session}", "relay_token": token + canary.secret_key}, canary
+    )
+    assert canary.api_session in dirty["login_url"] and canary.secret_key in dirty["relay_token"]
+
+
+@pytest.mark.parametrize(
+    "field, leaked",
+    [("login_url", "api_session"), ("login_url", "secret_key"), ("relay_token", "api_session")],
+)
+def test_control_l_a_secret_added_to_an_arm_response_field_is_still_found(make_world, field, leaked):
+    world = make_world()
+    real_arm = SessionManager.arm
+
+    def planted(self, presented):
+        attempt_id, url, token, expires = real_arm(self, presented)
+        extra = getattr(world.canary, leaked)
+        if field == "login_url":
+            url = f"{url}&x={extra}"
+        else:
+            token = token + extra
+        return attempt_id, url, token, expires
+
+    def flow(w: World) -> None:
+        relay = w.new_client()
+        with w.stage("arm"):
+            try:
+                relay.login_arm()
+            except RelayError as err:  # the client refuses a malformed token; the response was captured already
+                w.record_exc(err)
+
+    with patch.object(SessionManager, "arm", planted):
+        report = executed(world, flow)
+    assert ("resp@arm", leaked) in report.leaks
+    assert ("resp@arm", "app_key") not in report.leaks  # the designed AppKey is still allowed there
+
+
+def test_temp_files_at_boundaries_reports_a_token_temp_file_left_behind():
+    leftover = "file:home/.config/growin/.relay-session.json.1.deadbeef.tmp@x"
+    report = Report(
+        {
+            leftover: b"",
+            "file:home/.config/growin/relay-session.json@x": b"",  # the token file itself is not a temp file
+            "file-lost:home/.config/growin/.relay-session.json.1.deadbeef.tmp@x": b"",  # a replaced temp: fine
+            "file:home/.config/growin/other.tmp@x": b"",
+        },
+        {},
+        [],
+        [],
+    )
+    assert report.temp_files_at_boundaries() == [leftover]
+    with pytest.raises(AssertionError, match="temp file"):
+        report.assert_clean()
+    assert Report({"file:home/.config/growin/relay-session.json@x": b""}, {}, [], []).temp_files_at_boundaries() == []
+
+
 # -------------------------------------------------------- the recorder self-test
 
 
@@ -1540,6 +1828,9 @@ def test_control_e_the_recorder_sees_every_handled_event_on_this_interpreter(tmp
             os.ftruncate(fd, 0)
         finally:
             os.close(fd)
+        with open(work / "ftrunc", "w", encoding="utf-8") as handle:
+            handle.write(f"PAY-filetruncate-{suffix}")
+            handle.truncate(0)  # no audit event: the profile hook
         (work / "emptydir").mkdir()
         os.rmdir(work / "emptydir")
         (work / "tree").mkdir()
@@ -1547,6 +1838,19 @@ def test_control_e_the_recorder_sees_every_handled_event_on_this_interpreter(tmp
         shutil.rmtree(work / "tree")
         subprocess.run(["/bin/sh", "-c", "true"], check=True)
         os.waitpid(os.posix_spawn("/bin/sh", ["sh", "-c", "true"], os.environ), 0)
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        os.waitpid(pid, 0)
+        try:
+            pid, master = os.forkpty()
+        except OSError:
+            pass  # no pty here; the audit event fires before the call
+        else:
+            if pid == 0:
+                os._exit(0)
+            os.waitpid(pid, 0)
+            os.close(master)
 
     with recorder:
         recorder.set_stage("selftest")
@@ -1557,7 +1861,8 @@ def test_control_e_the_recorder_sees_every_handled_event_on_this_interpreter(tmp
     assert _Slot.recorder is None
     recorder.finish()
 
-    assert recorder.seen_events() >= set(HookCore.HANDLED), set(HookCore.HANDLED) - recorder.seen_events()
+    expected = set(HookCore.HANDLED) | set(HookCore.PROFILED)
+    assert recorder.seen_events() >= expected, expected - recorder.seen_events()
     lost = b"".join(recorder.lost_surfaces().values())
     for needle in (
         b"PAY-open-on",
@@ -1568,11 +1873,13 @@ def test_control_e_the_recorder_sees_every_handled_event_on_this_interpreter(tmp
         b"PAY-rename-dst-on",
         b"PAY-truncate-on",
         b"PAY-ftruncate-on",
+        b"PAY-filetruncate-on",
         b"PAY-rmtree-on",
     ):
         assert needle in lost, needle
     assert b"-off" not in lost
-    assert recorder.problems() == []
+    # Forking is the one thing the self-test does that fails a run, by design.
+    assert recorder.problems() == ["child-unwatched:os.fork@selftest", "child-unwatched:os.forkpty@selftest"]
     assert recorder.native_children() == ["sh", "sh"]
     assert sys.version_info[:2] >= (3, 11)
 
