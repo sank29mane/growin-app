@@ -67,7 +67,7 @@ from .reads import (
     ReadContext,
     ReadFailed,
 )
-from .sessions import load_holidays
+from .sessions import load_holidays, load_special_sessions
 from .store import AUDIT_FILE, StateStore
 from .verify import KeyConfigError, load_order_key
 
@@ -95,6 +95,7 @@ class OrderSettings:
     kill_base_url: str = DEFAULT_BASE_URL
     tick_table: TickTable | None = None
     holidays: frozenset[date] | None = None  # None: the packaged table (data/nse_trading_holidays.json)
+    special_sessions: frozenset[date] | None = None  # None: the packaged table's special_sessions
 
 
 class OrderFailure:
@@ -182,6 +183,9 @@ def build_order_service(
         audit = AuditLog(Path(state_dir) / AUDIT_FILE, clock=clock.now_utc, anchor=store)
         store.load_or_init(limits, audit_has_entries=audit.has_entries())
         holidays = load_holidays() if settings.holidays is None else frozenset(settings.holidays)
+        special_sessions = (
+            load_special_sessions() if settings.special_sessions is None else frozenset(settings.special_sessions)
+        )
     except (LimitsError, KeyConfigError):
         events.emit("config_alarm", result="error", reason="config_invalid")
         return OrderService(context=context, unavailable=refusal("config_invalid"))
@@ -217,6 +221,7 @@ def build_order_service(
         audit=audit,
         tick_table=settings.tick_table,
         holidays=holidays,
+        special_sessions=special_sessions,
         marks=BarsMarks(
             bars=bars,
             market=market,

@@ -54,7 +54,7 @@ from .risk import (
     evaluate_session,
     net_quantities,
 )
-from .sessions import expected_sessions, load_holidays
+from .sessions import expected_sessions, load_holidays, load_special_sessions
 from .store import StateStore
 from .verify import PinnedKey
 
@@ -592,6 +592,7 @@ class RuleGuard:
         tick_table: TickTable | None = None,
         marks: MarksPort | None = None,
         holidays: frozenset[date] | None = None,
+        special_sessions: frozenset[date] | None = None,
     ) -> None:
         if getattr(audit, "anchor", None) is not store:
             # An unanchored log cannot see its own deletion or truncation.
@@ -606,6 +607,9 @@ class RuleGuard:
         self._tick_table = tick_table
         self._marks = marks
         self._holidays = load_holidays() if holidays is None else frozenset(holidays)
+        self._special_sessions = (
+            load_special_sessions() if special_sessions is None else frozenset(special_sessions)
+        )
 
     def _state(self):
         return self._store.load_or_init(
@@ -701,7 +705,7 @@ class RuleGuard:
                 # The required sessions do not come from what the bars happened to
                 # return: an empty or truncated history must not look complete. A held
                 # ISIN with no close for a required session raises MarkMissing below.
-                calendar = expected_sessions(first, yesterday, self._holidays)
+                calendar = expected_sessions(first, yesterday, self._holidays, self._special_sessions)
             for session in calendar:
                 due = [t for t in snapshot.trades if (day := trade_day(t)) is not None and day <= session]
                 changed = apply_trades(state, due) or changed

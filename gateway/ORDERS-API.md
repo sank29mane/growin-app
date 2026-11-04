@@ -180,11 +180,14 @@ as `quote_unavailable`; progress up to the last good session stays saved. Evalua
 audit entries in 63-05.
 
 The sessions that must be covered do not come from the bars. They are every weekday from the first unevaluated day
-to yesterday IST, less the dated exchange holidays in `orders/data/nse_trading_holidays.json` (loaded at start,
-malformed means `config_invalid`). So no bars, bars that stop early, or a missing weekday all stop the replay at the
+to yesterday IST, less the dated exchange holidays and plus the dated special sessions (for example the Sunday
+2026-11-08 Muhurat session) in `orders/data/nse_trading_holidays.json` (loaded at start, malformed means
+`config_invalid`). So no bars, bars that stop early, or a missing weekday all stop the replay at the
 last complete session (`quote_unavailable`; there is no separate wire code, so the Mac mapping is unchanged). The
-shipped holiday table is **unpopulated**: until the operator fills it from the NSE trading-holiday circular, a real
-holiday inside the range refuses orders instead of being skipped. That is the fail-closed direction.
+shipped table covers calendar year 2026 only: an unlisted weekday holiday (including every 2027 one) makes the VM
+expect a close that never comes, so orders are refused instead of skipped. A listed special session is required too:
+if Breeze never serves its close, orders stay refused after it until the operator removes the entry. That is the
+fail-closed direction.
 
 ## Mac admission codes (63-04)
 

@@ -661,17 +661,43 @@ def test_the_same_gap_is_complete_when_the_holiday_table_lists_the_day(tmp_path,
 
 
 def test_expected_sessions_are_the_weekdays_less_the_listed_holidays():
-    days = sessions.expected_sessions(date(2026, 10, 9), date(2026, 10, 14), {date(2026, 10, 13)})
+    days = sessions.expected_sessions(date(2026, 10, 9), date(2026, 10, 14), {date(2026, 10, 13)}, ())
     assert days == [date(2026, 10, 9), date(2026, 10, 12), date(2026, 10, 14)]  # no 10 and 11 Oct, no 13 Oct
-    assert sessions.expected_sessions(date(2026, 10, 10), date(2026, 10, 11), ()) == []
-    assert sessions.expected_sessions(date(2026, 10, 14), date(2026, 10, 9), ()) == []
+    assert sessions.expected_sessions(date(2026, 10, 10), date(2026, 10, 11), (), ()) == []
+    assert sessions.expected_sessions(date(2026, 10, 14), date(2026, 10, 9), (), ()) == []
     with pytest.raises(TypeError):
-        sessions.expected_sessions(datetime(2026, 10, 9), date(2026, 10, 14), ())
+        sessions.expected_sessions(datetime(2026, 10, 9), date(2026, 10, 14), (), ())
 
 
-def test_the_packaged_holiday_table_loads_and_is_marked_unpopulated():
-    assert sessions.load_holidays() == frozenset()
-    assert "UNPOPULATED" in sessions.HOLIDAY_TABLE_PATH.read_text(encoding="utf-8")
+# NSE Equities trading holidays 2026, weekdays only (nseindia.com holiday page, operator-checked 2026-11-05).
+NSE_WEEKDAY_HOLIDAYS_2026 = frozenset(
+    date.fromisoformat(day)
+    for day in (
+        "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31", "2026-04-03",
+        "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02",
+        "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
+    )
+)
+
+
+def test_the_packaged_holiday_table_lists_exactly_the_2026_nse_weekday_holidays():
+    assert sessions.load_holidays() == NSE_WEEKDAY_HOLIDAYS_2026
+    assert sessions.load_special_sessions() == frozenset({date(2026, 11, 8)})  # the Sunday Muhurat session
+    assert sessions.load_calendar() == (NSE_WEEKDAY_HOLIDAYS_2026, frozenset({date(2026, 11, 8)}))
+    assert "UNPOPULATED" not in sessions.HOLIDAY_TABLE_PATH.read_text(encoding="utf-8")
+
+
+def test_the_packaged_table_skips_diwali_balipratipada_when_counting_sessions():
+    days = sessions.expected_sessions(date(2026, 11, 9), date(2026, 11, 11), *sessions.load_calendar())
+    assert days == [date(2026, 11, 9), date(2026, 11, 11)]
+
+
+SCHEMA = sessions.HOLIDAY_SCHEMA
+assert SCHEMA.endswith("/2")
+
+
+def _table(holidays: str = "[]", special: str = "[]") -> str:
+    return f'{{"schema":"{SCHEMA}","holidays":{holidays},"special_sessions":{special}}}'
 
 
 @pytest.mark.parametrize(
@@ -679,23 +705,135 @@ def test_the_packaged_holiday_table_loads_and_is_marked_unpopulated():
     [
         "",
         "[]",
-        '{"schema":"other","holidays":[]}',
-        '{"schema":"growin.gateway.nse_trading_holidays/1"}',
-        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":"2026-10-02"}',
-        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":["2026-13-40"]}',
-        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":["2026-10-03"]}',  # a Saturday
-        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":["2026-10-02","2026-10-02"]}',
-        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":[20261002]}',
-        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":[],"holidays":[]}',
+        '{"schema":"other","holidays":[],"special_sessions":[]}',
+        '{"schema":"growin.gateway.nse_trading_holidays/1","holidays":[],"special_sessions":[]}',  # the old shape
+        f'{{"schema":"{SCHEMA}"}}',
+        f'{{"schema":"{SCHEMA}","holidays":[]}}',  # no special_sessions key
+        f'{{"schema":"{SCHEMA}","special_sessions":[]}}',  # no holidays key
+        _table('"2026-10-02"'),
+        _table('["2026-13-40"]'),
+        _table('["2026-10-03"]'),  # a Saturday
+        _table('["2026-10-02","2026-10-02"]'),
+        _table("[20261002]"),
+        f'{{"schema":"{SCHEMA}","holidays":[],"holidays":[],"special_sessions":[]}}',
+        # special_sessions
+        _table(special='"2026-11-08"'),  # not a list
+        _table(special="null"),
+        _table(special='{"2026-11-08":true}'),
+        _table(special='["2026-13-40"]'),  # malformed date
+        _table(special='["2026-11-8"]'),  # not ISO
+        _table(special='["20261108"]'),
+        _table(special="[20261108]"),
+        _table(special='["2026-11-08","2026-11-08"]'),  # duplicate
+        _table('["2026-10-02"]', '["2026-10-02"]'),  # both a holiday and a special session
+        f'{{"schema":"{SCHEMA}","holidays":[],"special_sessions":[],"special_sessions":[]}}',
     ],
 )
 def test_a_malformed_holiday_table_is_refused(tmp_path, text):
     path = tmp_path / "holidays.json"
     path.write_text(text, encoding="utf-8")
-    with pytest.raises(LimitsError):
-        sessions.load_holidays(path)
-    with pytest.raises(LimitsError):
-        sessions.load_holidays(tmp_path / "missing.json")
+    for load in (sessions.load_holidays, sessions.load_special_sessions, sessions.load_calendar):
+        with pytest.raises(LimitsError):
+            load(path)
+    for load in (sessions.load_holidays, sessions.load_special_sessions, sessions.load_calendar):
+        with pytest.raises(LimitsError):
+            load(tmp_path / "missing.json")
+
+
+def test_a_well_formed_table_loads_a_weekend_special_session_and_a_weekday_holiday(tmp_path):
+    path = tmp_path / "holidays.json"
+    path.write_text(_table('["2026-11-10"]', '["2026-11-08"]'), encoding="utf-8")
+    assert sessions.load_calendar(path) == (frozenset({date(2026, 11, 10)}), frozenset({date(2026, 11, 8)}))
+
+
+def test_expected_sessions_include_a_listed_special_session_even_on_a_weekend():
+    holidays, special = frozenset({date(2026, 11, 10)}), frozenset({date(2026, 11, 8)})
+    days = sessions.expected_sessions(date(2026, 11, 6), date(2026, 11, 11), holidays, special)
+    assert days == [date(2026, 11, 6), date(2026, 11, 8), date(2026, 11, 9), date(2026, 11, 11)]
+    assert sessions.expected_sessions(date(2026, 11, 6), date(2026, 11, 11), holidays, ()) == [
+        date(2026, 11, 6), date(2026, 11, 9), date(2026, 11, 11),
+    ]
+    # A special session outside the requested range never leaks in.
+    assert sessions.expected_sessions(date(2026, 11, 9), date(2026, 11, 11), holidays, special) == [
+        date(2026, 11, 9), date(2026, 11, 11),
+    ]
+
+
+# ----------------------------------------- an exceptional (weekend) session is replayed
+
+
+def at_ist_morning(stack: OrderStack, day: date, abc_previous_close: float) -> str:
+    """Move the fake world to 10:00 IST on `day`, log in again, and date every quote that day."""
+    stack.clock.mono += 86400 * 4
+    stack.clock.now = datetime(day.year, day.month, day.day, 4, 30, tzinfo=timezone.utc)
+    for row in stack.transport.quote_book.values():
+        row["ltt"] = f"{day.day:02d}-{day.strftime('%b-%Y')} 09:59:30"
+    stack.transport.quote_book["ABC"]["previous_close"] = abc_previous_close
+    return stack.login()
+
+
+def seed_abc_flat_until(stack: OrderStack, last_flat: date, sunday: date | None, sunday_close: float = 440.0) -> None:
+    """ABC bought 20 at 500 on 6 Oct, closes flat at 500 on every weekday through `last_flat`, then the
+    exceptional Sunday close (a 12% drop from the peak) when `sunday` is given."""
+    t = stack.transport
+    t.holdings = HttpResponse(200, {}, breeze_body([holding_row(ISIN_B, 20)]))
+    t.trades = HttpResponse(200, {}, breeze_body([trade_row("ord-buy-1", "ABC", "Buy", 20, 500, "06-Oct-2026")]))
+    bars = {date(2026, 9, 30): 500.0}
+    day = date(2026, 10, 6)
+    while day <= last_flat:
+        if day.weekday() < 5:
+            bars[day] = 500.0
+        day += timedelta(days=1)
+    if sunday is not None:
+        bars[sunday] = sunday_close
+    t.bar_book["ABC"] = bars
+
+
+SUNDAY = date(2026, 10, 18)  # a stand-in for the Sunday 2026-11-08 Muhurat session in the October fixture world
+
+
+def test_a_special_sunday_session_is_evaluated_so_a_drop_on_it_latches_the_stop(tmp_path, metadata):
+    stack = OrderStack(tmp_path, metadata, special_sessions=frozenset({SUNDAY}))
+    stack.clock.now = datetime(2026, 10, 16, 4, 30, tzinfo=timezone.utc)  # Friday 10:00 IST
+    token = stack.login()
+    seed_abc_flat_until(stack, date(2026, 10, 16), SUNDAY)
+    at = at_ist_morning(stack, date(2026, 10, 16), 500.0)
+    assert stack.mint(at).status_code == 200  # Friday: evaluated through Thursday, nothing wrong
+    assert stack.state(at)["last_evaluated_session"] == "2026-10-15" and stack.state(at)["latches"] == []
+    # Monday: the Sunday close is 12% under the peak. Without the special session the replay would stop at
+    # Friday, mint 200 and latch nothing (Sol's 2026-11-08 repro).
+    monday = at_ist_morning(stack, date(2026, 10, 19), 440.0)
+    assert code_of(stack.mint(monday, intent_id="intent-test-0002")) == (423, "ORDERS_BLOCKED", "stop_open")
+    state = stack.state(monday)
+    assert state["last_evaluated_session"] == "2026-10-18" and state["latches"] == ["stop"]
+    assert stack.transport.non_get() == [] and set(metadata.methods) <= {"GET"}
+
+
+def test_the_same_sunday_without_a_special_session_is_the_hole_the_fix_closes(tmp_path, metadata):
+    """Documents the unfixed behaviour: with no special session the replay covers Friday only."""
+    stack = OrderStack(tmp_path, metadata)  # holidays and special sessions both empty
+    stack.clock.now = datetime(2026, 10, 16, 4, 30, tzinfo=timezone.utc)
+    stack.login()
+    seed_abc_flat_until(stack, date(2026, 10, 16), SUNDAY)
+    at = at_ist_morning(stack, date(2026, 10, 16), 500.0)
+    assert stack.mint(at).status_code == 200
+    monday = at_ist_morning(stack, date(2026, 10, 19), 500.0)  # the quote still shows Friday's close
+    assert stack.mint(monday, intent_id="intent-test-0002").status_code == 200
+    state = stack.state(monday)
+    assert state["last_evaluated_session"] == "2026-10-16" and state["latches"] == []
+
+
+def test_a_special_session_with_no_close_is_a_gap_and_stops_the_replay_before_it(tmp_path, metadata):
+    stack = OrderStack(tmp_path, metadata, special_sessions=frozenset({SUNDAY}))
+    stack.clock.now = datetime(2026, 10, 19, 4, 30, tzinfo=timezone.utc)
+    stack.login()
+    seed_abc_flat_until(stack, date(2026, 10, 16), None)  # Breeze has no Sunday bar
+    monday = at_ist_morning(stack, date(2026, 10, 19), 500.0)
+    assert code_of(stack.mint(monday)) == (503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    assert stack.state(monday)["last_evaluated_session"] == "2026-10-16"
+    # Still refused on the next try: the gap does not heal by itself (operator removes the entry).
+    assert code_of(stack.mint(monday, intent_id="intent-test-0002")) == (503, "ORDERS_UNAVAILABLE", "quote_unavailable")
+    assert stack.transport.non_get() == [] and set(metadata.methods) <= {"GET"}
 
 
 # ------------------------------------------- a known order id that grows
