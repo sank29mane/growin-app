@@ -205,13 +205,21 @@ class Spec:
         return [cls for cls in required if not self.covered(cls)]
 
     def search(
-        self, window: bytes, already: set[str] | None = None, *, start: int = 0, final: bool = True
+        self,
+        window: bytes,
+        already: set[str] | None = None,
+        *,
+        start: int = 0,
+        final: bool = True,
+        deferred: set[str] | None = None,
     ) -> set[str]:
-        """Classes found in `window`. A raw-regex class judges its alphanumeric lookarounds against the
-        real neighbours, not the window edges: `start=1` lets the byte before the first carried byte
-        serve as lookbehind context, and unless `final` a match ending on the window's last byte is
-        left to the next window, which sees the byte after it (`tail_hits` reports those)."""
+        """Classes found in `window`. Every regex class (the raw short user id, the shapes, the session
+        token run) judges its lookarounds against the real neighbours, not the window edges: `start=1`
+        lets the byte before the first carried byte serve as lookbehind context, and unless `final` a
+        match ending on the window's last byte is left to the next window, which sees the byte after
+        it. Those classes go into `deferred` (when given) for the caller to accept at end of stream."""
         found: set[str] = set()
+        pending: set[str] = set()
         done = already or set()
         for cls, forms in self.forms.items():
             if cls in done:
@@ -220,37 +228,31 @@ class Spec:
                 if form in window:
                     found.add(cls)
                     break
-        for cls, regex in self.raw_res.items():
+        end = len(window)
+        for cls, regex in (*self.raw_res.items(), *self.shape_res):
             if cls in done or cls in found:
                 continue
-            if any(final or m.end() < len(window) for m in regex.finditer(window, start)):
-                found.add(cls)
-        for cls, regex in self.shape_res:
-            if cls in done or cls in found:
-                continue
-            if regex.search(window):
-                found.add(cls)
+            for m in regex.finditer(window, start):
+                if final or m.end() < end:
+                    found.add(cls)
+                    break
+                pending.add(cls)
         if (
             self.shapes
             and self._user_bytes is not None
             and SESSION_TOKEN not in self.skip
             and SESSION_TOKEN not in done
+            and SESSION_TOKEN not in found
         ):
-            for match in _TOKEN_RUN_RE.finditer(window):
-                if _is_session_token(match.group(0), self._user_bytes):
-                    found.add(SESSION_TOKEN)
-                    break
+            for m in _TOKEN_RUN_RE.finditer(window, start):
+                if _is_session_token(m.group(0), self._user_bytes):
+                    if final or m.end() < end:
+                        found.add(SESSION_TOKEN)
+                        break
+                    pending.add(SESSION_TOKEN)
+        if deferred is not None:
+            deferred |= pending - found
         return found
-
-    def tail_hits(self, window: bytes, already: set[str] | None = None, *, start: int = 0) -> set[str]:
-        """Raw-regex classes whose only match in `window` ends on its last byte: `search` leaves those to
-        the next window, and the stream's final window must accept them (nothing follows)."""
-        done = already or set()
-        return {
-            cls
-            for cls, regex in self.raw_res.items()
-            if cls not in done and any(m.end() == len(window) for m in regex.finditer(window, start))
-        }
 
 
 # --------------------------------------------------------------------------- streaming
@@ -277,7 +279,7 @@ def scan_chunks(
     overlap = spec.overlap
     carry = b""
     trimmed = False  # True once the carry is a proper suffix: its first byte has a real left neighbour
-    deferred: set[str] = set()  # raw matches ending on the last window byte, pending the next window
+    deferred: set[str] = set()  # regex matches ending on the last window byte, pending the next window
     total = 0
     try:
         for chunk in chunks:
@@ -294,8 +296,8 @@ def scan_chunks(
             total += len(chunk)
             window = carry + chunk
             start = 1 if trimmed else 0
-            out.hits |= spec.search(window, out.hits, start=start, final=False)
-            deferred = spec.tail_hits(window, out.hits, start=start)
+            deferred = set()
+            out.hits |= spec.search(window, out.hits, start=start, final=False, deferred=deferred)
             if count_commits:
                 # a header wholly inside the carried bytes was counted with the previous window
                 out.commits += sum(1 for m in COMMIT_RE.finditer(window) if m.end() > len(carry))
@@ -303,7 +305,8 @@ def scan_chunks(
             carry = window[-overlap:]
             if out.partial:
                 break
-        out.hits |= deferred  # the stream ended on that match: nothing follows it to rule it out
+        if not out.partial:  # a cut-short stream (`max_bytes`) ends on an artificial edge: it rules nothing in
+            out.hits |= deferred  # the stream ended on that match: nothing follows it to rule it out
     finally:
         close = getattr(chunks, "close", None)
         if callable(close):
