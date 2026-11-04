@@ -741,7 +741,21 @@ def _units_of(target: Any) -> list[tuple[set[str], ast.AST, dict[str, Any]]]:
         return [(_global_names(target.__code__), tree, target.__globals__)]
     scope = vars(sys.modules[target.__module__])
     tree = ast.parse(textwrap.dedent(inspect.getsource(target)))
-    return [(_ast_names(node), node, scope) for node in _outermost_function_nodes(tree)]
+    units = [(_ast_names(node), node, scope) for node in _outermost_function_nodes(tree)]
+    return units + [unit for fn in _assigned_members(target) for unit in _units_of(fn)]
+
+
+def _assigned_members(target: type) -> list[Any]:
+    """Same-file functions bound into the class by assignment (``method = helper``): members with no def in its source."""
+    home = inspect.getsourcefile(target)
+    found = []
+    for member in vars(target).values():
+        if isinstance(member, (classmethod, staticmethod)):
+            member = member.__func__
+        if (inspect.isfunction(member) and member.__code__.co_filename == home
+                and not member.__qualname__.startswith(f"{target.__qualname__}.")):
+            found.append(member)
+    return found
 
 
 OWNER_CLASSES = (PilotDataStore, pd_models.SecurityMasterRow)
@@ -997,6 +1011,28 @@ def test_cas_procedure_fingerprint_walk_reads_the_whole_class_source(
     assert local_imports_in_fingerprinted() == []
     _fingerprint_only(monkeypatch, "test.Holder", holder)
     assert local_imports_in_fingerprinted() == [f"test.Holder: local import {planted}"]
+
+
+def _assigned_helper(self: Any) -> Any:
+    import pilot_data.core as helper
+
+    return helper.utc_now()
+
+
+class _AssignedMethodHolder:
+    method = _assigned_helper
+    as_static = staticmethod(_assigned_helper)
+
+
+def test_cas_procedure_fingerprint_walk_reads_a_same_file_function_assigned_into_a_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#627 round 1 counterexample: ``method = helper`` has no def in the class source but is still walked."""
+    assert "_assigned_helper" in _function_names(_AssignedMethodHolder)
+    _fingerprint_only(monkeypatch, "test.AssignedMethodHolder", _AssignedMethodHolder)
+    assert local_imports_in_fingerprinted() == [
+        "test.AssignedMethodHolder: local import import pilot_data.core as helper"
+    ]
 
 
 def test_cas_procedure_fingerprint_walk_reads_a_lambda_in_a_class(monkeypatch: pytest.MonkeyPatch) -> None:
