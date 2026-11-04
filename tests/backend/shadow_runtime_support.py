@@ -219,6 +219,8 @@ class Env:
 
     def factory(self, **kwargs: Any) -> Callable[[Any], Any]:
         def make(args: Any) -> Any:
+            if args.command in ("resume", "release-halt", "release-corporate-action"):  # the release runtime: no relay
+                return runtime_module.release_runtime(args, clock=self.clock)
             return runtime_module.production_runtime(
                 args, link_factory=lambda: self.link, clock=self.clock, **kwargs
             )

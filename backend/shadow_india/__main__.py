@@ -158,22 +158,31 @@ def _resume(
     return {"resumed": record["cleared_pause_seqs"], "seq": record["seq"], "skipped": skipped}
 
 
-def _ambiguous_isins(
-    args: argparse.Namespace, store: EvidenceStore, runtime_factory: Optional[Callable[[argparse.Namespace], Any]]
-) -> Optional[frozenset[str]]:
+def _ambiguous_isins(runtime: Any, store: EvidenceStore) -> Optional[frozenset[str]]:
     """The portfolio's still-ambiguous exit names, asked only when an ``ambiguous_exit_fill`` pause is open.
 
-    No wired runtime means nobody can say the fill was resolved: ``None``, and that pause stays open."""
+    A runtime that cannot say (``None``) keeps that pause open."""
 
     if not any(p.event == policy.AMBIGUOUS_EXIT_FILL for p in policy.run_state(store).open_pauses):
         return frozenset()
+    return runtime.ambiguous_exit_isins()
+
+
+def _resume_command(
+    args: argparse.Namespace,
+    runtime_factory: Optional[Callable[[argparse.Namespace], Any]],
+    forbidden_source: Optional[Callable[[argparse.Namespace], Sequence[str]]],
+) -> dict[str, Any]:
+    """``resume``: the release runtime's phase 1 preflight finishes first, then the evidence store that runtime opened is
+    the one the resume uses. A refused preflight leaves every evidence byte alone: no torn-tail archive, no clear."""
+
+    _forbidden_literals(args, forbidden_source)
+    runtime = (runtime_factory or _default_runtime)(args)
     try:
-        runtime = (runtime_factory or _default_runtime)(args)
-    except RuntimeNotWired:
-        return None
-    try:
-        runner: ShadowRunner = runtime.runner if hasattr(runtime, "runner") else runtime
-        return runner.ambiguous_exit_isins()
+        store = getattr(runtime, "evidence", None)
+        if not isinstance(store, EvidenceStore):  # a stand-in with no evidence store cannot be resumed through
+            raise ReleaseRefused("release_requires_evidence")
+        return _resume(store, args.reason, args.pause_seq, _ambiguous_isins(runtime, store))
     finally:
         _shutdown(runtime)
 
@@ -327,21 +336,21 @@ def main(
     args.forbidden_source = forbidden_source  # the runtime's own preflight reads the literals through the same seam
     runtime: Any = None
     try:
-        if args.command in ("resume", "status"):
+        if args.command == "resume":
+            _print(out, _resume_command(args, runtime_factory, forbidden_source))
+            return EXIT_OK
+        if args.command == "status":
             store = EvidenceStore.open(
                 args.root, run_id=args.run_id, session_id=session_id_for(args.session),
                 forbidden=_forbidden_literals(args, forbidden_source),
             )
-            if args.command == "status":
-                state = policy.run_state(store)
-                seq, head = store.head()
-                _print(out, {
-                    "aborted": list(state.abort_events), "ended": list(state.ended_events),
-                    "open_pauses": [{"seq": p.seq, "event": p.event, "scope": p.scope} for p in state.open_pauses],
-                    "records": seq, "head": head,
-                })
-                return EXIT_OK
-            _print(out, _resume(store, args.reason, args.pause_seq, _ambiguous_isins(args, store, runtime_factory)))
+            state = policy.run_state(store)
+            seq, head = store.head()
+            _print(out, {
+                "aborted": list(state.abort_events), "ended": list(state.ended_events),
+                "open_pauses": [{"seq": p.seq, "event": p.event, "scope": p.scope} for p in state.open_pauses],
+                "records": seq, "head": head,
+            })
             return EXIT_OK
         if args.command in RELEASE_COMMANDS:
             _print(out, _release(args, runtime_factory, latch_path_source, forbidden_source))

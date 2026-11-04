@@ -2173,9 +2173,32 @@ CLI_CANARY_ACCOUNT = "CANARY-ACCT-90210"
 CLI_FORBIDDEN = (CLI_CANARY_TOKEN, CLI_CANARY_ACCOUNT)
 
 
+class ResumeRuntime:
+    """What ``resume`` needs from the release runtime, built from the CLI args: the run's evidence store. It cannot say
+    whether an ambiguous exit fill is resolved (``None``), so that pause stays open, as with no portfolio wired."""
+
+    def __init__(self, args: Any) -> None:
+        self.evidence = EvidenceStore.open(
+            args.root, run_id=args.run_id, session_id=session_id_for(args.session), forbidden=CLI_FORBIDDEN
+        )
+
+    def ambiguous_exit_isins(self) -> None:
+        return None
+
+
+class WorldRuntime:
+    """The same for a test that has a built world: its evidence store and its runner's own ambiguous-exit answer."""
+
+    def __init__(self, world: "World") -> None:
+        self.evidence = world.evidence
+        self.ambiguous_exit_isins = world.runner.ambiguous_exit_isins
+
+
 def run_cli(argv: list[str], **kwargs: Any) -> tuple[int, dict[str, Any]]:
     out = io.StringIO()
     kwargs.setdefault("forbidden_source", lambda args: CLI_FORBIDDEN)  # the explicit seam; the default source is its own test
+    if argv[0] == "resume":  # resume finishes its runtime's preflight first; pass ``runtime_factory=None`` for the real one
+        kwargs.setdefault("runtime_factory", ResumeRuntime)
     code = cli.main(argv, out=out, **kwargs)
     lines = [line for line in out.getvalue().splitlines() if line]
     return code, (json.loads(lines[-1]) if lines else {})
@@ -2306,7 +2329,10 @@ def test_the_cli_default_source_reads_the_private_dir_and_refuses_a_canary(world
     policy.raise_event(world.evidence, "untyped_response", "relay did not answer")
     before = log_bytes(world)
     out = io.StringIO()
-    code = cli.main(cli_args(world, "resume", "--reason", f"acct {CLI_CANARY_ACCOUNT}", "--private-dir", str(private)), out=out)
+    code = cli.main(
+        cli_args(world, "resume", "--reason", f"acct {CLI_CANARY_ACCOUNT}", "--private-dir", str(private)),
+        out=out, runtime_factory=ResumeRuntime,
+    )
     assert (code, json.loads(out.getvalue())) == (1, {"refused": "canary_refused"})
     assert log_bytes(world) == before
     out = io.StringIO()
@@ -2423,7 +2449,7 @@ def test_resume_refuses_an_ambiguous_exit_fill_pause_while_the_exit_is_still_amb
         world.runner.resume("operator reviewed")
     assert swept.value.code == "drawdown_resume_requires_latch"
     code, out = run_cli(
-        cli_args(world, "resume", "--reason", "reviewed", "--pause-seq", str(seq)), runtime_factory=lambda args: world.runner
+        cli_args(world, "resume", "--reason", "reviewed", "--pause-seq", str(seq)), runtime_factory=lambda args: WorldRuntime(world)
     )
     assert code == 1 and out == {"refused": "ambiguous_exit_still_open"}
     assert len(world.evidence.records()) == before  # nothing was written
@@ -2450,12 +2476,12 @@ def test_the_default_resume_clears_the_other_pauses_and_lists_the_ambiguous_one_
     seq = ambiguous_world(world)
     policy.raise_event(world.evidence, "untyped_response", "relay did not answer")
     relay = open_seq(world, "untyped_response")
-    code, ok = run_cli(cli_args(world, "resume", "--reason", "relay reviewed"), runtime_factory=lambda args: world.runner)
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "relay reviewed"), runtime_factory=lambda args: WorldRuntime(world))
     assert code == 0 and relay in ok["resumed"] and seq not in ok["resumed"]
     assert {"seq": seq, "event": policy.AMBIGUOUS_EXIT_FILL, "why": "ambiguous_exit_still_open"} in ok["skipped"]
     assert policy.AMBIGUOUS_EXIT_FILL in open_events(world) and "untyped_response" not in open_events(world)
     flatten_aaa_by_hand(world)  # resolved: the CLI now clears it by default, the halt still stays
-    code, ok = run_cli(cli_args(world, "resume", "--reason", "flattened"), runtime_factory=lambda args: world.runner)
+    code, ok = run_cli(cli_args(world, "resume", "--reason", "flattened"), runtime_factory=lambda args: WorldRuntime(world))
     halt = open_seq(world, policy.DRAWDOWN_HALT)
     assert code == 0 and ok["resumed"] == [seq]
     assert ok["skipped"] == [{"seq": halt, "event": policy.DRAWDOWN_HALT, "why": "drawdown_resume_requires_latch"}]
@@ -2464,6 +2490,7 @@ def test_the_default_resume_clears_the_other_pauses_and_lists_the_ambiguous_one_
 
 def test_the_cli_without_a_buildable_runtime_keeps_an_ambiguous_exit_fill_pause_open(world):
     seq = ambiguous_world(world)
-    code, refused = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", str(seq)))
+    before = log_bytes(world)
+    code, refused = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", str(seq)), runtime_factory=None)
     assert (code, refused) == (1, {"refused": "runtime_config_refused:PRIVATE_DIR_MISSING"})
-    assert policy.AMBIGUOUS_EXIT_FILL in open_events(world)
+    assert policy.AMBIGUOUS_EXIT_FILL in open_events(world) and log_bytes(world) == before

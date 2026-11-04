@@ -177,7 +177,8 @@ def _preflight_seed(store: PilotDataStore, root: Path, manifest: Any, window_sta
     except PilotDataError as error:
         raise _refuse(f"seed_refused:{error.code}") from None
     rows = store.query("SELECT seed_report_sha256, dataset_sha256, window_start FROM session_store_seeds")
-    if not any(str(row[0]) == report.report_sha256 for row in rows):
+    recorded = [row for row in rows if str(row[0]) == report.report_sha256]
+    if not recorded:
         raise _refuse("seed_report_unrecorded")
     if report.dataset_sha256 != manifest.dataset_sha256 or any(
         str(row[1]) != manifest.dataset_sha256 for row in rows
@@ -185,7 +186,9 @@ def _preflight_seed(store: PilotDataStore, root: Path, manifest: Any, window_sta
         raise _refuse("seed_dataset_mismatch")
     if report.targets_sha256 != manifest.targets_sha256 or report.targets.target_sha256 != manifest.targets_sha256:
         raise _refuse("seed_targets_mismatch")
-    if not report.window_start <= window_start <= report.window_end:
+    # Equality, not a range: the seeded session store was cut at exactly this window start (the strategy's own window
+    # and the as-of cutoff on the member lists), so a config one day inside the seeded window reads a different store.
+    if report.window_start != window_start or any(row[2] != window_start for row in recorded):
         raise _refuse("window_start_not_seeded")
     return report
 
@@ -571,6 +574,7 @@ class ReleaseRuntime:
     """The portfolio alone, for ``resume``, ``release-halt`` and ``release-corporate-action``. No relay, no store writes."""
 
     portfolio: ShadowPortfolio
+    evidence: EvidenceStore
     _closers: list[Callable[[], None]] = field(default_factory=list, repr=False)
 
     def ambiguous_exit_isins(self) -> frozenset[str]:
@@ -676,7 +680,7 @@ def release_runtime(args: argparse.Namespace, *, clock: Optional[Callable[[], da
         latch = read_state(pre.latch_path)
     except StateUnreadable:
         latch = True  # an unreadable latch is the portfolio's to record (``state_corrupt``), not a missing one
-    if latch is None:
+    if latch is None and args.command != "resume":  # a resume of an ordinary pause needs no latch; the policy asks for one when it must
         raise _refuse("latch_missing")
     closers: list[Callable[[], None]] = []
     try:
@@ -691,7 +695,7 @@ def release_runtime(args: argparse.Namespace, *, clock: Optional[Callable[[], da
         for closer in reversed(closers):
             closer()
         raise
-    return ReleaseRuntime(portfolio=portfolio, _closers=closers)
+    return ReleaseRuntime(portfolio=portfolio, evidence=evidence, _closers=closers)
 
 
 __all__ = [

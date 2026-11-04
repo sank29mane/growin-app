@@ -37,7 +37,7 @@ from shadow_india.admission import simulation_init
 from shadow_india.evidence import LOG_NAME, TORN_DIR, EvidenceStore, read_records
 from shadow_india.portfolio import Instrument, PortfolioError
 from shadow_runtime_support import (
-    AS_OF, CANBK_CODE, CANBK_ISIN, CANBK_SYMBOL, FORBIDDEN, KEY_ID, RUN, SESSION, STEADY_ISIN, build_env,
+    AS_OF, CANBK_CODE, CANBK_ISIN, CANBK_SYMBOL, FORBIDDEN, KEY_ID, RUN, SESSION, STEADY_ISIN, WINDOW_START, build_env,
     build_seeded, calendar_doc, evaluated, master_zip, sha, tree_state, write_json,
 )
 from test_gateway_orders_key import swap_key
@@ -334,6 +334,26 @@ def test_the_seed_must_match_the_dataset_the_report_and_be_a_session_store(env, 
     assert spies.link == [] and spies.writable_opens == 0
 
 
+def test_the_window_start_must_equal_the_seeded_one_in_the_report_and_in_the_store_row(env, capsys, spies):
+    """The seed was cut at one window start. A config inside the seeded range, or a store row that records another
+    start, reads a different store than the plan names: equality, not a range."""
+
+    opened(env, capsys)
+    seeded_from = date.fromisoformat(env.runtime_file()["window_start"])
+    assert seeded_from == WINDOW_START
+    spies.clear()
+    for moved in (seeded_from + timedelta(days=1), seeded_from - timedelta(days=1)):  # one day inside, one day before
+        env.write_runtime(window_start=moved.isoformat())
+        assert go(env, capsys, "decide") == (EXIT_REFUSED, {"refused": "window_start_not_seeded"}), moved
+    env.write_runtime(window_start=seeded_from.isoformat())
+    store_sql(env, "UPDATE session_store_seeds SET window_start = window_start + INTERVAL 1 DAY")  # the row says another start
+    assert go(env, capsys, "decide") == (EXIT_REFUSED, {"refused": "window_start_not_seeded"})
+    # the config and the store row agree on a day inside the range, but the seed report names the earlier start
+    env.write_runtime(window_start=(seeded_from + timedelta(days=1)).isoformat())
+    assert go(env, capsys, "decide") == (EXIT_REFUSED, {"refused": "window_start_not_seeded"})
+    assert spies.link == [] and spies.writable_opens == 0
+
+
 def test_an_interrupted_evidence_tail_survives_a_refusal_that_a_writable_open_would_have_archived(env, capsys, spies):
     """The preflight is read-only: a wrong calendar pin or an unreadable seed report never gives
     ``EvidenceStore.open`` the chance to archive the torn tail."""
@@ -421,8 +441,19 @@ def test_a_restart_cannot_move_the_run_start_session(env, capsys):
     later = SESSION + timedelta(days=1)
     pre = runtime_module.preflight(decide_args(env, later), relay=False, calendar=False)
     assert pre.run_start_session == SESSION and pre.session == later
-    env.write_runtime(window_start="2025-03-04")  # a moved window is not the run's window
-    assert go(env, capsys, "decide") == (EXIT_REFUSED, {"refused": "run_start_mismatch"})
+    env.write_runtime(window_start="2025-03-04")  # a moved window is not the seeded window: refused in the seed check
+    assert go(env, capsys, "decide") == (EXIT_REFUSED, {"refused": "window_start_not_seeded"})
+
+
+def test_a_run_whose_recorded_window_is_not_the_configs_is_run_start_mismatch(env, capsys):
+    """The ``run_start`` record binds the window; the seed check refuses a moved config first, so this reads it directly."""
+
+    opened(env, capsys)
+    started, _record = runtime_module._run_start(env.root, RUN, WINDOW_START)
+    assert started == SESSION
+    with pytest.raises(runtime_module.RuntimeRefused) as moved:
+        runtime_module._run_start(env.root, RUN, WINDOW_START + timedelta(days=1))
+    assert moved.value.code == "run_start_mismatch"
 
 
 def _sim_ledger(path: Path, *, run=RUN, seed=SEED):
@@ -809,7 +840,7 @@ def test_a_registered_literal_is_refused_in_the_evidence_text(env, capsys):
         "stale_data", "a pause",
     )
     code, out = go(env, capsys, "resume", "--reason", f"a note with {FORBIDDEN[0]} inside")
-    assert code != 0 and FORBIDDEN[0] not in json.dumps(out)
+    assert (code, out) == (EXIT_REFUSED, {"refused": "canary_refused"})
     assert FORBIDDEN[0].encode() not in b"".join(p.read_bytes() for p in env.evidence_dir().rglob("*") if p.is_file())
 
 
@@ -875,24 +906,71 @@ def test_status_builds_no_runtime_and_opens_nothing_for_writing(env, capsys, mon
     assert built == [] and "records" in json.loads(capsys.readouterr().out)
 
 
-def test_resume_over_an_ambiguous_exit_pause_builds_the_release_runtime(env, capsys):
-    opened(env, capsys)
+def _two_pauses(env):
+    """An ordinary pause and an ambiguous-fill pause, raised through a store of the run."""
+
     store = EvidenceStore.open(env.root, run_id=RUN, session_id=runner_module.session_id_for(SESSION), forbidden=FORBIDDEN)
+    policy.raise_event(store, "stale_data", "a stale read")
     policy.raise_event(store, policy.AMBIGUOUS_EXIT_FILL, "unresolved fill", isin=CANBK_ISIN)
-    built = []
+    pauses = {p.event: p.seq for p in policy.run_state(store).open_pauses}
+    assert set(pauses) == {"stale_data", policy.AMBIGUOUS_EXIT_FILL}
+    return pauses
+
+
+def _built(monkeypatch):
+    built: list[str] = []
     real = runtime_module.release_runtime
 
     def spy(args, **kwargs):
         built.append(args.command)
         return real(args, **kwargs)
 
-    runtime_module.release_runtime = spy
-    try:
-        code = cli.main(env.argv("resume", "--reason", "reviewed the fill"))
-    finally:
-        runtime_module.release_runtime = real
-    capsys.readouterr()
-    assert built == ["resume"] and code in (0, EXIT_REFUSED)
+    monkeypatch.setattr(runtime_module, "release_runtime", spy)
+    return built
+
+
+def test_resume_builds_the_release_runtime_and_clears_both_pauses_once_nothing_is_held(env, capsys, monkeypatch):
+    opened(env, capsys)
+    pauses = _two_pauses(env)
+    built = _built(monkeypatch)
+    code = cli.main(env.argv("resume", "--reason", "reviewed the fill"))
+    out = json.loads(capsys.readouterr().out)
+    assert built == ["resume"] and code == 0
+    assert sorted(out["resumed"]) == sorted(pauses.values()) and out["skipped"] == []  # nothing held: the fill is not ambiguous
+
+
+def test_resume_skips_an_ambiguous_fill_the_portfolio_still_holds_and_clears_the_other_pause(env, capsys, monkeypatch):
+    opened(env, capsys)
+    pauses = _two_pauses(env)
+    monkeypatch.setattr(runtime_module.ReleaseRuntime, "ambiguous_exit_isins", lambda self: frozenset({CANBK_ISIN}))
+    code = cli.main(env.argv("resume", "--reason", "reviewed the fill"))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["resumed"] == [pauses["stale_data"]]
+    assert out["skipped"] == [
+        {"seq": pauses[policy.AMBIGUOUS_EXIT_FILL], "event": policy.AMBIGUOUS_EXIT_FILL, "why": "ambiguous_exit_still_open"}
+    ]
+    code = cli.main(env.argv("resume", "--reason", "reviewed the fill", "--pause-seq", str(pauses[policy.AMBIGUOUS_EXIT_FILL])))
+    assert (code, json.loads(capsys.readouterr().out)) == (EXIT_REFUSED, {"refused": "ambiguous_exit_still_open"})
+
+
+@pytest.mark.parametrize("pause", ["stale_data", policy.AMBIGUOUS_EXIT_FILL])
+def test_resume_with_the_runtime_config_missing_refuses_and_leaves_every_evidence_byte(env, capsys, spies, pause):
+    """The release runtime's phase 1 finishes before any writable evidence open or resume step: no clear, and no archive
+    of an interrupted tail that a writable open would have made."""
+
+    opened(env, capsys)
+    store = EvidenceStore.open(env.root, run_id=RUN, session_id=runner_module.session_id_for(SESSION), forbidden=FORBIDDEN)
+    policy.raise_event(store, pause, "a pause", **({"isin": CANBK_ISIN} if pause == policy.AMBIGUOUS_EXIT_FILL else {}))
+    log = env.evidence_dir() / LOG_NAME
+    log.write_bytes(log.read_bytes() + b'{"kind":"pa')  # an interrupted append
+    before = tree_state(env.root)
+    spies.clear()
+    (env.private / "india" / "shadow_runtime.json").unlink()
+    code, out = go(env, capsys, "resume", "--reason", "reviewed")
+    assert (code, out) == (EXIT_REFUSED, {"refused": "runtime_config_refused:SHADOW_RUNTIME_MISSING"})
+    assert tree_state(env.root) == before and not (env.evidence_dir() / TORN_DIR).exists()
+    assert spies.evidence == [] and spies.ledgers == [] and spies.link == []
+    assert log.read_bytes().endswith(b'{"kind":"pa')
 
 
 # --- the canary: nothing from the runtime config leaves through output, exceptions or evidence ----------------------------
