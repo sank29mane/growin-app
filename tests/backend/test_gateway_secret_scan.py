@@ -891,6 +891,11 @@ def _session_code_cases() -> dict[str, tuple[str, str]]:
         "url encoded equals lower": (f"GET /x?apisession%3d{plain} 200", plain),
         "api_session underscore": (f"api_session={mixed}&x=1", mixed),
         "double quoted json": (f'{{"apisession": "{plain}"}}', plain),
+        "encoded single quotes": (f"apiSession%3D%27{mixed}%27", mixed),
+        "encoded double quotes": (f"apisession%3D%22{plain}%22", plain),
+        "encoded quotes lower": (f"api_session%3d%27{mixed}%27&x=1", mixed),
+        "escaped json": ("{\\\"apisession\\\": \\\"" + mixed + "\\\"}", mixed),
+        "escaped json single": ("{\\'apisession\\': \\'" + plain + "\\'}", plain),
     }
 
 
@@ -1006,30 +1011,151 @@ def test_item3_a_missing_etc_is_incomplete(tmp_path, fakes, capsys):
 
 
 def test_item4_a_value_under_the_floor_is_never_covered():
-    short = "AB" + _digits(5)  # seven characters: the raw form falls under the 8-character floor
+    short = "AB" + _digits(2)  # four characters: below the user-id raw floor of 5
     spec = scan.Spec({scan.USER_ID: short}, shapes=True)
     assert spec.uncovered([scan.USER_ID]) == [scan.USER_ID]
     assert scan.expand_forms(short) != []  # its base64 form is still searched, but that is not coverage
     assert scan.Spec({scan.USER_ID: "AB" + _digits(6)}).uncovered([scan.USER_ID]) == []
+    assert scan.Spec({scan.APP_KEY: "k" + _digits(6)}).uncovered([scan.APP_KEY]) == [scan.APP_KEY]  # floor 8 elsewhere
 
 
-def test_item4_a_short_user_id_is_incomplete_on_the_mac_and_on_the_vm(tmp_path, fakes, capsys):
-    fakes.user_id = "AB" + _digits(5)
+def test_item4_a_user_id_under_five_is_incomplete_on_the_mac_and_on_the_vm_with_a_note(tmp_path, fakes, capsys):
+    fakes.user_id = "AB" + _digits(2)
     (tmp_path / "m").mkdir()
     env = _mac_env(tmp_path / "m", fakes)
-    (env["repo_root"] / "plain.txt").write_text(f"user={fakes.user_id}\n")  # the raw form passes unseen
     code, out = run_scan(capsys, ["mac"], **env)
     assert code == 2 and "uncovered=user_id" in out and out.splitlines()[-1] == "RESULT INCOMPLETE"
+    assert "uncovered: user_id (value under 5 characters)" in out.splitlines()
     (tmp_path / "v").mkdir()
     code, out = run_scan(capsys, ["vm"], **_vm_env(tmp_path / "v", fakes))
-    assert code == 2 and "uncovered=user_id" in out
+    assert code == 2 and "uncovered=user_id" in out and "uncovered: user_id (value under 5 characters)" in out.splitlines()
 
 
-def test_item4_a_short_session_code_says_why_it_is_uncovered(tmp_path, fakes, capsys):
+def test_item4_a_short_session_code_is_noted_and_does_not_block_a_pass(tmp_path, fakes, capsys):
     fakes.session_code = _digits(7)
-    code, out = run_scan(capsys, ["mac"], **_mac_env(tmp_path, fakes))
+    env = _mac_env(tmp_path, fakes)
+    (env["home"] / ".zsh_history").write_text("ls\n")
+    code, out = run_scan(capsys, ["mac"], **env)
+    assert code == 0 and out.splitlines()[-1] == "RESULT PASS"
     assert "uncovered: session_code (value under 8 characters)" in out.splitlines()
-    assert code == 2
+    assert "FAIL shell-history" not in out and "PASS shell-history files=1" in out
+
+
+def test_item4_a_session_code_in_a_log_still_fails_when_the_code_is_short(tmp_path, fakes, capsys):
+    fakes.session_code = _digits(7)
+    env = _mac_env(tmp_path, fakes)
+    (env["home"] / ".zsh_history").write_text(f"curl x?apisession={fakes.session_code}\n")
+    code, out = run_scan(capsys, ["mac"], **env)
+    assert code == 1 and "  hit ~/.zsh_history session_code" in out
+
+
+# --- round 2 item 1: a short user id is searched as itself
+
+
+def test_r2_a_planted_short_user_id_fails_with_alphanumeric_boundaries(tmp_path, fakes):
+    for length in (5, 6, 7):
+        short = "Ab" + _digits(length - 2)
+        spec = scan.Spec({scan.USER_ID: short})
+        root = tmp_path / f"t{length}"
+        root.mkdir()
+        (root / "hit.txt").write_text(f"user={short} ok\n")
+        (root / "lower.txt").write_text(f"user={short.lower()}.\n")
+        (root / "wrapped.txt").write_text(f"X{short}Y and 1{short} and {short}9\n")
+        (root / "clean.txt").write_text("nothing here\n")
+        report = scan.scan_tree(root, spec, label="t")
+        assert set(report.hits) == {"hit.txt", "lower.txt"}, (length, report.hits)
+        assert report.status == "FAIL"
+        assert spec.covered(scan.USER_ID)
+
+
+def test_r2_a_clean_tree_with_a_short_user_id_is_pass_and_the_mac_run_passes(tmp_path, fakes, capsys):
+    fakes.user_id = "Ab" + _digits(5)
+    code, out = run_scan(capsys, ["mac"], **_mac_env(tmp_path, fakes))
+    assert code == 0 and out.splitlines()[-1] == "RESULT PASS" and "uncovered: user_id" not in out
+
+
+def test_r2_a_planted_short_user_id_fails_on_the_mac_and_the_vm_without_printing_it(tmp_path, fakes, capsys):
+    fakes.user_id = "Ab" + _digits(5)
+    (tmp_path / "m").mkdir()
+    env = _mac_env(tmp_path / "m", fakes)
+    (env["repo_root"] / "notes.txt").write_text(f"login {fakes.user_id}\n")
+    code, out = run_scan(capsys, ["mac"], **env)
+    assert code == 1 and "  hit notes.txt user_id" in out and fakes.user_id not in out
+    (tmp_path / "v").mkdir()
+    venv = _vm_env(tmp_path / "v", fakes)
+    (venv["fs_root"] / "tmp" / "x.log").write_text(f"login {fakes.user_id.upper()}\n")
+    code, out = run_scan(capsys, ["vm"], **venv)
+    assert code == 1 and "  hit x.log user_id" in out
+
+
+def test_r2_the_short_user_id_regex_is_found_across_a_chunk_edge(tmp_path):
+    short = "Ab" + _digits(5)
+    spec = scan.Spec({scan.USER_ID: short})
+    assert spec.overlap >= len(short) + 1 and spec.longest_raw == len(short)
+    for where, start in _offsets(len(short)).items():
+        path = _edge_file(tmp_path, f"short-{where}.bin", short.encode(), start)
+        assert scan.USER_ID in scan.scan_files([path], spec, label="edge").hits.get(str(path), set()), where
+
+
+def test_r2_the_per_path_user_id_exclusion_covers_the_short_form_too(tmp_path, fakes):
+    short = "Ab" + _digits(5)
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "x.json").write_text(short)
+    (tmp_path / "other.txt").write_text(short)
+    excl = scan.Exclusions(user_id_dirs=(tmp_path / "private",))
+    report = scan.scan_tree(tmp_path, scan.Spec({scan.USER_ID: short}), label="r", exclusions=excl)
+    assert set(report.hits) == {"other.txt"}
+
+
+# --- round 2 item 3: residuals outside the plan's shapes
+
+
+@pytest.mark.parametrize("text", ["apisession%253D{c}", "apisession%22%3A%22{c}%22", "apisession%3A{c}"])
+def test_r2_residual_double_and_url_encoded_json_are_not_shape_matched(text, fakes):
+    """Recorded residuals (PR body): the shapes do not read these. A known value is still found by value."""
+    code = "AB" + _digits(2) + "cd" + _digits(2)
+    line = text.replace("{c}", code)
+    assert scan.scan_text(line, scan.Spec({scan.USER_ID: fakes.user_id}, shapes=True)) == set()
+    assert scan.SESSION_CODE in scan.scan_text(line, scan.Spec({scan.SESSION_CODE: code}))
+
+
+# --- round 2 item 4: filenames
+
+
+def test_r2_an_etc_file_named_with_an_encoded_session_shape_is_redacted(tmp_path, fakes, capsys):
+    env = _vm_env(tmp_path, fakes)
+    code = "AB" + _digits(2) + "cd" + _digits(2)
+    name = f"apiSession%3D%22{code}%22.conf"
+    (env["fs_root"] / "etc" / name).write_text(f"Authorization: Bearer {secrets.token_urlsafe(32)}\n")
+    out_code, out = run_scan(capsys, ["vm"], **env)
+    assert out_code == 1 and "FAIL etc hits=1" in out and "  hit <redacted-path-" in out
+    assert code not in out and "apiSession" not in out
+
+
+def test_r2_a_filename_holding_a_short_user_id_is_redacted(tmp_path, fakes, capsys):
+    fakes.user_id = "Q" + _digits(3)  # four characters: under every detection floor
+    env = _mac_env(tmp_path, fakes)
+    (env["repo_root"] / f"notes-{fakes.user_id}-x.txt").write_text(fakes.app_key)
+    code, out = run_scan(capsys, ["mac"], **env)
+    assert code == 1 and "  hit <redacted-path-" in out and fakes.user_id not in out
+
+
+def test_r2_a_filename_holding_a_known_raw_value_under_the_floor_is_redacted_case_insensitively(tmp_path, fakes):
+    short = "Ab" + _digits(5)
+    (tmp_path / f"x-{short.lower()}.txt").write_text(fakes.app_key)
+    report = scan.scan_tree(tmp_path, scan.Spec({scan.APP_KEY: fakes.app_key, scan.USER_ID: short}), label="t")
+    assert "\n".join(report.lines()).count("<redacted-path-") == 1 and short.lower() not in "\n".join(report.lines())
+
+
+def test_r2_control_characters_in_a_filename_are_escaped(tmp_path, fakes, capsys):
+    env = _mac_env(tmp_path, fakes)
+    (env["repo_root"] / "a\nFAIL fake line\x1b[31m.txt").write_text(fakes.app_key)
+    code, out = run_scan(capsys, ["mac"], **env)
+    assert code == 1 and "\x1b" not in out
+    assert "  hit a\\x0aFAIL fake line\\x1b[31m.txt app_key" in out
+    for line in out.splitlines():
+        assert ALLOWED_LINE.search(line), line
+    assert not any(line.startswith("FAIL fake") for line in out.splitlines())
 
 
 def _binary_repo(repo: Path, payload: bytes) -> None:

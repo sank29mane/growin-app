@@ -37,6 +37,7 @@ from urllib.parse import quote, quote_plus
 
 CHUNK = 1 << 20
 MIN_FORM = 8
+USER_ID_RAW_MIN = 5  # the relay accepts 3 to 32 characters; 5 to 7 are searched as a bounded regex
 RULE_SKIP_DIRS = (".git", ".venv", "node_modules", "__pycache__")
 SDK_REMNANTS = ("apiLogs.log", "websocketLogs.log")
 COMMAND_TIMEOUT_S = 1800
@@ -75,9 +76,11 @@ SHAPES: tuple[tuple[str, str, bytes, int], ...] = (
         "api_session",
         # The relay's own contract is ^[A-Za-z0-9]{6,64}$ (contract.py API_SESSION_RE). At least one digit is
         # required so source like `api_session=apisession` is not a hit; quotes and `%3D` are allowed.
-        rb"(?:apisession|api_session)[\x27\"]{0,1}[ \t]{0,8}(?:[=:]|%3d)[ \t]{0,8}[\x27\"]{0,1}"
-        rb"(?=[A-Za-z]{0,63}[0-9])[A-Za-z0-9]{6,64}(?![A-Za-z0-9_])",
-        11 + 1 + 8 + 3 + 8 + 1 + 64,
+        # A quote is a plain quote, its URL-encoded form (%22, %27) or a backslash-escaped one (JSON in a string).
+        # Residuals outside the plan's shapes: double encoding (%253D) and URL-encoded JSON (apisession%22%3A%22...).
+        rb"(?:apisession|api_session)(?:[\x27\"]|%2[27]|\\[\x27\"]){0,1}[ \t]{0,8}(?:[=:]|%3d)[ \t]{0,8}"
+        rb"(?:[\x27\"]|%2[27]|\\[\x27\"]){0,1}(?=[A-Za-z]{0,63}[0-9])[A-Za-z0-9]{6,64}(?![A-Za-z0-9_])",
+        11 + 3 + 8 + 3 + 8 + 3 + 64,
     ),
     (
         SDK_HEADER,
@@ -156,13 +159,23 @@ class Spec:
         self.forms: dict[str, tuple[bytes, ...]] = {}
         # A value under the floor loses its raw form (only its longer encodings are searched), so a plain
         # occurrence would pass. Such a class is never "covered": the target reports INCOMPLETE.
-        self.short = frozenset(cls for cls, value in self.values.items() if len(value) < MIN_FORM)
+        self.short = frozenset(
+            cls for cls, value in self.values.items() if len(value) < (USER_ID_RAW_MIN if cls == USER_ID else MIN_FORM)
+        )
         for cls, value in self.values.items():
             forms = tuple(f.encode("utf-8") for f in expand_forms(value))
             if forms and cls not in skip:
                 self.forms[cls] = forms
         user = self.values.get(USER_ID)
         self._user_bytes = user.encode("utf-8") if user else None
+        # A user id of 5 to 7 characters has no raw form in `forms` (floor 8). It is also searched as itself,
+        # case-insensitively, with alphanumeric boundaries so a longer word that contains it is not a hit.
+        self.raw_res: dict[str, re.Pattern[bytes]] = {}
+        if user and USER_ID_RAW_MIN <= len(user) < MIN_FORM and USER_ID not in skip:
+            self.raw_res[USER_ID] = re.compile(
+                rb"(?<![A-Za-z0-9])" + re.escape(user.encode("utf-8")) + rb"(?![A-Za-z0-9])", re.IGNORECASE
+            )
+        self.longest_raw = len(user.encode("utf-8")) if self.raw_res and user else 0
         self.shape_res = tuple((c, r) for c, r in _SHAPE_RES if c not in skip) if shapes else ()
         self.longest_form = max((len(f) for forms in self.forms.values() for f in forms), default=0)
         self.longest_shape = MAX_SHAPE_MATCH if shapes else 0
@@ -170,15 +183,17 @@ class Spec:
     @property
     def overlap(self) -> int:
         """Bytes carried between windows: the widest thing that can match, plus one for lookarounds."""
-        return max(self.longest_form, self.longest_shape, COMMIT_MAX_MATCH) + 1
+        return max(self.longest_form, self.longest_raw, self.longest_shape, COMMIT_MAX_MATCH) + 1
 
     def restrict(self, skip: frozenset[str]) -> Spec:
         return Spec(self.values, shapes=self.shapes, skip=self.skip | skip)
 
     def covered(self, cls: str) -> bool:
+        if cls == SESSION_CODE and cls in self.short:
+            return self.shapes  # a short code is treated as no value entered: the shapes cover it, or nothing does
         if cls in self.short:
             return False
-        if cls in self.forms:
+        if cls in self.raw_res or cls in self.forms:
             return True
         if not self.shapes:
             return False
@@ -199,6 +214,9 @@ class Spec:
                 if form in window:
                     found.add(cls)
                     break
+        for cls, regex in self.raw_res.items():
+            if cls not in done and cls not in found and regex.search(window):
+                found.add(cls)
         for cls, regex in self.shape_res:
             if cls in done or cls in found:
                 continue
@@ -386,11 +404,19 @@ class _SpecCache:
         return self._cache[skip]
 
 
+_CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f]")
+
+
 def _safe_name(path_text: str, spec: Spec, index: int) -> str:
-    """A path is printed only if it does not itself carry a value."""
-    if scan_text(path_text, Spec(spec.values, shapes=True)):  # values and runtime shapes, whatever the target
+    """A path is printed only if it does not itself carry a value. Values, the full runtime shape set and
+    every known raw value (whatever the detection floor) redact it; control characters are escaped."""
+    lowered = path_text.lower()
+    if (
+        scan_text(path_text, Spec(spec.values, shapes=True))
+        or any(value.lower() in lowered for value in spec.values.values())
+    ):
         return f"<redacted-path-{index}>"
-    return path_text
+    return _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group(0)):02x}", path_text)
 
 
 def _scan_one(path: Path, spec: Spec, report: Report, shown: str, *, max_bytes, chunk_size) -> None:
@@ -703,6 +729,8 @@ def run_mac(
         if not repo_spec.covered(SESSION_CODE):
             why = "value under 8 characters" if SESSION_CODE in repo_spec.short else "no value entered"
             notes.append(f"uncovered: session_code ({why})")
+        if USER_ID in repo_spec.short:
+            notes.append(f"uncovered: user_id (value under {USER_ID_RAW_MIN} characters)")
         repo_gaps = repo_spec.uncovered(REPO_REQUIRED)
         runtime_gaps = runtime_spec.uncovered(RUNTIME_REQUIRED)
         repo_excl = Exclusions(
@@ -782,7 +810,8 @@ def run_vm(
             )
             report.uncovered = list(gaps)
             reports.append(report)
-        return _finish(reports, [])
+        notes = [f"uncovered: user_id (value under {USER_ID_RAW_MIN} characters)"] if USER_ID in spec.short else []
+        return _finish(reports, notes)
     finally:
         values.clear()
 
