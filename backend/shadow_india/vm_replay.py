@@ -17,7 +17,14 @@ What the replay refuses (typed ``ReplayRefused``, nothing written):
 - ``replay_pins_missing`` / ``replay_pins_invalid``: the pinned quote or tick reference of an intent is absent,
   or the pins document is malformed. Evidence holds neither the quote circuits nor the build identity today, so
   they arrive as a hashed pins document;
-- ``replay_evidence_invalid`` / ``replay_state_ambiguous``: the evidence cannot be folded into one portfolio.
+- ``replay_evidence_invalid`` / ``replay_state_ambiguous``: the evidence cannot be folded into one portfolio, or a
+  record lacks a field the replay reads;
+- ``replay_signal_missing`` / ``replay_signal_mismatch``: an intent's ``signal`` record is absent or names another
+  symbol, ISIN or series. The intent record the Mac writes carries neither ISIN nor series, so both come from the
+  signal it points at (``signal_id``), where they are required.
+
+The build that runs is the build that was hashed: the source bytes of ``orders/`` are read once, hashed, and those
+same bytes are compiled and executed. No import machinery and no cached bytecode is consulted.
 
 What the replay records (``SessionReplay``): the build and limits hashes, the intents compared and the verdict.
 The first disagreement stops the session, is kept with both verdicts, opens a defect and pauses the run through
@@ -35,12 +42,12 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import importlib.util
 import inspect
 import itertools
 import json
 import re
 import sys
+import types
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -57,6 +64,8 @@ LIMITS_MISMATCH = "replay_limits_mismatch"
 PINS_MISSING = "replay_pins_missing"
 PINS_INVALID = "replay_pins_invalid"
 EVIDENCE_INVALID = "replay_evidence_invalid"
+SIGNAL_MISSING = "replay_signal_missing"
+SIGNAL_MISMATCH = "replay_signal_mismatch"
 STATE_AMBIGUOUS = "replay_state_ambiguous"
 KILL_SWITCH_IN_VERDICT = "replay_kill_switch_in_verdict"
 DIVERGENCE = "replay_divergence"
@@ -236,6 +245,22 @@ def _whole(value: Decimal) -> int:
     return int(value)
 
 
+def _need(record: Mapping[str, Any], key: str) -> Any:
+    """A field the replay reads. Absent is ``replay_evidence_invalid``, never a bare ``KeyError``."""
+
+    try:
+        return record[key]
+    except (KeyError, TypeError):
+        raise ReplayRefused(EVIDENCE_INVALID) from None
+
+
+def _seq(record: Mapping[str, Any]) -> int:
+    value = _need(record, "seq")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ReplayRefused(EVIDENCE_INVALID)
+    return value
+
+
 def parse_pins(data: bytes) -> SessionPins:
     """Parse one pins document strictly. A float, a duplicate key or a missing field is ``replay_pins_invalid``."""
 
@@ -301,19 +326,28 @@ def parse_pins(data: bytes) -> SessionPins:
 # --- the recorded build ------------------------------------------------------------------------------------------
 
 
-def orders_tree_sha256(vm_source: Path) -> dict[str, str]:
-    """sha256 of every file under ``<vm_source>/gateway_vm/orders``, keyed by posix path below it.
+def _read_orders_sources(vm_source: Path) -> dict[str, bytes]:
+    """Every file under ``<vm_source>/gateway_vm/orders`` as bytes, keyed by posix path below it.
 
-    ``__pycache__`` is left out: the replay never writes bytecode into the checkout, but a checkout that has
-    run before may hold some, and it is not the code.
+    ``__pycache__`` is left out: it is not the code, and nothing here ever loads it.
     """
 
     root = Path(vm_source) / _SOURCE_PACKAGE / _ORDERS_DIR
-    out: dict[str, str] = {}
+    out: dict[str, bytes] = {}
     for path in sorted(root.rglob("*")):
         if path.is_file() and "__pycache__" not in path.parts:
-            out[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+            out[path.relative_to(root).as_posix()] = path.read_bytes()
     return out
+
+
+def _digests(sources: Mapping[str, bytes]) -> dict[str, str]:
+    return {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
+
+
+def orders_tree_sha256(vm_source: Path) -> dict[str, str]:
+    """sha256 of every file under ``<vm_source>/gateway_vm/orders``, keyed by posix path below it."""
+
+    return _digests(_read_orders_sources(vm_source))
 
 
 def read_git_commit(vm_source: Path) -> str | None:
@@ -377,39 +411,45 @@ class _Vm:
     ist: Any
 
 
-def _load_module(package: str, name: str, path: Path, package_dir: Path) -> Any:
-    if name == "__init__":
-        spec = importlib.util.spec_from_file_location(package, path, submodule_search_locations=[str(package_dir)])
-        module_name = package
-    else:
-        module_name = f"{package}.{name}"
-        spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ReplayRefused(BUILD_MISMATCH)
-    module = importlib.util.module_from_spec(spec)
+def _exec_source(module_name: str, filename: str, source: bytes, package: str) -> Any:
+    """Run ``source`` as module ``module_name`` of the private ``package``. The one place this file executes loaded code.
+
+    The bytes are the ones that were hashed. Nothing reads a cached ``.pyc``: there is no spec, no loader and no
+    path finder here. The package has no ``__path__`` on purpose, so a relative import of a file that was not
+    loaded here fails instead of reaching the file system.
+    """
+
+    module = types.ModuleType(module_name)
+    module.__file__ = filename
+    module.__package__ = package
     sys.modules[module_name] = module  # the relative imports inside the package resolve through here
-    spec.loader.exec_module(module)
+    code = compile(source, filename, "exec", dont_inherit=True)
+    exec(code, module.__dict__)
     return module
 
 
-def _load_build(vm_source: Path, commit: str) -> _Vm:
-    """Load ``gateway_vm.orders`` from the checkout as a private package, then take it out of ``sys.modules``.
+def _forget_package(package: str) -> None:
+    """Take the private package and every module of it out of ``sys.modules``, a module whose exec failed included."""
+
+    for name in [n for n in list(sys.modules) if n == package or n.startswith(package + ".")]:
+        sys.modules.pop(name, None)
+
+
+def _load_build(vm_source: Path, commit: str, sources: Mapping[str, bytes]) -> _Vm:
+    """Run ``gateway_vm.orders`` from the hashed ``sources`` as a private package, then take it out of ``sys.modules``.
 
     The package is loaded under a name no other build shares, so a session replayed against another checkout, or a
-    ``gateway_vm`` the test run already imported from the working tree, can never answer for this one. Bytecode is
-    not written into the checkout.
+    ``gateway_vm`` the test run already imported from the working tree, can never answer for this one.
     """
 
     orders_dir = Path(vm_source) / _SOURCE_PACKAGE / _ORDERS_DIR
     token = hashlib.sha256(f"{orders_dir.resolve()}:{commit}".encode()).hexdigest()[:12]
     package = f"_growin_vm_replay_{token}_{next(_load_counter)}"
-    previous_flag = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
     try:
-        _load_module(package, "__init__", orders_dir / "__init__.py", orders_dir)
+        _exec_source(package, str(orders_dir / "__init__.py"), sources["__init__.py"], package)
         modules: dict[str, Any] = {}
         for name in _LOAD_ORDER:
-            modules[name] = _load_module(package, name, orders_dir / f"{name}.py", orders_dir)
+            modules[name] = _exec_source(f"{package}.{name}", str(orders_dir / f"{name}.py"), sources[f"{name}.py"], package)
         limits, intent = modules["limits"], modules["intent"]
         vm = _Vm(
             evaluate=limits.evaluate,
@@ -427,10 +467,7 @@ def _load_build(vm_source: Path, commit: str) -> _Vm:
     except Exception:  # noqa: BLE001 - any load failure of the recorded build is the one refusal, never a fallback
         raise ReplayRefused(BUILD_MISMATCH) from None
     finally:
-        sys.dont_write_bytecode = previous_flag
-        # Also a module whose exec failed: it is registered before it runs, so it must go on every path out.
-        for name in [n for n in sys.modules if n == package or n.startswith(package + ".")]:
-            sys.modules.pop(name, None)
+        _forget_package(package)
     _check_surface(vm)
     return vm
 
@@ -469,21 +506,81 @@ def load_recorded_build(vm_source: Path, recorded: BuildIdentity | None) -> _Vm:
         raise ReplayRefused(BUILD_MISMATCH)
     try:
         commit = read_git_commit(source)
-        files = orders_tree_sha256(source)
+        sources = _read_orders_sources(source)  # read once: these bytes are hashed below and are the ones that run
     except OSError:
         raise ReplayRefused(BUILD_MISMATCH) from None
     if commit is None or commit != recorded.commit:
         raise ReplayRefused(BUILD_MISMATCH)
-    if files != dict(recorded.orders_sha256):
+    if _digests(sources) != dict(recorded.orders_sha256):
         raise ReplayRefused(BUILD_MISMATCH)
-    return _load_build(source, commit)
+    return _load_build(source, commit, sources)
 
 
 # --- limits -------------------------------------------------------------------------------------------------------
 
 
-def _checked_limits(vm: _Vm, pins: SessionPins, records: Sequence[Mapping[str, Any]], session_id: str) -> Any:
-    """Build the limits from the supplied values and require them to hash to what the session recorded."""
+@dataclass(frozen=True)
+class _Identity:
+    """The instrument of an intent, from the ``signal`` record the intent points at."""
+
+    isin: str
+    series: str
+
+
+def _signal_index(records: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    out: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        signal_id = record.get("signal_id")
+        if record.get("kind") != "signal" or not isinstance(signal_id, str):
+            continue
+        known = out.get(signal_id)
+        if known is not None and tuple(known.get(k) for k in _SIGNAL_FIELDS) != tuple(record.get(k) for k in _SIGNAL_FIELDS):
+            raise ReplayRefused(EVIDENCE_INVALID)  # one signal id naming two different instruments
+        out.setdefault(signal_id, record)
+    return out
+
+
+_SIGNAL_FIELDS = ("symbol", "isin", "series", "limits_sha256")
+
+
+def _signal_of(intent: Mapping[str, Any], signals: Mapping[str, Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The signal record of an intent, or a typed refusal.
+
+    The Mac's intent record holds the symbol, side, quantity and price but neither ISIN nor series (the admission
+    writer never emits them), so both are read from the signal, where they are required. An intent that does carry
+    one must agree with it.
+    """
+
+    signal_id = _need(intent, "signal_id")
+    signal = signals.get(signal_id) if isinstance(signal_id, str) else None
+    if signal is None:
+        raise ReplayRefused(SIGNAL_MISSING)
+    if not all(isinstance(signal.get(k), str) for k in ("symbol", "isin", "series")):
+        raise ReplayRefused(EVIDENCE_INVALID)
+    if _need(intent, "symbol") != signal["symbol"]:
+        raise ReplayRefused(SIGNAL_MISMATCH)
+    for name in ("isin", "series"):
+        if name in intent and intent[name] != signal[name]:
+            raise ReplayRefused(SIGNAL_MISMATCH)
+    return signal
+
+
+def _identity_of(intent: Mapping[str, Any], signals: Mapping[str, Mapping[str, Any]]) -> _Identity:
+    signal = _signal_of(intent, signals)
+    return _Identity(signal["isin"], signal["series"])
+
+
+def _checked_limits(
+    vm: _Vm,
+    pins: SessionPins,
+    records: Sequence[Mapping[str, Any]],
+    session_id: str,
+    signals: Mapping[str, Mapping[str, Any]],
+) -> Any:
+    """Build the limits from the supplied values and require them to hash to what the session recorded.
+
+    Every signal of the session, and the signal behind every intent of it, must have recorded that same hash.
+    """
 
     try:
         limits = vm.limits_cls.from_fields(dict(pins.limits))
@@ -494,6 +591,9 @@ def _checked_limits(vm: _Vm, pins: SessionPins, records: Sequence[Mapping[str, A
     for record in records:
         if record.get("kind") == "signal" and record.get("session_id") == session_id:
             if record.get("limits_sha256") != pins.limits_sha256:
+                raise ReplayRefused(LIMITS_MISMATCH)
+        elif record.get("kind") == "intent" and record.get("session_id") == session_id:
+            if _signal_of(record, signals).get("limits_sha256") != pins.limits_sha256:
                 raise ReplayRefused(LIMITS_MISMATCH)
     return limits
 
@@ -509,7 +609,8 @@ class _Fold:
     The admitted quantity of an order is the intent's quantity.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, signals: Mapping[str, Mapping[str, Any]]) -> None:
+        self.signals = signals
         self.intents: dict[str, Mapping[str, Any]] = {}
         self.reserved: set[str] = set()
         self.terminal: set[str] = set()
@@ -523,17 +624,17 @@ class _Fold:
     def apply(self, record: Mapping[str, Any]) -> None:
         kind = record.get("kind")
         if kind == "intent":
-            self.intents[str(record["intent_id"])] = record
+            self.intents[str(_need(record, "intent_id"))] = record
         elif kind == "reservation":
-            self.reserved.add(str(record["intent_id"]))
+            self.reserved.add(str(_need(record, "intent_id")))
         elif kind == "expiry":
-            self.terminal.add(str(record["intent_id"]))
+            self.terminal.add(str(_need(record, "intent_id")))
         elif kind == "booking_intent":
-            self.pending[str(record["booking_id"])] = record
+            self.pending[str(_need(record, "booking_id"))] = record
         elif kind == "booking_refused":
-            self.pending.pop(str(record["booking_id"]), None)
+            self.pending.pop(str(_need(record, "booking_id")), None)
         elif kind == "booking_done":
-            booking = self.pending.pop(str(record["booking_id"]), None)
+            booking = self.pending.pop(str(_need(record, "booking_id")), None)
             if booking is None:
                 raise ReplayRefused(EVIDENCE_INVALID)
             self._book(booking)
@@ -558,23 +659,24 @@ class _Fold:
             self.ended = True
 
     def _book(self, booking: Mapping[str, Any]) -> None:
-        intent_id = str(booking["intent_id"])
+        intent_id = str(_need(booking, "intent_id"))
         intent = self.intents.get(intent_id)
-        if intent is None or not isinstance(intent.get("isin"), str):
+        if intent is None:
             raise ReplayRefused(EVIDENCE_INVALID)
-        cumulative = _dec(booking["cumulative_quantity"], code=EVIDENCE_INVALID)
-        price = _dec(booking["price"], code=EVIDENCE_INVALID)
-        charges = _dec(booking["charges"], code=EVIDENCE_INVALID)
+        isin = _identity_of(intent, self.signals).isin
+        cumulative = _dec(_need(booking, "cumulative_quantity"), code=EVIDENCE_INVALID)
+        price = _dec(_need(booking, "price"), code=EVIDENCE_INVALID)
+        charges = _dec(_need(booking, "charges"), code=EVIDENCE_INVALID)
         prior = self.booked.get(intent_id, Decimal(0))
         delta = cumulative - prior
-        admitted = _dec(intent["quantity"], code=EVIDENCE_INVALID)
+        admitted = _dec(_need(intent, "quantity"), code=EVIDENCE_INVALID)
         if delta <= 0 or cumulative > admitted:
             raise ReplayRefused(EVIDENCE_INVALID)
-        isin = intent["isin"]
         held, cost = self.positions.get(isin, [Decimal(0), Decimal(0)])
-        if intent["side"] == "buy":
+        side = _need(intent, "side")
+        if side == "buy":
             held, cost = held + delta, cost + delta * price + charges
-        elif intent["side"] == "sell":
+        elif side == "sell":
             if delta > held:
                 raise ReplayRefused(EVIDENCE_INVALID)
             remaining = held - delta
@@ -599,12 +701,17 @@ class _Fold:
                 costs[isin] = cost
         orders = []
         for intent_id in sorted(self.reserved - self.terminal):
-            intent = self.intents[intent_id]
-            unfilled = _dec(intent["quantity"], code=EVIDENCE_INVALID) - self.booked.get(intent_id, Decimal(0))
+            intent = self.intents.get(intent_id)
+            if intent is None:
+                raise ReplayRefused(EVIDENCE_INVALID)  # a reservation for an intent that is not on the evidence
+            unfilled = _dec(_need(intent, "quantity"), code=EVIDENCE_INVALID) - self.booked.get(intent_id, Decimal(0))
             if unfilled > 0:
                 orders.append(
                     vm.open_order_cls(
-                        str(intent["isin"]), str(intent["side"]), _whole(unfilled), _dec(intent["limit_price"], code=EVIDENCE_INVALID)
+                        _identity_of(intent, self.signals).isin,
+                        str(_need(intent, "side")),
+                        _whole(unfilled),
+                        _dec(_need(intent, "limit_price"), code=EVIDENCE_INVALID),
                     )
                 )
         account = vm.account_cls(holdings=tuple(holdings), open_orders=tuple(orders), trades=())
@@ -640,13 +747,13 @@ def mac_verdicts(records: Sequence[Mapping[str, Any]]) -> dict[str, MacVerdict]:
         kind = record.get("kind")
         if kind not in _MAC_KINDS:
             continue
-        intent_id = str(record.get("intent_id"))
+        intent_id = str(_need(record, "intent_id"))
         if intent_id in out:
             continue
         if kind == "reservation":
             out[intent_id] = MacVerdict(ADMITTED, (), True)
         elif kind in ("denied", "reservation_refused"):
-            out[intent_id] = MacVerdict(DENIED, (str(record["code"]),), False)
+            out[intent_id] = MacVerdict(DENIED, (str(_need(record, "code")),), False)
         else:
             decision = str(record.get("decision", "")).lower()
             if decision == ADMITTED:
@@ -738,15 +845,12 @@ def _ist_of(record: Mapping[str, Any], vm: _Vm) -> datetime:
     return stamp.astimezone(vm.ist)
 
 
-def _vm_intent(vm: _Vm, record: Mapping[str, Any], pins: SessionPins) -> Any:
-    isin = record.get("isin")
-    if not isinstance(isin, str):
-        raise ReplayRefused(EVIDENCE_INVALID)
-    side = str(record["side"])
-    price = _dec(record["limit_price"], code=EVIDENCE_INVALID)
+def _vm_intent(vm: _Vm, record: Mapping[str, Any], pins: SessionPins, identity: _Identity) -> Any:
+    side = str(_need(record, "side"))
+    price = _dec(_need(record, "limit_price"), code=EVIDENCE_INVALID)
     values = {
-        "intent_id": str(record["intent_id"]),
-        "proposal_id": str(record["intent_id"]),
+        "intent_id": str(_need(record, "intent_id")),
+        "proposal_id": str(_need(record, "intent_id")),
         "workspace": "india",
         "broker": "icici-breeze",
         "mode": "SHADOW",
@@ -755,9 +859,9 @@ def _vm_intent(vm: _Vm, record: Mapping[str, Any], pins: SessionPins) -> Any:
         "order_type": "limit",
         "validity": "day",
         "side": side,
-        "stock_code": str(record["symbol"]),
-        "isin": isin,
-        "quantity": _whole(_dec(record["quantity"], code=EVIDENCE_INVALID)),
+        "stock_code": str(_need(record, "symbol")),
+        "isin": identity.isin,
+        "quantity": _whole(_dec(_need(record, "quantity"), code=EVIDENCE_INVALID)),
         "limit_price": format(price, "f"),
         "reason": "entry" if side == "buy" else "exit",
         "batch_id": None,
@@ -768,14 +872,13 @@ def _vm_intent(vm: _Vm, record: Mapping[str, Any], pins: SessionPins) -> Any:
     return vm.intent_cls(**values)
 
 
-def _vm_quote(vm: _Vm, record: Mapping[str, Any], pin: IntentPin, decided: datetime) -> Any:
-    series = record.get("series") or pin.quote.series
-    if not isinstance(series, str):
-        raise ReplayRefused(PINS_MISSING)
+def _vm_quote(vm: _Vm, record: Mapping[str, Any], pin: IntentPin, decided: datetime, identity: _Identity) -> Any:
+    if pin.quote.series is not None and pin.quote.series != identity.series:
+        raise ReplayRefused(SIGNAL_MISMATCH)
     return vm.quote_cls(
-        stock_code=str(record["symbol"]),
-        isin=str(record["isin"]),
-        series=series,
+        stock_code=str(_need(record, "symbol")),
+        isin=identity.isin,
+        series=identity.series,
         ltp=pin.quote.ltp,
         lower_circuit=pin.quote.lower_circuit,
         upper_circuit=pin.quote.upper_circuit,
@@ -799,18 +902,19 @@ def replay_session(
         raise ReplayRefused(PINS_MISSING)
     vm = load_recorded_build(vm_source, pins.build)
     assert pins.build is not None  # load_recorded_build refuses a missing identity
-    limits = _checked_limits(vm, pins, records, session_id)
+    signals = _signal_index(records)
+    limits = _checked_limits(vm, pins, records, session_id, signals)
     macs = mac_verdicts(records)
-    fold = _Fold()
+    fold = _Fold(signals)
     verdicts: list[IntentVerdict] = []
     divergences: list[Divergence] = []
     defects: list[str] = []
     seen = 0
-    for record in sorted(records, key=lambda r: int(r["seq"])):
+    for record in sorted(records, key=_seq):
         is_ours = record.get("kind") == "intent" and record.get("session_id") == session_id
         if is_ours and not divergences and not defects:
             seen += 1
-            outcome = _replay_intent(vm, limits, pins, fold, record, macs)
+            outcome = _replay_intent(vm, limits, pins, fold, record, macs, signals)
             if isinstance(outcome, Divergence):
                 divergences.append(outcome)
                 verdicts.append(IntentVerdict(outcome.intent_id, outcome.mac_decision, outcome.mac_codes, outcome.vm_codes, False))
@@ -850,20 +954,22 @@ def _replay_intent(
     fold: _Fold,
     record: Mapping[str, Any],
     macs: Mapping[str, MacVerdict],
+    signals: Mapping[str, Mapping[str, Any]],
 ) -> IntentVerdict | Divergence | str:
-    intent_id = str(record["intent_id"])
+    intent_id = str(_need(record, "intent_id"))
     pin = pins.intents.get(intent_id)
     if pin is None:
         raise ReplayRefused(PINS_MISSING)
     decided = _ist_of(record, vm)
+    identity = _identity_of(record, signals)
     account, flags = fold.snapshot(vm, pins)
     codes = vm.evaluate(
         limits,
         flags,
         account,
-        _vm_quote(vm, record, pin, decided),
+        _vm_quote(vm, record, pin, decided, identity),
         decided,
-        _vm_intent(vm, record, pins),
+        _vm_intent(vm, record, pins, identity),
         kill_enabled=REPLAY_KILL_ENABLED,
         tick_reference=pin.tick_reference,
         # No tick_table: the VM resolves its default, the data file beside the loaded build (hashed with orders/).

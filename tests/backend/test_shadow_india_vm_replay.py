@@ -11,7 +11,10 @@ Row names follow the 64-05 break-proof table: replay build hash, divergence, day
 from __future__ import annotations
 
 import ast
+import importlib.machinery
+import importlib.util
 import json
+import py_compile
 import shutil
 import socket
 import sys
@@ -66,6 +69,10 @@ LIMITS = {
     "fat_finger_collar": "0.05",
 }
 
+SIGNAL_HASHES = (
+    "strategy_sha256", "params_sha256", "dataset_sha256", "universe_sha256", "band_sha256",
+    "tick_sha256", "limits_sha256", "cost_sha256", "scenario_sha256",
+)
 ISIN_A, ISIN_B, ISIN_C = "INE002A01018", "INE009A01021", "INE467B01029"
 SYMBOL = {ISIN_A: "AAA", ISIN_B: "BBB", ISIN_C: "CCC"}
 
@@ -209,18 +216,38 @@ class Scenario:
         tick_reference: str | None | bool = True,
         series: str = "EQ",
         minute: int = 35,
+        signal: bool | dict[str, Any] = True,
+        symbol: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> str:
+        """One decision as ``AdmissionService.prepare`` records it: a ``signal`` record (the instrument and the limits
+        hash), then an ``intent`` with exactly the fields the writer emits. It carries no ``isin`` and no ``series``.
+
+        ``signal=False`` writes no signal record, a dict overrides signal fields, ``extra`` adds intent fields.
+        """
+
         store = self.use(session)
         year, month, day = DAYS[session]
         self.clock.now = datetime(year, month, day, 9, minute, 0, tzinfo=IST)
         self._intent += 1
         iid = iid or f"intent-{self._intent:04d}"
+        signal_id = f"sig-{self._intent}"
+        if signal is not False:
+            store.append(
+                "signal",
+                {
+                    "signal_id": signal_id, "symbol": SYMBOL[isin], "isin": isin, "series": series, "as_of_date": "2026-10-26",
+                    **{name: "f" * 64 for name in SIGNAL_HASHES},
+                    "limits_sha256": self.limits_sha,
+                    **(signal if isinstance(signal, dict) else {}),
+                },
+            )
         store.append(
             "intent",
             {
-                "intent_id": iid, "signal_id": f"sig-{self._intent}", "leg": "leg1", "intent_sha256": "e" * 64,
-                "symbol": SYMBOL[isin], "side": side, "quantity": str(quantity), "limit_price": price,
-                "isin": isin, "series": series,
+                "intent_id": iid, "session_id": session, "signal_id": signal_id, "leg": "leg1", "intent_sha256": "e" * 64,
+                "symbol": symbol or SYMBOL[isin], "side": side, "quantity": str(quantity), "limit_price": price,
+                **(extra or {}),
             },
         )
         if mac == "admit":
@@ -265,10 +292,7 @@ class Scenario:
             "signal",
             {
                 "signal_id": f"sig-{session}", "symbol": "AAA", "isin": ISIN_A, "series": "EQ", "as_of_date": "2026-10-26",
-                **{name: "f" * 64 for name in (
-                    "strategy_sha256", "params_sha256", "dataset_sha256", "universe_sha256", "band_sha256",
-                    "tick_sha256", "limits_sha256", "cost_sha256", "scenario_sha256",
-                )},
+                **{name: "f" * 64 for name in SIGNAL_HASHES},
                 **({"limits_sha256": limits_sha256} if limits_sha256 else {}),
             },
         )
@@ -780,6 +804,89 @@ def test_two_builds_replayed_in_one_process_do_not_share_code(tmp_path: Path, li
     assert first.replay(S1).verdict == "PASS"  # the second build did not replace the first
 
 
+# --- the build that runs is the build that was hashed ------------------------------------------------------------------
+
+
+def plant_unchecked_pyc(vm: Path, filename: str, edit: Callable[[str], str]) -> Path:
+    """A valid, unchecked-hash ``.pyc`` of an edited ``filename`` in ``__pycache__``, the source left untouched.
+
+    Python's own import machinery runs this file without looking at the source, which is the hole the hash walk
+    (it skips ``__pycache__``) does not see.
+    """
+
+    source = vm / "gateway_vm" / "orders" / filename
+    original = source.read_text()
+    altered = edit(original)
+    assert altered != original
+    staged = vm.parent / f"altered_{filename}"
+    staged.write_text(altered)
+    pyc = Path(importlib.util.cache_from_source(str(source)))
+    pyc.parent.mkdir(exist_ok=True)
+    py_compile.compile(
+        str(staged), cfile=str(pyc), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH
+    )
+    # the plant is real: Python's loader would run the altered code for the unchanged source
+    cached = importlib.machinery.SourceFileLoader("plant_check", str(source)).get_code("plant_check")
+    assert cached == compile(altered, str(source), "exec", dont_inherit=True)
+    assert cached != compile(original, str(source), "exec", dont_inherit=True)
+    return pyc
+
+
+def test_a_cached_pyc_next_to_unchanged_source_is_never_run(sc: Scenario):
+    """The Mac admits a Rs 60,000 buy against the Rs 50,000 cap. The altered bytecode would admit it too (PASS)."""
+
+    sc.intent(S1, "buy", 600, "100.00")
+    plant_unchecked_pyc(
+        sc.vm,
+        "limits.py",
+        lambda t: t.replace("if deployed > limits.capital_cap:", "if False:").replace(
+            "> limits.per_position_cap:", "> limits.per_position_cap * 1000:"
+        ),
+    )
+    assert orders_tree_sha256(sc.vm) == sc.identity.orders_sha256  # the source and its recorded hashes are unchanged
+    result = sc.replay(S1)
+    assert result.verdict == "FAIL"
+    assert result.divergences[0].reason == "mac_admitted_vm_refused"
+    assert "capital_cap" in result.divergences[0].vm_codes
+
+
+@pytest.mark.parametrize("filename", ["__init__.py", "intent.py", "challenge.py", "limits.py"])
+def test_a_planted_pyc_for_any_loaded_file_is_never_run(sc: Scenario, filename: str):
+    sc.intent(S1, "buy", 100, "100.00")
+    plant_unchecked_pyc(sc.vm, filename, lambda t: t + "\nraise RuntimeError('altered bytecode ran')\n")
+    assert sc.replay(S1).verdict == "PASS"  # the genuine source ran, so the planted raise never fired
+
+
+def test_the_bytes_that_were_hashed_are_the_bytes_that_run(sc: Scenario, monkeypatch: pytest.MonkeyPatch):
+    """A file swapped on disk after the hash walk, before the load, must not be what runs."""
+
+    sc.intent(S1, "buy", 600, "100.00", mac=("deny", "capital_cap"), tick_reference="100")
+    real = vm_replay._digests
+
+    def swap_after_hashing(sources: Any) -> Any:
+        digests = real(sources)
+        target = sc.vm / "gateway_vm" / "orders" / "limits.py"
+        target.write_text(target.read_text().replace('codes.append("capital_cap")', "pass", 1))
+        return digests
+
+    monkeypatch.setattr(vm_replay, "_digests", swap_after_hashing)
+    assert sc.replay(S1).verdict == "PASS"  # the Mac's capital_cap refusal met the hashed code's capital_cap
+
+
+def test_the_loader_consults_no_import_machinery(sc: Scenario, monkeypatch: pytest.MonkeyPatch):
+    def trip(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the loader reached the import machinery")
+
+    for owner, attr in (
+        (importlib.machinery.SourceFileLoader, "get_code"),
+        (importlib.machinery.SourceFileLoader, "exec_module"),
+        (importlib.util, "spec_from_file_location"),
+    ):
+        monkeypatch.setattr(owner, attr, trip)
+    sc.intent(S1, "buy", 100, "100.00")
+    assert sc.replay(S1).verdict == "PASS"
+
+
 # --- git head reading -------------------------------------------------------------------------------------------------
 
 
@@ -853,6 +960,173 @@ def test_signals_that_record_the_same_limits_hash_pass(sc: Scenario, limits_sha:
 def test_the_limits_hash_is_the_vms_p06_hash_of_the_nine_contract_keys(limits_sha: str):
     assert limits_sha == vm_replay._sha256_json(LIMITS)
     assert set(vm_replay.LIMIT_KEYS) == set(LIMITS)
+
+
+def test_replay_limits_mismatch_refuses_when_an_intents_signal_of_another_session_recorded_other_limits(sc: Scenario):
+    sc.raw(S1, "signal", {**signal_payload("sig-cross"), "limits_sha256": "9" * 64})
+    sc.intent(S2, "buy", 1, "100.00", signal=False, extra={"signal_id": "sig-cross"})
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S2)
+    assert raised.value.code == vm_replay.LIMITS_MISMATCH
+
+
+def test_an_intents_signal_of_another_session_with_the_same_limits_hash_passes(sc: Scenario, limits_sha: str):
+    sc.raw(S1, "signal", {**signal_payload("sig-cross"), "limits_sha256": limits_sha})
+    sc.intent(S2, "buy", 1, "100.00", signal=False, extra={"signal_id": "sig-cross"})
+    assert sc.replay(S2).verdict == "PASS"
+
+
+# --- the instrument comes from the signal ----------------------------------------------------------------------------
+
+ENVELOPE = {"seq", "prev_sha256", "entry_sha256", "kind", "run_id", "session_id", "run_class", "utc", "ist"}
+WRITER_INTENT_FIELDS = {"intent_id", "signal_id", "leg", "intent_sha256", "symbol", "side", "quantity", "limit_price"}
+
+
+def signal_payload(signal_id: str, isin: str = ISIN_A, series: str = "EQ") -> dict[str, Any]:
+    return {
+        "signal_id": signal_id, "symbol": SYMBOL[isin], "isin": isin, "series": series, "as_of_date": "2026-10-26",
+        **{name: "f" * 64 for name in SIGNAL_HASHES},
+    }
+
+
+def refusal_of(sc: Scenario, session: str = S1, records: list[dict[str, Any]] | None = None) -> str:
+    with pytest.raises(ReplayRefused) as raised:
+        replay_session(
+            records if records is not None else sc.records(), run_id=RUN, session_id=session,
+            pins=sc.pins_for(session), vm_source=sc.vm,
+        )
+    return raised.value.code
+
+
+def test_a_writer_shaped_intent_with_no_isin_or_series_replays_and_passes(sc: Scenario):
+    first = fund(sc, quantity=100, price="100.00", charges="20")  # booked: the fold needs its ISIN from the signal
+    second = sc.intent(S1, "buy", 500, "100.00", isin=ISIN_A, mac=("deny", "capital_cap"))
+    intents = [r for r in sc.records() if r["kind"] == "intent"]
+    assert {r["intent_id"] for r in intents} == {first, second}
+    for record in intents:  # exactly what AdmissionService.prepare emits: no isin, no series
+        assert set(record) - ENVELOPE == WRITER_INTENT_FIELDS
+    result = sc.replay(S1)
+    assert result.verdict == "PASS", result
+    assert result.verdicts[1].vm_codes[0] == "capital_cap"  # the first fill counted against the cap, by ISIN
+
+
+def test_the_isin_and_series_the_vm_sees_are_the_signals(sc: Scenario):
+    """A signal whose ISIN is not an NSE one: the VM's own instrument check answers, so the signal is what reached it."""
+
+    sc.intent(S1, "buy", 1, "100.00", signal={"isin": "US0378331005"}, mac=("deny", "instrument_unsupported"))
+    assert sc.replay(S1).verdict == "PASS"
+
+
+def test_a_signal_series_the_vm_does_not_trade_is_the_vms_to_refuse(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00", signal={"series": "BZ"}, mac=("deny", "instrument_unsupported"))
+    sc.pins[S1][next(iter(sc.pins[S1]))]["quote"].pop("series")  # the pin may omit it: the signal's series is used
+    assert sc.replay(S1).verdict == "PASS"
+
+
+def test_replay_signal_missing_an_intent_with_no_signal_record_refuses(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00", signal=False)
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, sink)
+    assert raised.value.code == vm_replay.SIGNAL_MISSING == "replay_signal_missing"
+    assert sink.empty()
+
+
+def test_replay_signal_missing_an_intent_pointing_at_an_unknown_signal_id_refuses(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00", extra={"signal_id": "sig-nowhere"})
+    assert refusal_of(sc) == vm_replay.SIGNAL_MISSING
+
+
+def test_replay_signal_missing_for_a_booked_intent_of_another_session_refuses_the_fold(sc: Scenario):
+    iid = sc.intent(S1, "buy", 100, "100.00", signal=False)
+    sc.book(S1, iid, 100, "100.00")
+    sc.intent(S2, "buy", 1, "100.00")
+    assert refusal_of(sc, S2) == vm_replay.SIGNAL_MISSING
+
+
+def test_replay_signal_mismatch_a_symbol_that_differs_from_its_signals_refuses(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00", symbol="ZZZ")
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, sink)
+    assert raised.value.code == vm_replay.SIGNAL_MISMATCH == "replay_signal_mismatch"
+    assert sink.empty()
+
+
+@pytest.mark.parametrize("field, value", [("isin", ISIN_B), ("series", "BE")])
+def test_replay_signal_mismatch_an_intent_that_carries_its_own_isin_or_series_must_agree(sc: Scenario, field: str, value: str):
+    sc.intent(S1, "buy", 1, "100.00", extra={field: value})
+    assert refusal_of(sc) == vm_replay.SIGNAL_MISMATCH
+
+
+def test_an_intent_that_carries_the_same_isin_and_series_as_its_signal_is_accepted(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00", extra={"isin": ISIN_A, "series": "EQ"})
+    assert sc.replay(S1).verdict == "PASS"
+
+
+def test_replay_signal_mismatch_a_pinned_series_that_differs_from_the_signals_refuses(sc: Scenario):
+    iid = sc.intent(S1, "buy", 1, "100.00")
+    sc.pins[S1][iid]["quote"]["series"] = "BE"
+    assert refusal_of(sc) == vm_replay.SIGNAL_MISMATCH
+
+
+def test_one_signal_id_that_names_two_instruments_is_invalid_evidence(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.raw(S1, "signal", {**signal_payload("sig-1", ISIN_B), "limits_sha256": sc.limits_sha})
+    assert refusal_of(sc) == vm_replay.EVIDENCE_INVALID
+
+
+# --- a missing field is a typed refusal ------------------------------------------------------------------------------
+
+
+def evidence_with_every_kind(sc: Scenario) -> None:
+    """A denied intent, a reserved one, a booked one and a later one, so every record kind the replay reads is there."""
+
+    sc.intent(S1, "buy", 1, "100.00", mac=("deny", "capital_cap"))
+    fund(sc, quantity=10, price="100.00", charges="1")
+    sc.intent(S1, "buy", 1, "100.00")
+
+
+def drop(records: list[dict[str, Any]], kind: str, field: str) -> list[dict[str, Any]]:
+    out = [dict(r) for r in records]
+    victim = next(r for r in out if r["kind"] == kind)
+    del victim[field]
+    return out
+
+
+MISSING_FIELDS = [
+    ("denied", "code"), ("denied", "intent_id"),
+    ("intent", "seq"), ("intent", "side"), ("intent", "symbol"), ("intent", "intent_id"), ("intent", "quantity"),
+    ("intent", "limit_price"), ("intent", "signal_id"),
+    ("reservation", "intent_id"), ("reservation", "seq"),
+    ("booking_intent", "booking_id"), ("booking_intent", "intent_id"), ("booking_intent", "cumulative_quantity"),
+    ("booking_intent", "price"), ("booking_intent", "charges"),
+    ("booking_done", "booking_id"),
+]
+
+
+@pytest.mark.parametrize(("kind", "field"), MISSING_FIELDS, ids=[f"{k}.{f}" for k, f in MISSING_FIELDS])
+def test_a_record_missing_a_field_the_replay_reads_is_a_typed_refusal_not_a_bare_error(sc: Scenario, kind: str, field: str):
+    evidence_with_every_kind(sc)
+    code = refusal_of(sc, records=drop(sc.records(), kind, field))
+    assert code == vm_replay.EVIDENCE_INVALID
+
+
+@pytest.mark.parametrize("bad", ["7", None, 1.5, True, [1]])
+def test_a_seq_that_is_not_an_integer_is_a_typed_refusal(sc: Scenario, bad: Any):
+    sc.intent(S1, "buy", 1, "100.00")
+    records = [dict(r) for r in sc.records()]
+    records[-1]["seq"] = bad
+    assert refusal_of(sc, records=records) == vm_replay.EVIDENCE_INVALID
+
+
+def test_the_replay_run_lists_a_session_with_a_malformed_record_as_refused_and_fails(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00", mac=("deny", "capital_cap"))
+    records = drop(sc.records(), "denied", "code")
+    run = replay_run(
+        records, run_id=RUN, sessions=[S1], pins_by_session={S1: sc.pins_for(S1)}, vm_source=sc.vm
+    )
+    assert run.verdict == "FAIL" and run.refused == {S1: vm_replay.EVIDENCE_INVALID}
 
 
 # --- pins -------------------------------------------------------------------------------------------------------------

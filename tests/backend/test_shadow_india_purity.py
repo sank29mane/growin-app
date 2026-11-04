@@ -10,10 +10,13 @@ Rules:
 3. ``backend/execution/*`` is imported only by ``admission.py`` and ``runner.py``.
 4. Pure modules (everything but ``admission.py``, ``runner.py`` and ``__main__.py``) have no subprocess, no
    randomness, no dynamic import or eval, no ``sys.modules``; ``policy.py`` also has no clock at all.
-5. ``vm_replay.py`` (64-05 Task 2b) alone may load the recorded VM build from a checkout by path: ``importlib.util``,
-   ``sys.modules`` and the ``gateway_vm`` directory name as a string. It stays a pure module in every other respect:
-   no network, no relay client, no ``execution`` import, no static gateway import, no ``import_module``, ``exec``,
-   ``eval`` or ``__import__``, no subprocess, no randomness.
+5. ``vm_replay.py`` (64-05 Task 2b) alone may run the recorded VM build's source bytes. The exemption is not a
+   module-wide switch. It covers a short list of exact statements (``LOADER_FUNCTIONS``) inside two named
+   functions, ``_exec_source`` (``compile``, ``exec``, one ``sys.modules`` registration) and ``_forget_package``
+   (the ``sys.modules`` cleanup), and the one ``gateway_vm`` directory-name constant (``LOADER_MODULE_STATEMENTS``).
+   A statement that differs by a token, a second loader in any other function, an extra statement in an approved
+   function, ``importlib`` anywhere and every other rule (no network, no relay client, no ``execution`` import, no
+   static gateway import, no ``import_module``, ``__import__``, subprocess or randomness) are flagged as usual.
 
 Plants below are regression cases for the scanner itself.
 """
@@ -39,11 +42,43 @@ DYNAMIC_NAMES = {"importlib", "__import__", "import_module", "exec", "eval", "co
 EXECUTION_ALLOWED = {"admission.py", "runner.py"}
 EDGE_FILES = {"admission.py", "runner.py", "__main__.py"}
 NO_CLOCK_FILES = {"policy.py"}
-# The one module that loads another tree's code by path (the D-23 replay of the recorded VM build). Narrow on purpose:
-# only these importlib modules, the Name ``importlib`` they need, ``sys.modules`` and the gateway directory name.
-LOADER_FILES = {"vm_replay.py"}
-LOADER_IMPORTLIB = {"importlib", "importlib.util"}
-LOADER_NAMES = {"importlib"}
+# The one module that runs another tree's code (the D-23 replay of the recorded VM build). Narrow on purpose: it is
+# pinned to named top-level functions and, inside them, to exact statements (compared as ``ast.unparse`` text). Only
+# nodes inside a pinned statement skip the dynamic-name, ``sys.modules`` and gateway-name rules. ``importlib`` is
+# never exempt: the loader compiles the bytes it hashed and consults no import machinery.
+LOADER_FUNCTIONS: dict[str, dict[str, frozenset[str]]] = {
+    "vm_replay.py": {
+        "_exec_source": frozenset({
+            "sys.modules[module_name] = module",
+            "code = compile(source, filename, 'exec', dont_inherit=True)",
+            "exec(code, module.__dict__)",
+        }),
+        "_forget_package": frozenset({
+            "for name in [n for n in list(sys.modules) if n == package or n.startswith(package + '.')]:\n"
+            "    sys.modules.pop(name, None)",
+        }),
+    },
+}
+LOADER_MODULE_STATEMENTS: dict[str, frozenset[str]] = {
+    "vm_replay.py": frozenset({"_SOURCE_PACKAGE = 'gateway_vm'"}),
+}
+
+
+def _exempt_nodes(tree: ast.Module, filename: str) -> set[int]:
+    """Ids of the nodes inside a pinned loader statement of this file. Empty for every other file."""
+
+    functions = LOADER_FUNCTIONS.get(filename, {})
+    module_statements = LOADER_MODULE_STATEMENTS.get(filename, frozenset())
+    exempt: set[int] = set()
+    for top in tree.body:
+        if isinstance(top, ast.FunctionDef) and top.name in functions:
+            pairs = [(statement, functions[top.name]) for statement in top.body]
+        else:
+            pairs = [(top, module_statements)]
+        for statement, allowed in pairs:
+            if ast.unparse(statement) in allowed:
+                exempt.update(id(node) for node in ast.walk(statement))
+    return exempt
 
 
 def _norm(name: str) -> str:
@@ -84,6 +119,7 @@ def violations(source: str, filename: str) -> list[str]:
     found: list[str] = []
     tree = ast.parse(source)
     pure = filename not in EDGE_FILES
+    exempt = _exempt_nodes(tree, filename)
     for node in ast.walk(tree):
         for dotted in _roots(node):
             root = dotted.split(".")[0]
@@ -101,9 +137,9 @@ def violations(source: str, filename: str) -> list[str]:
                 found.append(f"banned import {dotted} in a pure module")
             if filename in NO_CLOCK_FILES and root in CLOCK_ROOTS:
                 found.append(f"clock import {dotted} in {filename}")
-            if root == "importlib" and not (filename in LOADER_FILES and dotted in LOADER_IMPORTLIB):
+            if root == "importlib":
                 found.append(f"dynamic import {dotted}")
-        if isinstance(node, ast.Name) and node.id in DYNAMIC_NAMES and not (filename in LOADER_FILES and node.id in LOADER_NAMES):
+        if isinstance(node, ast.Name) and node.id in DYNAMIC_NAMES and id(node) not in exempt:
             found.append(f"dynamic or eval name {node.id}")
         if isinstance(node, ast.Attribute):
             builtins_compile = (
@@ -111,7 +147,7 @@ def violations(source: str, filename: str) -> list[str]:
             )  # ``re.compile`` is ordinary; only the builtin is an eval route
             if (node.attr in DYNAMIC_NAMES and node.attr != "compile") or builtins_compile:
                 found.append(f"dynamic or eval attribute {node.attr}")
-            if node.attr == "modules" and isinstance(node.value, ast.Name) and node.value.id == "sys" and filename not in LOADER_FILES:
+            if node.attr == "modules" and isinstance(node.value, ast.Name) and node.value.id == "sys" and id(node) not in exempt:
                 found.append("sys.modules")
             if filename in NO_CLOCK_FILES and node.attr in {"now", "utcnow", "today", "time", "monotonic", "sleep"}:
                 found.append(f"clock call .{node.attr} in {filename}")
@@ -122,7 +158,7 @@ def violations(source: str, filename: str) -> list[str]:
             ):
                 found.append(f"reflection {node.func.id}")
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            named = {BROKER_SDK} | NETWORK_ROOTS | (set() if filename in LOADER_FILES else GATEWAY_ROOTS)
+            named = {BROKER_SDK} | NETWORK_ROOTS | (set() if id(node) in exempt else GATEWAY_ROOTS)
             if node.value.split(".")[0] in named and node.value != "":
                 found.append(f"module named by a string {node.value!r}")
     return found
@@ -163,6 +199,21 @@ def test_evidence_and_policy_import_nothing_from_the_gateway_or_the_execution_sp
 
 
 # --- plants: every one must be caught --------------------------------------------------------------------
+
+APPROVED_EXEC_SOURCE = """
+def _exec_source(module_name, filename, source, package):
+    module = types.ModuleType(module_name)
+    module.__file__ = filename
+    sys.modules[module_name] = module
+    code = compile(source, filename, "exec", dont_inherit=True)
+    exec(code, module.__dict__)
+    return module
+"""
+APPROVED_FORGET_PACKAGE = """
+def _forget_package(package):
+    for name in [n for n in list(sys.modules) if n == package or n.startswith(package + ".")]:
+        sys.modules.pop(name, None)
+"""
 
 PLANTS = [
     (f"import {BROKER_SDK}", "evidence.py", "broker sdk"),
@@ -242,6 +293,24 @@ PLANTS = [
     ("import random", "vm_replay.py", "banned import"),
     (f"import {BROKER_SDK}", "vm_replay.py", "broker sdk"),
     ("getattr(os, 'modules')", "vm_replay.py", "reflection"),
+    # importlib is no longer exempt anywhere: the loader compiles the bytes it hashed
+    ("import importlib.util", "vm_replay.py", "dynamic import"),
+    ("from importlib import util", "vm_replay.py", "dynamic import"),
+    ("import importlib.util\nspec = importlib.util.spec_from_file_location('a', 'b')", "vm_replay.py", "dynamic import"),
+    ("spec = importlib.util.spec_from_file_location('a', 'b')", "vm_replay.py", "dynamic or eval name importlib"),
+    ("from importlib.machinery import SourceFileLoader", "vm_replay.py", "dynamic import"),
+    # the pinned statements are exempt in vm_replay.py's named functions only
+    (APPROVED_EXEC_SOURCE, "evidence.py", "dynamic or eval name exec"),
+    (APPROVED_EXEC_SOURCE, "admission.py", "sys.modules"),
+    (APPROVED_FORGET_PACKAGE, "policy.py", "sys.modules"),
+    (APPROVED_EXEC_SOURCE.replace("_exec_source", "_other_loader"), "vm_replay.py", "dynamic or eval name exec"),
+    (APPROVED_FORGET_PACKAGE.replace("_forget_package", "_other"), "vm_replay.py", "sys.modules"),
+    ("def f(source, d):\n    exec(compile(source, 'x', 'exec'), d)\n", "vm_replay.py", "dynamic or eval name exec"),
+    ("def f(m):\n    sys.modules['x'] = m\n", "vm_replay.py", "sys.modules"),
+    ("sys.modules['x'] = m\n", "vm_replay.py", "sys.modules"),
+    ("_SOURCE_PACKAGE = 'gateway_vm'", "evidence.py", "named by a string"),
+    ("_OTHER = 'gateway_vm'", "vm_replay.py", "named by a string"),
+    ("def f():\n    p = 'gateway_vm'\n", "vm_replay.py", "named by a string"),
 ]
 
 
@@ -262,12 +331,11 @@ CLEAN = [
     ("from ..execution import ExecutionLedger", "runner.py"),
     ("import os, fcntl, hashlib, json, re\nre.compile('x')", "evidence.py"),
     ("from decimal import Decimal", "policy.py"),
-    # what vm_replay.py needs to load the recorded build by path
-    ("import importlib.util", "vm_replay.py"),
-    ("from importlib import util", "vm_replay.py"),
-    ("import sys\nsys.modules['x'] = 1\nsys.modules.pop('x')", "vm_replay.py"),
-    ("p = 'gateway_vm'", "vm_replay.py"),
-    ("import importlib.util\nspec = importlib.util.spec_from_file_location('a', 'b')", "vm_replay.py"),
+    # the statements vm_replay.py's two named loader functions and its directory-name constant are pinned to
+    (APPROVED_EXEC_SOURCE, "vm_replay.py"),
+    (APPROVED_FORGET_PACKAGE, "vm_replay.py"),
+    ("_SOURCE_PACKAGE = 'gateway_vm'", "vm_replay.py"),
+    ("import sys\nimport types\n" + APPROVED_EXEC_SOURCE + APPROVED_FORGET_PACKAGE + "_SOURCE_PACKAGE = 'gateway_vm'", "vm_replay.py"),
 ]
 
 
@@ -284,3 +352,69 @@ def test_a_relative_execution_import_planted_in_a_scratch_copy_of_a_real_module_
         assert violations((PKG / name).read_text(), name) == []
         found = violations(scratch.read_text(), name)
         assert any("execution import execution.ledger" in line for line in found), (name, found)
+
+
+# --- the exemption is pinned to one loader function and its exact statements -------------------------------------
+
+REAL_VM_REPLAY = (PKG / "vm_replay.py").read_text()
+
+SECOND_LOADERS = {
+    "exec in a new function": "\n\ndef _second_loader(source, scope):\n    exec(compile(source, 'x', 'exec'), scope)\n",
+    "sys.modules in a new function": "\n\ndef _second_loader(module):\n    sys.modules['x'] = module\n",
+    "importlib spec loader in a new function": (
+        "\n\ndef _second_loader(path):\n    spec = importlib.util.spec_from_file_location('x', path)\n"
+        "    module = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(module)\n"
+    ),
+    "importlib with its import": (
+        "\n\ndef _second_loader(path):\n    import importlib.util\n"
+        "    return importlib.util.spec_from_file_location('x', path)\n"
+    ),
+    "source file loader": "\nfrom importlib.machinery import SourceFileLoader\n",
+    "the approved statements copied under another name": APPROVED_EXEC_SOURCE.replace("_exec_source", "_exec_again"),
+    "the gateway name in another constant": "\n_OTHER_PACKAGE = 'gateway_vm'\n",
+}
+
+
+def test_the_real_vm_replay_is_clean_and_the_pins_match_its_text():
+    assert violations(REAL_VM_REPLAY, "vm_replay.py") == []
+    tree = ast.parse(REAL_VM_REPLAY)
+    for function, statements in LOADER_FUNCTIONS["vm_replay.py"].items():
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function)
+        assert statements <= {ast.unparse(st) for st in node.body}, function  # every pin is in use
+
+
+@pytest.mark.parametrize("plant", sorted(SECOND_LOADERS))
+def test_a_second_loader_elsewhere_in_vm_replay_is_flagged(plant):
+    mutated = REAL_VM_REPLAY + SECOND_LOADERS[plant]
+    assert mutated != REAL_VM_REPLAY
+    assert violations(mutated, "vm_replay.py"), plant
+
+
+DISALLOWED_IN_APPROVED_FUNCTION = {
+    "a second exec in _exec_source": ("    exec(code, module.__dict__)\n", "    exec(code, module.__dict__)\n    exec(open('x').read(), {})\n"),
+    "a second registration in _exec_source": (
+        "    sys.modules[module_name] = module  # the relative imports inside the package resolve through here\n",
+        "    sys.modules[module_name] = module\n    sys.modules['socket'] = module\n",
+    ),
+    "an exec of other scope": ("    exec(code, module.__dict__)\n", "    exec(code, {})\n"),
+    "compile with another flag": (
+        "    code = compile(source, filename, \"exec\", dont_inherit=True)\n", "    code = compile(source, filename, \"exec\")\n"
+    ),
+    "a nested loader in _exec_source": (
+        "    exec(code, module.__dict__)\n", "    exec(code, module.__dict__)\n    def inner(d):\n        exec(code, d)\n"
+    ),
+    "a foreign module popped in _forget_package": (
+        "        sys.modules.pop(name, None)\n", "        sys.modules.pop(name, None)\n    sys.modules.pop('socket', None)\n"
+    ),
+    "the pop aimed elsewhere": ("        sys.modules.pop(name, None)\n", "        sys.modules.pop('os', None)\n"),
+    "the approved function renamed": ("def _exec_source(", "def _exec_other("),
+}
+
+
+@pytest.mark.parametrize("plant", sorted(DISALLOWED_IN_APPROVED_FUNCTION))
+def test_a_disallowed_statement_inside_the_approved_function_is_flagged(plant):
+    old, new = DISALLOWED_IN_APPROVED_FUNCTION[plant]
+    assert old in REAL_VM_REPLAY, plant
+    mutated = REAL_VM_REPLAY.replace(old, new, 1)
+    assert mutated != REAL_VM_REPLAY
+    assert violations(mutated, "vm_replay.py"), plant
