@@ -62,6 +62,22 @@ def test_heuristic_only_accepts_capitalised_tokens(message, expected):
     assert extract_ticker_from_text(message) == expected
 
 
+@pytest.mark.parametrize("abbr", ["P&L", "M&A", "R&D", "Q&A", "S&P"])
+def test_ampersand_abbreviations_are_not_tickers(abbr):
+    assert extract_ticker_from_text(f"What is my {abbr} this week?") is None
+    assert extract_ticker_from_text(f"{abbr} then buy TCS") == "TCS"
+    assert extract_ticker_from_text(f"({abbr})") is None
+    assert validate_ticker_symbol(abbr) is None
+    assert validate_ticker_symbol(abbr.lower()) is None
+
+
+def test_real_ampersand_symbols_still_pass():
+    # NSE lists M&M and M&MFIN, so `&` itself must stay legal.
+    assert extract_ticker_from_text("how is M&M doing") == "M&M"
+    assert extract_ticker_from_text("is M&MFIN a good hold") == "M&MFIN"
+    assert validate_ticker_symbol("M&M") == "M&M"
+
+
 @pytest.mark.parametrize(
     "word", ["Should", "should", "Buy", "buy", "Reliance", "reliance", "Tomorrow", "Swing", "margin"]
 )

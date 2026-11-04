@@ -1,42 +1,41 @@
-import pytest
+"""Live NewsData.io market endpoint check.
 
-import requests
+Hits the real provider, so it runs only on an explicit opt-in:
+GROWIN_LIVE_PROVIDER_TESTS=1 (and NEWSDATA_API_KEY set in the environment or in
+backend/<dotenv file>). The dotenv file is read inside the test, after the opt-in,
+never at import time.
+"""
+
 import os
+
 import pytest
-from dotenv import load_dotenv
+import requests
 
-load_dotenv("backend/.env")
+LIVE_OPT_IN_VAR = "GROWIN_LIVE_PROVIDER_TESTS"
 
-api_key = os.getenv("NEWSDATA_API_KEY")
 
-@pytest.mark.skipif(not os.getenv('NEWSDATA_API_KEY'), reason='NEWSDATA_API_KEY not found in env')
+@pytest.mark.skipif(
+    os.getenv(LIVE_OPT_IN_VAR) != "1",
+    reason=f"live NewsData.io call; set {LIVE_OPT_IN_VAR}=1 to run",
+)
 def test_market_endpoint():
-    print(f"Testing NewsData.io 'market' endpoint with key: {api_key[:5]}...")
-    
-    # User suggested URL structure
+    from dotenv import load_dotenv
+
+    load_dotenv("backend/.env")
+    api_key = os.getenv("NEWSDATA_API_KEY")
+    if not api_key:
+        pytest.skip("NEWSDATA_API_KEY not set")
+
     url = "https://newsdata.io/api/1/market"
     params = {
         "apikey": api_key,
         "removeduplicate": 0,
-        "excludefield": "ai_summary"
+        "excludefield": "ai_summary",
     }
-    
-    try:
-        print(f"GET {url}")
-        response = requests.get(url, params=params)
-        print(f"Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            results = data.get('results', [])
-            print(f"✅ Success! Found {len(results)} items.")
-            if results:
-                print(f"Sample: {results[0].get('title', 'No Title')}")
-        else:
-            print(f"❌ Failed: {response.text}")
-            
-    except Exception as e:
-        print(f"❌ Error: {e}")
+    response = requests.get(url, params=params, timeout=30)
+    assert response.status_code == 200, f"market endpoint returned {response.status_code}"
+    assert isinstance(response.json().get("results", []), list)
+
 
 if __name__ == "__main__":
     test_market_endpoint()
