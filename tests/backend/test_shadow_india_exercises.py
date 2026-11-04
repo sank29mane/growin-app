@@ -41,7 +41,7 @@ from shadow_india import __main__ as cli
 from shadow_india import policy
 from shadow_india.admission import ShadowAbort
 from shadow_india.evidence import RUN_CLASSES, EvidenceCorrupt, EvidenceStore
-from shadow_india.runner import FillOutcome, FillQuery, session_id_for
+from shadow_india.runner import ENTRY_CASH_BUFFER, FillOutcome, FillQuery, session_id_for
 from shadow_india_fake_signer_support import (
     ConnectionSpy,
     ExerciseMetadata,
@@ -489,20 +489,21 @@ def test_a_held_out_halve_blocks_only_its_own_name_so_other_entries_reach_the_ru
 
 
 def test_a_held_out_halve_credits_no_cash_to_an_entry_that_runs_beside_it(make_exercise):
-    """Row ``cash`` through ``_entries`` (D-37 option D). Break-proof: credit the held-out halve's shares to
-    ``deployable`` (80 x 89 more) and the entry is sized larger than the account's own cash allows: this fails."""
+    """Row ``cash`` through ``_entries`` (D-37 option D). Break-proof: credit the resting sells' shares to
+    ``deployable`` and the entry is sized above what the account's own cash allows: this fails."""
     ex = make_exercise()
     held_out_halve_world(ex)
+    ex.world.reference.adv_by_isin[rt.ISINS["DDD"]] = Decimal("100000000")  # the ADV fraction must not be what binds
     snapshot = ex.runner._portfolio.snapshot()
     deployable = snapshot.cash - snapshot.reserved
-    limits = ex.world.inputs.strategy.limits
-    assert deployable < Decimal(limits.per_position_cap)  # cash, not the cap, is what binds
+    per_position_cap = Decimal(ex.world.inputs.strategy.limits.per_position_cap)
+    assert deployable < per_position_cap  # cash, not the cap, is what binds
     buys = {r["intent_id"] for r in rt.intents_of(ex.world, "BUY")}
     ex.script.result = rt.evaluated("DDD")
     ex.decide()
     (new,) = [r for r in rt.intents_of(ex.world, "BUY") if r["intent_id"] not in buys]
-    assert new["symbol"] == "DDD" and int(new["quantity"]) * Decimal(new["limit_price"]) <= deployable
-    assert int(new["quantity"]) >= 1
+    limit = Decimal(new["limit_price"])
+    assert new["symbol"] == "DDD" and int(new["quantity"]) == int(deployable / (limit * (1 + ENTRY_CASH_BUFFER)))
 
 
 def test_an_unfilled_exit_keeps_its_shares_reserved_until_the_day_expires_then_stays_owed_and_the_stop_latch_blocks_buys(make_exercise):
