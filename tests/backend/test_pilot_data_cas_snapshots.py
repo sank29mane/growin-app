@@ -700,14 +700,56 @@ SCENARIOS: dict[str, tuple[Callable[[ck.World], Any], str]] = {
 }
 
 
+def _sc_icici_missing(w: ck.World) -> Any:
+    w.import_(D_PREV)  # the NSE snapshot exists, the ICICI master for that date does not
+    return w.resolve("RELIND", D_PREV)
+
+
+def _sc_index_missing(w: ck.World) -> Any:
+    w.import_()
+    w.log.approve(2)
+    return w.resolve("RELIND", version=2)
+
+
+def _sc_log_absent(w: ck.World) -> Any:
+    w.import_()
+    w.log.entries.clear()
+    w.log.flush()
+    return w.resolve("RELIND")
+
+
+# Every branch of ``resolve_broker`` that ends without a class, by (sub_reason, detail).
+BRANCHES: dict[str, tuple[Callable[[ck.World], Any], str, str]] = {
+    "no_snapshot_for_date": (_sc_missing, "snapshot_missing", "no_snapshot_for_date"),
+    "icici_master_missing": (_sc_icici_missing, "snapshot_missing", "icici_master_missing"),
+    "index_missing_for_procedure": (_sc_index_missing, "snapshot_missing", "index_missing_for_procedure"),
+    "stored_entry_is_for_another_date": (_sc_wrong_date, "snapshot_wrong_date", "stored_entry_is_for_another_date"),
+    "raw_bytes_do_not_match_their_hash": (_sc_hash, "snapshot_hash_mismatch", "raw_bytes_do_not_match_their_hash"),
+    "procedure_version_revoked": (_sc_unapproved, "procedure_unapproved", "procedure_version_revoked"),
+    "procedure_version_absent": (_sc_log_absent, "procedure_unapproved", "procedure_version_absent"),
+    "icici_series_BE": (_imported("HDFBE"), "series_unsupported", "icici_series_BE"),
+    "icici_isin_fails_validator": (_imported("DUMMYC"), "identity_invalid", "icici_isin_fails_validator"),
+    "icici_unmapped": (_imported("NOSUCH"), "identity_mismatch", "icici_unmapped"),
+    "isin_not_in_snapshot": (_imported("ABSENT"), "identity_mismatch", "isin_not_in_snapshot"),
+    "symbol_has_no_active_row": (_imported("TATOLD"), "identity_mismatch", "no_active_row"),
+    "isin_has_no_active_row": (_imported("GONECO"), "identity_mismatch", "no_active_row"),
+    "stock_code_ambiguous": (_imported("TWINC"), "identity_ambiguous", "stock_code_ambiguous"),
+    "symbol_carries_more_than_one_isin": (_imported("AMBIG"), "identity_ambiguous", "symbol_carries_more_than_one_isin"),
+    "flag_unknown_usable_first": (_imported("UNKA"), "flag_unknown", "flag_unknown_for_isin"),
+    "flag_unknown_unknown_first": (_imported("UNKD"), "flag_unknown", "flag_unknown_for_isin"),
+    "flag_conflict": (_imported("CONFA"), "flag_conflict", "flag_conflict_for_isin"),
+}
+
+
 def test_cas_no_default_class(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every unresolved case, run for real, is a CasUnresolved. Nothing falls back to a class."""
-    for name, (run, expected) in SCENARIOS.items():
+    """Every unresolved branch, run for real, is a CasUnresolved with its reason. Nothing falls back to a class."""
+    assert {sub for _, sub, _ in BRANCHES.values()} == set(SUB_REASONS)
+    for name, (run, sub_reason, detail) in BRANCHES.items():
         folder = tmp_path / name
         folder.mkdir()
         verdict = run(ck.make_world(folder, monkeypatch, icici_days=(D, D_NEXT)))
         assert isinstance(verdict, CasUnresolved), f"{name} resolved to {verdict!r}"
-        assert verdict.sub_reason == expected, name
+        assert (verdict.sub_reason, verdict.detail) == (sub_reason, detail), name
 
 
 def test_cas_scenarios_cover_every_sub_reason() -> None:
