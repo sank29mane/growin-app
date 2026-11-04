@@ -1072,65 +1072,73 @@ def test_a_real_tls_send_into_a_peer_that_stops_reading_ends_at_the_total_deadli
     when an earlier send in the same request has already used part of the deadline. So the request
     carries a large header block that a slow peer takes about 0.75 s to read. The peer then stops
     reading for good, and the body send blocks. read_s (5 s) is far above what is left of total_s
-    (1.5 s): with the cap, the stalled body send times out at the total deadline. Without it, the send
+    (2.5 s): with the cap, the stalled body send times out at the total deadline. Without it, the send
     keeps the timeout it was given at the start and runs about 0.75 s past the deadline.
     """
     pytest.importorskip("cryptography")
     from gateway_vm import pool as pool_module
 
     cert, key = _throwaway_tls_files(tmp_path)
-    total_s, read_s, margin = 1.5, 5.0, 0.35
+    total_s, read_s, margin = 2.5, 5.0, 0.4
+    headers_min = 0.5  # below this the peer swallowed the headers too fast to prove anything
+    headers_max = total_s - 0.4  # above this the headers ate the deadline, so the body send never ran
+
     server = _StallingTLSServer(cert, key)
-
-    # Trust only the throwaway cert, on top of the pool's own strict context (verification stays on).
-    real_ctx = pool_module._transport._tls_context
-
-    def ctx_trusting_throwaway():
-        ctx = real_ctx()
-        ctx.load_verify_locations(cafile=str(cert))
-        return ctx
-
-    monkeypatch.setattr(pool_module._transport, "_tls_context", ctx_trusting_throwaway)
-
-    # Record, at every send, the socket's own timeout and the deadline the pool gave this request.
-    # Shrink the send buffer so the kernel cannot soak up the header block and hide the slow reader.
-    sends: list[tuple[float, float, float]] = []  # (now, raw.gettimeout(), deadline)
-    client_locals: set[tuple[str, int]] = set()
-
-    class RecordingSocket(_CountingSocket):
-        def __init__(self, raw) -> None:
-            super().__init__(raw)
-            raw.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
-            client_locals.add(tuple(raw.getsockname()[:2]))
-
-        def send(self, data, flags: int = 0) -> int:
-            sends.append((time.monotonic(), self.raw.gettimeout(), self.deadline))
-            return super().send(data, flags)
-
-    monkeypatch.setattr(pool_module, "_CountingSocket", RecordingSocket)
-
-    transport = PooledTransport({"127.0.0.1": AllowedHost("https", server.port)})
     try:
-        started = time.monotonic()
-        with pytest.raises(TransportError) as err:
-            transport.request(
-                "POST",
-                f"https://127.0.0.1:{server.port}/up",
-                headers={"X-Test": "1", "X-Pad": "a" * 1_200_000},
-                body=b"x" * (1 << 20),
-                timeouts=Timeouts(connect_s=2.0, read_s=read_s, total_s=total_s),
-                max_bytes=1 << 20,
-            )
-        elapsed = time.monotonic() - started
+        # Trust only the throwaway cert, on top of the pool's own strict context (verification stays on).
+        real_ctx = pool_module._transport._tls_context
+
+        def ctx_trusting_throwaway():
+            ctx = real_ctx()
+            ctx.load_verify_locations(cafile=str(cert))
+            return ctx
+
+        monkeypatch.setattr(pool_module._transport, "_tls_context", ctx_trusting_throwaway)
+
+        # Record, at every send, the socket's own timeout and the deadline the pool gave this request.
+        # Shrink the send buffer so the kernel cannot soak up the header block and hide the slow reader.
+        sends: list[tuple[float, float, float]] = []  # (now, raw.gettimeout(), deadline)
+        client_locals: set[tuple[str, int]] = set()
+
+        class RecordingSocket(_CountingSocket):
+            def __init__(self, raw) -> None:
+                super().__init__(raw)
+                raw.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+                client_locals.add(tuple(raw.getsockname()[:2]))
+
+            def send(self, data, flags: int = 0) -> int:
+                sends.append((time.monotonic(), self.raw.gettimeout(), self.deadline))
+                return super().send(data, flags)
+
+        monkeypatch.setattr(pool_module, "_CountingSocket", RecordingSocket)
+
+        transport = PooledTransport({"127.0.0.1": AllowedHost("https", server.port)})
+        try:
+            started = time.monotonic()
+            with pytest.raises(TransportError) as err:
+                transport.request(
+                    "POST",
+                    f"https://127.0.0.1:{server.port}/up",
+                    headers={"X-Test": "1", "X-Pad": "a" * 1_200_000},
+                    body=b"x" * (1 << 20),
+                    timeouts=Timeouts(connect_s=2.0, read_s=read_s, total_s=total_s),
+                    max_bytes=1 << 20,
+                )
+            elapsed = time.monotonic() - started
+        finally:
+            transport.close()
     finally:
-        transport.close()
         server.close()
 
     assert err.value.kind == "timeout"
     # Precondition: the headers were fully written well inside the deadline, then the peer stopped.
     # If this fails the machine was too slow or too fast for the setup, not the cap.
     assert server.headers_done_at is not None
-    assert 0.3 < server.headers_done_at - started < total_s - 0.4, f"headers done at {server.headers_done_at - started:.2f}s"
+    headers_took = server.headers_done_at - started
+    assert headers_min < headers_took < headers_max, (
+        f"setup precondition, not a cap failure: the machine was too slow or too fast for this proof "
+        f"(headers done at {headers_took:.2f}s, allowed {headers_min:.2f}s to {headers_max:.2f}s)"
+    )
     assert len(sends) >= 2
     # Ended at the total deadline, not read_s (or the start-of-request timeout) after the stall began.
     assert elapsed < total_s + margin, f"took {elapsed:.2f}s"
