@@ -1,5 +1,22 @@
 {
   "schema": "growin.gateway.nse_trading_holidays/1",
-  "status": "UNPOPULATED: the operator fills this from the NSE trading-holiday circular before the 63-06 window. Every weekday with no entry here is treated as a session that needs a close; an empty table therefore refuses orders across a real holiday (fail closed), never skips it.",
-  "holidays": []
+  "status": "POPULATED for calendar year 2026 only, from the NSE Equities trading-holiday list (nseindia.com Resources > Exchange Communication > Holidays; saved 2026-10-29, operator re-checked 2026-11-05). Weekend holidays are not listed (weekends are never sessions here). The Sunday 2026-11-08 Muhurat session is not a session for this table. Add 2027 before 2027-01-01: an unlisted weekday holiday makes the table expect a close that never comes, so orders are refused (fail closed), never skipped.",
+  "holidays": [
+    "2026-01-15",
+    "2026-01-26",
+    "2026-03-03",
+    "2026-03-26",
+    "2026-03-31",
+    "2026-04-03",
+    "2026-04-14",
+    "2026-05-01",
+    "2026-05-28",
+    "2026-06-26",
+    "2026-09-14",
+    "2026-10-02",
+    "2026-10-20",
+    "2026-11-10",
+    "2026-11-24",
+    "2026-12-25"
+  ]
 }

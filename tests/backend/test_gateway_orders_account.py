@@ -669,9 +669,25 @@ def test_expected_sessions_are_the_weekdays_less_the_listed_holidays():
         sessions.expected_sessions(datetime(2026, 10, 9), date(2026, 10, 14), ())
 
 
-def test_the_packaged_holiday_table_loads_and_is_marked_unpopulated():
-    assert sessions.load_holidays() == frozenset()
-    assert "UNPOPULATED" in sessions.HOLIDAY_TABLE_PATH.read_text(encoding="utf-8")
+# NSE Equities trading holidays 2026, weekdays only (nseindia.com holiday page, operator-checked 2026-11-05).
+NSE_WEEKDAY_HOLIDAYS_2026 = frozenset(
+    date.fromisoformat(day)
+    for day in (
+        "2026-01-15", "2026-01-26", "2026-03-03", "2026-03-26", "2026-03-31", "2026-04-03",
+        "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-02",
+        "2026-10-20", "2026-11-10", "2026-11-24", "2026-12-25",
+    )
+)
+
+
+def test_the_packaged_holiday_table_lists_exactly_the_2026_nse_weekday_holidays():
+    assert sessions.load_holidays() == NSE_WEEKDAY_HOLIDAYS_2026
+    assert "UNPOPULATED" not in sessions.HOLIDAY_TABLE_PATH.read_text(encoding="utf-8")
+
+
+def test_the_packaged_table_skips_diwali_balipratipada_when_counting_sessions():
+    days = sessions.expected_sessions(date(2026, 11, 9), date(2026, 11, 11), sessions.load_holidays())
+    assert days == [date(2026, 11, 9), date(2026, 11, 11)]
 
 
 @pytest.mark.parametrize(

@@ -263,8 +263,10 @@ class OrderStack(Stack):
         limits: bool | int = True,
         key: bool | int = True,
         state_dir: bool = True,
-        holidays: frozenset[date] | None = None,
+        holidays: frozenset[date] | None = frozenset(),
     ) -> None:
+        # The fixtures run on a synthetic October 2026 where every weekday trades. Default to no holidays so
+        # the real NSE table (which lists Dussehra 2026-10-20) never leaks in; None means the packaged table.
         self.holidays = holidays
         self.tmp = tmp_path
         self.metadata = metadata
@@ -820,6 +822,16 @@ def test_missed_sessions_are_replayed_and_evaluated_in_order(stack, token):
     state = stack.state(token)
     assert state["last_evaluated_session"] == "2026-10-20"
     assert Decimal(state["drawdown"]) < 0 and "stop" in state["latches"]
+
+
+def test_the_service_uses_the_packaged_nse_table_when_no_holidays_are_given(tmp_path, metadata):
+    """Production builds pass holidays=None, so the packaged table decides: Dussehra 2026-10-20 is skipped."""
+    stack = OrderStack(tmp_path, metadata, holidays=None)
+    token = stack.login()
+    seed_abc_stopped(stack)
+    stack.mint(token)
+    assert stack.state(token)["last_evaluated_session"] == "2026-10-19"
+    assert stack.transport.non_get() == [] and set(metadata.methods) <= {"GET"}
 
 
 def test_no_trusted_mark_refuses_every_order(stack, token):
