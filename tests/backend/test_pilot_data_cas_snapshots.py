@@ -795,6 +795,21 @@ def uncovered_module_attribute_reads() -> list[str]:
     return sorted(set(problems))
 
 
+def local_imports_in_fingerprinted() -> list[str]:
+    """An ``import`` inside a fingerprinted callable binds a name the two walks above cannot resolve (it is not in the
+    function's globals), so a helper reached that way could change without changing impl_sha256. None is allowed: a
+    fingerprinted callable takes its dependencies as module globals, where the walks see them.
+    """
+    problems: list[str] = []
+    for name, owner, attr in cs.FINGERPRINTED:
+        for fn in _functions_of(getattr(owner, attr)):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    problems.append(f"{name}: local import {ast.unparse(node)}")
+    return sorted(set(problems))
+
+
 def uncovered_helper() -> None:  # a global of this test module, used by the planted dependency below
     return None
 
@@ -812,6 +827,23 @@ def test_cas_procedure_fingerprint_covers_dependencies() -> None:
     assert uncovered_dependencies() == []
     assert uncovered_module_reads() == []
     assert uncovered_module_attribute_reads() == []
+    assert local_imports_in_fingerprinted() == []
+
+
+def test_cas_procedure_fingerprint_walk_catches_a_local_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 3 counterexample: a local import hides its helper from both walks, so it is reported on its own."""
+
+    def lookup_with_a_local_import(store: Any, snapshot: Any, stock_code: str) -> Any:
+        import pilot_data.core as helper
+
+        return helper.utc_now()
+
+    assert local_imports_in_fingerprinted() == []
+    monkeypatch.setattr(sm, "lookup_stock_code", lookup_with_a_local_import)
+    assert local_imports_in_fingerprinted() == [
+        "security_master.lookup_stock_code: local import import pilot_data.core as helper"
+    ]
+    assert uncovered_module_attribute_reads() == []  # the gap this check closes
 
 
 def test_cas_procedure_fingerprint_walk_catches_an_uncovered_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
