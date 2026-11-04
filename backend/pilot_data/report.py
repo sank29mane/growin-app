@@ -250,7 +250,7 @@ def _write_json_report(root: Path, prefix: str, report: CaveatedResult, as_of: d
     text = json.dumps(ordered, indent=2)
     if path.exists():
         # Never trust or overwrite what is already there: it must be exactly this report, and read-only.
-        if path.read_text(encoding="utf-8") != text:
+        if path.read_bytes() != text.encode("utf-8"):  # bytes, so CRLF or BOM edits are caught
             raise PilotDataError("report_file_altered", f"{path.name} exists and differs from this report")
         if stat.S_IMODE(path.stat().st_mode) != 0o444:
             raise PilotDataError("report_file_writable", f"{path.name} exists but is not read-only (0444)")

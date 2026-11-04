@@ -697,6 +697,19 @@ def test_a_report_file_that_already_exists_is_checked_not_trusted(relay_store, t
     assert altered.value.code == "report_file_altered" and "dataset_published" in first.read_text()  # not overwritten
 
 
+def test_a_report_file_with_only_line_endings_changed_is_refused(relay_store, tmp_path):
+    report = part2(relay_store)
+    path = write_part2_report(tmp_path / "out", report)
+    good = path.read_bytes()
+    path.chmod(0o644)
+    path.write_bytes(good.replace(b"\n", b"\r\n"))  # same text once newlines are normalised
+    path.chmod(0o444)
+    assert path.read_text(encoding="utf-8") == good.decode("utf-8")  # text-mode read cannot see the change
+    with pytest.raises(PilotDataError) as altered:
+        write_part2_report(tmp_path / "out", report)
+    assert altered.value.code == "report_file_altered" and b"\r\n" in path.read_bytes()
+
+
 def test_the_part1_writer_shares_the_same_check(store, tmp_path):
     build_world(store)
     report = run(store)
