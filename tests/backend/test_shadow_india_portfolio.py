@@ -3125,6 +3125,23 @@ def test_d37_after_a_release_a_held_out_halve_blocks_only_its_own_name_but_an_am
     assert ambiguous.portfolio.entry_block_reasons(A) == ("exit_open", "instrument_paused")
 
 
+def test_d37_a_held_out_exit_beside_a_waiting_exit_still_blocks_the_run_after_both_latches_are_reset(tmp_path):
+    """Mixed case (Sol P2). AAA is held out under a Q-6 pause; BBB's stop exit is still owed and its sell rests
+    (``waiting``); the stop latch and the halt are reset. Break-proof: widen the exception to
+    ``bool(open_exits) and not frozen`` and the reasons read empty: this fails."""
+    world = probe_world(tmp_path, structural=True)  # AAA: halve of 20, held out; BBB: stop of 60
+    world.latch.reset("stop", "operator", key=B)
+    release(world)
+    state = world.latch.load()
+    assert not state.halt and state.stops == {} and sorted(state.open_exits) == [A, B]
+    world.account.sells = {"BBB": 60}  # BBB's exit sell rests
+    plan = world.portfolio.exit_proposals(D3)
+    assert plan.held_out == (A,) and plan.waiting == (B,) and plan.proposals == ()
+    assert world.portfolio.entry_block_reasons() == ("exit_open",)
+    assert world.portfolio.entry_block_reasons(ISINS["TCS"]) == ("exit_open",)
+    assert world.portfolio.entry_block_reasons(A) == ("exit_open", "instrument_paused")
+
+
 def test_d37_a_waiting_exit_blocks_the_run(tmp_path):
     """A halve with a sell resting in the account is ``waiting``: still an open exit, still a block after release."""
     world = halved_world(tmp_path)

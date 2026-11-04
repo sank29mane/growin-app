@@ -430,14 +430,15 @@ def test_a_halve_owed_after_the_release_refuses_the_entry_once_and_mints_no_inte
     assert ex.world.latch.load().halt is False and len(ex.world.latch.load().open_exits) == 3  # the latch is released
 
 
-def held_out_halve_world(ex: Exercise) -> str:
-    """After a release, AAA owes a halve held out under a Q-6 pause; BBB and CCC filled theirs. Returns AAA's ISIN."""
+def held_out_halve_world(ex: Exercise, filled: tuple[str, ...] = ("BBB", "CCC")) -> str:
+    """After a release, AAA owes a halve held out under a Q-6 pause; the names in ``filled`` filled theirs and any other
+    keeps its halve owed (its sell still rests: ``waiting``). Returns AAA's ISIN."""
 
     halve_setup(ex)
     ex.script.result = rt.evaluated(entries=False)
     ex.decide()
     sells = exit_sells(ex)
-    for symbol in ("BBB", "CCC"):
+    for symbol in filled:
         ex.runner._prep.book_fill(
             proposal_id=sells[symbol]["intent_id"], cumulative_quantity=Decimal(80), price=Decimal("89"),
             charges=Decimal(0), schedule_sha256=rt.sha("schedule"), scenario_set_sha256=rt.sha("scenario"),
@@ -448,10 +449,29 @@ def held_out_halve_world(ex: Exercise) -> str:
     ex.decide()  # AAA is paused (Q-6); its halve is held out
     ex.runner._portfolio.release_halt("operator", "accept the loss", rebase_halt_anchor=True)
     isin = rt.ISINS["AAA"]
-    assert sorted(ex.world.latch.load().open_exits) == [isin]
+    owed = {"AAA", "BBB", "CCC"} - set(filled)  # AAA is never filled here: it is held out
+    assert sorted(ex.world.latch.load().open_exits) == sorted(rt.ISINS[x] for x in owed)
     assert ex.runner._portfolio.exit_proposals(date(2026, 10, 23)).held_out == (isin,)
     assert ex.runner._portfolio.snapshot().open_sells[isin] == 80  # its sell still rests: the shares stay reserved
     return isin
+
+
+def test_a_held_out_halve_beside_a_waiting_halve_still_blocks_the_run_and_the_runner_refuses_the_entry(make_exercise):
+    """Mixed case (Sol P2): AAA is held out under Q-6, BBB's halve is still owed with its sell resting (``waiting``), and
+    the halt is released. Break-proof: widen the exception to ``bool(open_exits) and not frozen`` (any held-out exit
+    lifts the block) and the entry is admitted: this fails. Dropping ``exit_open`` from the runner's early-return tuple
+    writes a second skip line (EEE): this fails too."""
+    ex = make_exercise()
+    held_out_halve_world(ex, filled=("CCC",))
+    plan = ex.runner._portfolio.exit_proposals(date(2026, 10, 23))
+    assert plan.held_out == (rt.ISINS["AAA"],) and plan.waiting == (rt.ISINS["BBB"],)
+    assert ex.runner._portfolio.entry_block_reasons(rt.ISINS["DDD"]) == ("exit_open",)
+    assert ex.runner._portfolio.entry_block_reasons(rt.ISINS["AAA"]) == ("exit_open", "instrument_paused")
+    buys = {r["intent_id"] for r in rt.intents_of(ex.world, "BUY")}
+    ex.script.result = rt.evaluated("DDD", "EEE")
+    report = ex.decide()
+    assert [(i, w) for i, w in report.skipped if w.startswith("entry_blocked")] == [(rt.ISINS["DDD"], "entry_blocked:exit_open")]
+    assert {r["intent_id"] for r in rt.intents_of(ex.world, "BUY")} == buys  # no entry reached the VM
 
 
 def test_a_held_out_halve_blocks_only_its_own_name_so_other_entries_reach_the_runner_and_the_held_out_name_keeps_its_slot(
