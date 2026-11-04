@@ -84,7 +84,7 @@ class CircuitBreaker:
         if self._state == CircuitState.HALF_OPEN:
             # Failure during testing reopens immediately
             self._state = CircuitState.OPEN
-            logger.warning(f"CircuitBreaker[{self.name}]: HALF_OPEN -> OPEN (failure during test: {error})")
+            logger.warning(f"CircuitBreaker[{self.name}]: HALF_OPEN -> OPEN (failure during test: {type(error).__name__})")
         elif self._state == CircuitState.CLOSED and self._failure_count >= self.failure_threshold:
             self._state = CircuitState.OPEN
             logger.warning(f"CircuitBreaker[{self.name}]: CLOSED -> OPEN (threshold reached: {self._failure_count} failures)")

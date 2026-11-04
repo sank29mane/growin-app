@@ -215,6 +215,7 @@ Query: "{clean_query}"
                 "type": intent_type,
                 "needs": needs,
                 "primary_ticker": ticker,
+                "ticker_source": "coordinator",
                 "reason": "Unified Routing"
             }
         except (ModelRegistryError, ProviderError):
@@ -225,6 +226,29 @@ Query: "{clean_query}"
 
             handle_error(e, "Orchestrator routing failed", logger, raise_error=False)
             return self._heuristic_classify(query)
+
+    @staticmethod
+    def _reconcile_ticker(chat_ticker: Optional[str], intent_info: Dict[str, Any], query: Optional[str] = None) -> Optional[str]:
+        """
+        Pick the ticker for this request.
+
+        1. An explicit `$SYMBOL` the user typed always wins.
+        2. Otherwise the coordinator's TICKER beats the regex guess from chat, provided it
+           passes the same validation as the heuristic (a stop word like BUY is rejected).
+        3. A heuristic-only intent (no routing LLM) never overrides the chat guess.
+        4. If nothing qualifies the result is whatever chat found, else None.
+        """
+        from utils import extract_dollar_ticker, validate_ticker_symbol
+
+        explicit = extract_dollar_ticker(query or "")
+        if explicit:
+            return explicit
+        routed = validate_ticker_symbol(intent_info.get("primary_ticker"))
+        if routed and intent_info.get("ticker_source") == "coordinator":
+            if chat_ticker and chat_ticker != routed:
+                logger.info(f"Ticker: coordinator {routed} overrides heuristic {chat_ticker}")
+            return routed
+        return chat_ticker or routed
 
     def _heuristic_classify(self, query: str) -> Dict[str, Any]:
         """Lightweight keyword-based intent classification when routing LLM is unavailable."""
@@ -256,14 +280,10 @@ Query: "{clean_query}"
         else:
             intent_type = "market_analysis"
         
-        # Try to extract ticker from query
-        ticker = None
-        words = query.upper().split()
-        for word in words:
-            if len(word) >= 2 and len(word) <= 5 and word.isalpha() and word not in ["ISA", "INVEST", "MY", "DEEP", "DIVE", "MORE", "SOME", "RSI", "MACD", "THE", "AND", "FOR", "HOW", "WHAT"]:
-                ticker = word
-                break
-        
+        # Capitals-only heuristic; ordinary words never become tickers.
+        from utils import extract_ticker_from_text
+        ticker = extract_ticker_from_text(query)
+
         needs = needs_map.get(intent_type, ["quant", "forecast"])
         return {
             "type": intent_type,
@@ -295,6 +315,7 @@ Query: "{clean_query}"
         # 2. Routing Phase
         status_manager.set_status("orchestrator", "working", "Classifying Intent...")
         intent_info = await self._classify_intent(query)
+        ticker = self._reconcile_ticker(ticker, intent_info, query)
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:
             from utils import extract_ticker_from_text
@@ -598,8 +619,7 @@ Query: "{clean_query}"
         
         # 1. Routing & Context (Fast)
         intent_info = await self._classify_intent(query)
-        if not ticker: 
-            ticker = intent_info.get("primary_ticker")
+        ticker = self._reconcile_ticker(ticker, intent_info, query)
             
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:
