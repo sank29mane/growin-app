@@ -13,7 +13,7 @@ import io
 import os
 import sys
 import zipfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -491,7 +491,7 @@ def test_monday_nets_friday_sales_not_sunday():
     assert {h.isin: h.quantity for h in acct.snapshot().holdings} == {ISIN_A: 6}
 
 
-WEDNESDAY_AFTER_DIWALI = datetime(2026, 11, 11, 4, 30, tzinfo=timezone.utc)  # 10:00 IST; Tue 10 Nov is a listed holiday
+WEDNESDAY_AFTER_DIWALI = datetime(2026, 11, 11, 4, 30, tzinfo=UTC)  # 10:00 IST; Tue 10 Nov is a listed holiday
 
 
 def test_a_monday_sale_is_netted_on_the_wednesday_after_a_tuesday_holiday():
@@ -518,7 +518,7 @@ def test_the_netting_window_stops_at_the_previous_trading_day_not_earlier():
 
 def test_snapshot_refuses_when_the_holiday_table_does_not_cover_today():
     acct = account(
-        datetime(2027, 1, 5, 4, 30, tzinfo=timezone.utc),
+        datetime(2027, 1, 5, 4, 30, tzinfo=UTC),
         holdings=[holding_row(ISIN_A, 60)],
         trades=[],
         calendar=sessions.load_calendar(),

@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1340,7 +1340,7 @@ def assert_no_challenge_left_behind(real: RealRig) -> None:
 
 def test_mint_on_a_listed_nse_holiday_is_refused_session_closed(real: RealRig):
     real.market.quotes["TESTCO"] = quote_for(session_date=date(2026, 11, 10))
-    real.clock.now = datetime(2026, 11, 10, 4, 30, 0, tzinfo=timezone.utc)  # Tue 10:00 IST, in the packaged table
+    real.clock.now = datetime(2026, 11, 10, 4, 30, 0, tzinfo=UTC)  # Tue 10:00 IST, in the packaged table
     with pytest.raises(OrderRefusal) as err:
         real.mint()
     expect(err, 423, "ORDERS_BLOCKED", "session_closed")
