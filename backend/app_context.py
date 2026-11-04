@@ -43,7 +43,7 @@ from execution.venue import (
     spec_for,
 )
 from execution.approval import ApprovalService
-from execution.india_guard import IndiaAdmissionGuard, IndiaQuoteEvidence
+from execution.india_guard import IndiaAdmissionGuard, IndiaInstrumentMap, IndiaQuoteEvidence
 from private_config import PrivateConfigError, load_workspace_config
 from risk_india.drawdown import MarkMissing, SessionResult, pending_batches
 from risk_india.rules import IST, RiskConfigError
@@ -297,7 +297,12 @@ class AppState:
             relay_quotes = None
             if ws is Workspace.INDIA:
                 clock_args = {} if india_clock is None else {"clock": india_clock}
-                india_guard = IndiaAdmissionGuard.from_config(config, ledger, **clock_args)
+                # The app-hosted relay path reads the quote by ``symbol`` and ``OrderRelayMinter`` sends the
+                # symbol as the stock code, so for it (and only it) the symbol is the code. The shadow
+                # runtime passes its own instrument list instead.
+                india_guard = IndiaAdmissionGuard.from_config(
+                    config, ledger, instruments=IndiaInstrumentMap.symbol_is_stock_code(), **clock_args
+                )
                 if is_shadow_binding(binding):
                     # The relay ledger holds the same two caps the India limits file names, in
                     # the bound-ledger tables (a change later needs a new ledger).

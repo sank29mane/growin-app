@@ -37,8 +37,8 @@ from shadow_india.admission import simulation_init
 from shadow_india.evidence import LOG_NAME, TORN_DIR, EvidenceStore, read_records
 from shadow_india.portfolio import Instrument, PortfolioError
 from shadow_runtime_support import (
-    AS_OF, CANBK_CODE, CANBK_ISIN, CANBK_SYMBOL, FORBIDDEN, KEY_ID, RUN, SESSION, STEADY_ISIN, WINDOW_START, build_env,
-    build_seeded, calendar_doc, evaluated, master_zip, sha, tree_state, write_json,
+    AS_OF, CANBK_CODE, CANBK_ISIN, CANBK_SYMBOL, FORBIDDEN, KEY_ID, RUN, SESSION, STEADY_CODE, STEADY_ISIN,
+    STEADY_SYMBOL, WINDOW_START, build_env, build_seeded, calendar_doc, evaluated, master_zip, sha, tree_state, write_json,
 )
 from test_gateway_orders_key import swap_key
 from test_gateway_orders_routes import OTHER
@@ -76,23 +76,6 @@ def env(tmp_path, seeded, metadata, monkeypatch):  # noqa: F811
     monkeypatch.setattr(runner_module, "evaluate_session", built.script)
     monkeypatch.setattr(runner_module, "held_names_quarantined", built.script.held_names_quarantined)
     return built
-
-
-@pytest.fixture()
-def code_is_symbol(monkeypatch):
-    """Known gap (reported in the PR): ``IndiaAdmissionGuard`` compares the order's NSE symbol with the quote's Breeze
-    stock code, so a name whose two differ (CANBK/CANBAN) is denied ``isin_mismatch`` before the VM. This row-scoped
-    patch makes the evidence carry the symbol so a mint reaches the VM's kill flag."""
-
-    original = runtime_module.RelayQuoteSamples.samples
-
-    def samples(self, instrument):
-        return [
-            replace(s, evidence=replace(s.evidence, quote=replace(s.evidence.quote, stock_code=instrument.symbol)))
-            for s in original(self, instrument)
-        ]
-
-    monkeypatch.setattr(runtime_module.RelayQuoteSamples, "samples", samples)
 
 
 class Spies:
@@ -208,7 +191,7 @@ def decide_args(env, session=SESSION):
 # --- the end to end world -----------------------------------------------------------------------------------------
 
 
-def test_open_run_decide_close_reach_the_vm_kill_flag_and_nothing_else(env, capsys, code_is_symbol):
+def test_open_run_decide_close_reach_the_vm_kill_flag_and_nothing_else(env, capsys):
     out = opened(env, capsys)
     assert out["opened"]["run_id"] == RUN and out["opened"]["run_start_session"] == SESSION.isoformat()
     code, decided = go(env, capsys, "decide")
@@ -223,7 +206,7 @@ def test_open_run_decide_close_reach_the_vm_kill_flag_and_nothing_else(env, caps
     assert env.ledger_path().is_file() and env.latch_path().is_file()
 
 
-def test_the_runtime_only_reaches_the_read_routes_and_the_mint(env, capsys, code_is_symbol):
+def test_the_runtime_only_reaches_the_read_routes_and_the_mint(env, capsys):
     opened(env, capsys)
     go(env, capsys, "decide")
     go(env, capsys, "close")
@@ -240,15 +223,21 @@ def test_the_runtime_only_reaches_the_read_routes_and_the_mint(env, capsys, code
     assert {p.relative_to(env.sim).parts[0] for p in env.sim.rglob("*")} == {"india-shadow"}
 
 
-def test_known_gap_a_name_whose_symbol_differs_from_its_stock_code_is_denied_before_the_vm(env, capsys):
-    """CANBK trades as CANBAN at Breeze. The local guard compares the NSE symbol with the quote's stock code and
-    denies ``isin_mismatch``, fail closed. Reported in the PR: the guard, not this runtime, needs the stock code."""
+def test_a_name_whose_symbol_differs_from_its_stock_code_reaches_the_vm_mint_and_gets_the_423(env, capsys):
+    """CANBK trades as CANBAN at Breeze. Real ``RelayQuoteSamples`` carry the quote of the Breeze code; the Mac guard
+    checks it against the instrument's mapped code, so the order is admitted and the VM mint answers the kill flag."""
 
+    assert CANBK_SYMBOL != CANBK_CODE
     opened(env, capsys)
     code, decided = go(env, capsys, "decide")
-    assert code == 0 and [s for _i, s in decided["intents"]] == ["denied", "denied"]
-    assert {r["code"] for r in read_records(env.root, RUN) if r["kind"] == "denied"} == {"isin_mismatch"}
-    assert env.vm.http.order_calls() == [] and audit(env) == []
+    assert code == 0 and [s for _i, s in decided["intents"]] == ["vm_decided"] * 2
+    assert not [r for r in read_records(env.root, RUN) if r["kind"] == "denied"]
+    assert env.vm.http.order_calls() == [("POST", "/v1/orders/intents")] * 2
+    entries = audit(env)
+    assert [e["codes"] for e in entries] == [["kill_switch"], ["kill_switch"]]  # the typed 423, not a Mac denial
+    assert {e["stock_code"] for e in entries} == {CANBK_CODE, STEADY_CODE}  # the VM intent carries the Breeze codes
+    assert set(env.reads.quote_calls) == {CANBK_CODE, STEADY_CODE}
+    assert not {CANBK_SYMBOL, STEADY_SYMBOL} & {e["stock_code"] for e in entries}
 
 
 # --- phase 1: a refusal leaves every byte as it was ----------------------------------------------------------------------
@@ -760,7 +749,7 @@ def test_a_key_reply_that_is_not_a_lowercase_64_hex_is_unreadable(env, capsys, m
     _no_vm_leg(env, since)
 
 
-def test_a_key_rotated_between_the_read_and_the_mint_is_the_vms_to_refuse(env, capsys, code_is_symbol):
+def test_a_key_rotated_between_the_read_and_the_mint_is_the_vms_to_refuse(env, capsys):
     opened(env, capsys)
     runtime = env.factory()(decide_args(env))
     try:
@@ -810,7 +799,7 @@ def test_a_link_that_cannot_open_is_a_typed_refusal(env, capsys):
 # --- forbidden literals on every open ---------------------------------------------------------------------------------------
 
 
-def test_every_evidence_open_and_create_carries_the_registered_literals(env, capsys, spies, code_is_symbol):
+def test_every_evidence_open_and_create_carries_the_registered_literals(env, capsys, spies):
     """B1: one open without ``forbidden=`` and a registered literal could be written into a run."""
 
     opened(env, capsys)
@@ -820,7 +809,7 @@ def test_every_evidence_open_and_create_carries_the_registered_literals(env, cap
     assert all(forbidden == FORBIDDEN for _name, forbidden in spies.evidence)
 
 
-def test_the_release_runtime_opens_its_evidence_with_the_registered_literals_too(env, capsys, spies, code_is_symbol):
+def test_the_release_runtime_opens_its_evidence_with_the_registered_literals_too(env, capsys, spies):
     """B1, release side: ``release_runtime`` opens the evidence store itself; it must pass ``forbidden=`` as well."""
 
     opened(env, capsys)
@@ -847,7 +836,7 @@ def test_a_registered_literal_is_refused_in_the_evidence_text(env, capsys):
 # --- the live table pins ------------------------------------------------------------------------------------------------------
 
 
-def test_the_pins_a_decide_signs_are_the_live_tables_read_again_each_time(env, capsys, code_is_symbol, monkeypatch):
+def test_the_pins_a_decide_signs_are_the_live_tables_read_again_each_time(env, capsys, monkeypatch):
     """B4: a fixed pin would not move when a committed table does."""
 
     opened(env, capsys)
@@ -930,7 +919,7 @@ def _built(monkeypatch):
 
 
 def test_resume_builds_the_release_runtime_and_clears_both_pauses_once_nothing_is_held(
-    env, capsys, monkeypatch, code_is_symbol
+    env, capsys, monkeypatch
 ):
     opened(env, capsys)
     go(env, capsys, "decide")  # the decide starts the latch the ambiguous-exit read needs
@@ -981,7 +970,7 @@ def test_resume_with_the_runtime_config_missing_refuses_and_leaves_every_evidenc
 
 
 def test_no_runtime_config_value_appears_in_output_exceptions_or_evidence(
-    tmp_path, seeded, metadata, monkeypatch, capsys, code_is_symbol  # noqa: F811
+    tmp_path, seeded, metadata, monkeypatch, capsys  # noqa: F811
 ):
     canary = tmp_path / "CANARYQ7"
     canary.mkdir()
