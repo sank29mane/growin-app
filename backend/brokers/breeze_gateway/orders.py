@@ -24,13 +24,14 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
 from .client import ORDERS_CONTRACT, RelayClient
-from .errors import RelayProtocolError
+from .errors import NotFound, OrdersKeyRouteUnavailable, RelayProtocolError
 
 ROUTE_INTENTS = "/v1/orders/intents"
 ROUTE_AUTHORIZE = "/v1/orders/authorize"
 ROUTE_HALT = "/v1/orders/halt"
 ROUTE_STATE = "/v1/orders/state"
 ROUTE_AUDIT = "/v1/orders/audit"
+ROUTE_KEY = "/v1/orders/key"
 
 ORDER_PURPOSE = "growin.relay.order"
 SIGNED_VERSION = 1
@@ -322,7 +323,7 @@ def _fail(reason: str, rid: str | None = None) -> OrdersProtocolError:
 
 
 class OrdersClient:
-    """The five O2 routes. The only way the Mac reaches ``/v1/orders/*``."""
+    """The six O2 routes (five, plus the 64-10 key read). The only way the Mac reaches ``/v1/orders/*``."""
 
     CONTRACT = ORDERS_CONTRACT
 
@@ -457,6 +458,33 @@ class OrdersClient:
                 )
             )
         return tuple(out)
+
+    def current_key(self) -> str:
+        """64-10 ``GET /v1/orders/key``: the key id the VM pipeline checks at mint (D-36).
+
+        One GET, no params, never retried. The reply must be exactly ``contract`` and a
+        lowercase 64-hex ``key_id``; anything else is ``bad_field``. Only a 404 maps to
+        ``OrdersKeyRouteUnavailable`` (an older VM); every other error passes through, and
+        nothing falls back to the audit read.
+        """
+
+        try:
+            data, rid = self._call("GET", ROUTE_KEY)
+        except NotFound as err:
+            raise OrdersKeyRouteUnavailable(
+                err.code,
+                http_status=err.http_status,
+                reason="route_unavailable",
+                request_id=err.request_id,
+            ) from None
+        key_id = data.get("key_id")
+        if (
+            set(data) != {"contract", "key_id"}
+            or type(key_id) is not str
+            or _HEX64.fullmatch(key_id) is None
+        ):
+            raise _fail("bad_field", rid)
+        return key_id
 
     def audit_all(self) -> tuple[VmAuditEntry, ...]:
         """Every VM audit entry, page by page."""

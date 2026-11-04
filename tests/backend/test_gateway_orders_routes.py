@@ -265,12 +265,14 @@ class OrderStack(Stack):
         state_dir: bool = True,
         holidays: frozenset[date] | None = frozenset(),
         special_sessions: frozenset[date] | None = frozenset(),
+        allow_test_key: bool = True,
     ) -> None:
         # The fixtures run on a synthetic October 2026 where every weekday trades. Default to no holidays so
         # the real NSE table (which lists Dussehra 2026-10-20) never leaks in; None means the packaged table.
         # Special sessions default to none for the same reason (the table lists Sunday 2026-11-08).
         self.holidays = holidays
         self.special_sessions = special_sessions
+        self.allow_test_key = allow_test_key
         self.tmp = tmp_path
         self.metadata = metadata
         self.state_dir = tmp_path / "state"
@@ -302,7 +304,11 @@ class OrderStack(Stack):
         self.egress = EgressChecker(
             self.transport, expected_ip=EXPECTED_IP, echo_url="https://api.ipify.org", clock=self.clock
         )
-        self.session = SessionManager(
+        self.session = self.new_session()
+        self.restart()
+
+    def new_session(self) -> SessionManager:
+        return SessionManager(
             clock=self.clock,
             egress=self.egress,
             breeze=self.breeze,
@@ -311,7 +317,6 @@ class OrderStack(Stack):
             events=self.events,
             budget=self.budget,
         )
-        self.restart()
 
     def make_app(self):
         return relay_app.create_app(
@@ -332,7 +337,7 @@ class OrderStack(Stack):
                 limits_path=str(self.limits_path),
                 key_path=str(self.key_path),
                 owner_uid=os.getuid(),
-                allow_test_key=True,
+                allow_test_key=self.allow_test_key,
                 kill_base_url=self.metadata.base,
                 holidays=self.holidays,
                 special_sessions=self.special_sessions,
@@ -351,6 +356,14 @@ class OrderStack(Stack):
         self.service = self.build_orders()
         self.app = self.make_app()
         self.client = TestClient(self.app, base_url=BASE)
+
+    def cold_restart(self) -> None:
+        """What a production restart does (main.py build_app): a new SessionManager as well.
+
+        restart() keeps the live Breeze session; this does not, so the next call needs a login.
+        """
+        self.session = self.new_session()
+        self.restart()
 
     # -- calls
 
@@ -909,6 +922,7 @@ def test_bearer_is_required_on_every_order_route(stack, token):
         ("POST", "/v1/orders/halt"),
         ("GET", "/v1/orders/state"),
         ("GET", "/v1/orders/audit"),
+        ("GET", "/v1/orders/key"),
     ):
         for bearer in (None, "wrong"):
             resp = (
@@ -1210,6 +1224,12 @@ def test_contract_mismatch_both_ways(stack, token):
         ("DELETE", "/v1/orders/state", 405),
         ("POST", "/v1/orders/state", 405),
         ("POST", "/v1/orders/audit", 405),
+        ("POST", "/v1/orders/key", 405),
+        ("PUT", "/v1/orders/key", 405),
+        ("DELETE", "/v1/orders/key", 405),
+        ("GET", "/v1/orders/key/", 404),
+        ("GET", "/v1/orders/key/rotate", 404),
+        ("POST", "/v1/orders/key/rotate", 404),
         ("GET", "/v1/orders/clear", 404),
         ("POST", "/v1/orders/reset", 404),
         ("POST", "/v1/orders/place", 404),
@@ -1277,6 +1297,7 @@ ORDER_TABLE = [
     ("/v1/orders/authorize", frozenset({"POST"})),
     ("/v1/orders/halt", frozenset({"POST"})),
     ("/v1/orders/intents", frozenset({"POST"})),
+    ("/v1/orders/key", frozenset({"GET"})),
     ("/v1/orders/state", frozenset({"GET"})),
 ]
 FORBIDDEN_WORDS = ("clear", "reset", "place", "modify", "cancel", "delete", "unlock", "enrol", "key", "limits")
@@ -1294,7 +1315,12 @@ def test_route_table_audit(stack):
         name = getattr(route, "name", "") or ""
         if path.startswith("/v1/orders"):
             text = (path + " " + name).lower()
-            assert not any(word in text for word in FORBIDDEN_WORDS[:6]), (path, name)
+            # 64-10: every word is enforced. `key` is allowed only on the one read-only path.
+            for word in FORBIDDEN_WORDS:
+                if word == "key" and path == "/v1/orders/key":
+                    continue
+                assert word not in text, (word, path, name)
+            assert ("key" in text) == (path == "/v1/orders/key"), (path, name)
             assert path.startswith(ORDERS_PATH_PREFIX)
 
 
@@ -1393,8 +1419,17 @@ def test_the_metadata_write_scan_catches_a_plant_in_the_order_routes_and_the_rel
         {"key": 0o666},
         {"limits": 0o620},
         {"state_dir": False},
+        {"allow_test_key": False},
     ],
-    ids=["no_limits", "no_key", "limits_world_writable", "key_world_writable", "limits_group_writable", "no_state_dir"],
+    ids=[
+        "no_limits",
+        "no_key",
+        "limits_world_writable",
+        "key_world_writable",
+        "limits_group_writable",
+        "no_state_dir",
+        "committed_test_key_not_allowed",
+    ],
 )
 def test_config_invalid_answers_only_the_order_routes(tmp_path, metadata, kwargs):
     stack = OrderStack(tmp_path, metadata, **kwargs)
@@ -1403,7 +1438,7 @@ def test_config_invalid_answers_only_the_order_routes(tmp_path, metadata, kwargs
         resp = stack.post(path, {}, token)
         assert code_of(resp) == (503, "ORDERS_UNAVAILABLE", "config_invalid"), path
         assert_orders_envelope(resp)
-    for path in ("/v1/orders/state", "/v1/orders/audit"):
+    for path in ("/v1/orders/state", "/v1/orders/audit", "/v1/orders/key"):
         assert code_of(stack.get(path, token)) == (503, "ORDERS_UNAVAILABLE", "config_invalid"), path
     # Health and the data routes keep working, and the alarm event is on the log.
     assert stack.client.get("/v1/health", headers=CONTRACT_HDR).status_code == 200

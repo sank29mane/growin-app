@@ -15,9 +15,13 @@ ROUTE_AUTHORIZE = "/v1/orders/authorize"
 ROUTE_HALT = "/v1/orders/halt"
 ROUTE_STATE = "/v1/orders/state"
 ROUTE_AUDIT = "/v1/orders/audit"
-# O2: the five order routes. No route clears a latch, edits limits, enrols a key, or
-# places, modifies or cancels an order; test_gateway_orders_routes audits the route table.
-ORDER_ROUTES = frozenset({ROUTE_INTENTS, ROUTE_AUTHORIZE, ROUTE_HALT, ROUTE_STATE, ROUTE_AUDIT})
+ROUTE_KEY = "/v1/orders/key"
+# O2: the five order routes, plus the read-only key fingerprint (64-10, D-36). No route clears
+# a latch, edits limits, enrols or rotates a key, or places, modifies or cancels an order;
+# test_gateway_orders_routes audits the route table.
+ORDER_ROUTES = frozenset(
+    {ROUTE_INTENTS, ROUTE_AUTHORIZE, ROUTE_HALT, ROUTE_STATE, ROUTE_AUDIT, ROUTE_KEY}
+)
 ORDER_PURPOSE = "growin.relay.order"
 SIGNED_VERSION = 1
 CHALLENGE_TTL_SECONDS = 60

@@ -302,6 +302,7 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-da
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli revoke
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-state
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-audit --after-seq 0
+uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-key
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli tunnel
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday step --step S-3 --probe-dir DIR
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday compare --saved DIR --pilot-store ROOT --procedure-version N
@@ -318,6 +319,8 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-in
 - `probe-intraday step` runs one step of the Phase 64 operator checklist (S-3 to S-10, S-12) through one ledger under `--probe-dir`: it reads `/v1/budget` before every charged request, stops at 20 charged requests a day, saves each answer (exact bytes, C4 headers, sha256) under the directory on the Mac, and prints counts and labels only. `--symbol SYM` is S-7 only (the thinly traded symbol the operator picked; S-7 is one slot, so a later S-7 with another symbol is a retry and spends a retry slot) and `--date YYYY-MM-DD` is S-8 only (the past holiday date from S-2); each is required by its step and ignored by the others. Two invocations on one date serialise on a lock file next to the ledger, so they cannot both pass the stop check at the same relay count. A step whose slot ended in an upstream error on every try prints `status INCONCLUSIVE` and exits 1. `probe-intraday compare` is offline: it re-hashes the saved bytes and reads the local pilot store, and builds no relay client. Neither command has any order route.
 - `orders-state` and `orders-audit` read the order side of the VM (`GET /v1/orders/state` and
   `GET /v1/orders/audit`) and print numbers, ids and decision names only. Both are read only.
+- `orders-key` prints `key_id <64 hex>`: the order key id the VM checks at mint (`GET /v1/orders/key`, 64-10).
+  Read only, no audit fallback. An older VM answers 404 and the command exits 1 with `NOT_FOUND ... reason route_unavailable`.
 - `tunnel` prints `RELAY_URL=http://127.0.0.1:<port>` for manual inspection and waits
   for Ctrl-C. The relay token is not printed, so only health answers without it.
 - Exit codes: 0 ok, 1 relay error (`<CODE> (request <id>)`), 2 usage or no terminal,
