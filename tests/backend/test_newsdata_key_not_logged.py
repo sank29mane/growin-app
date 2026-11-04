@@ -258,7 +258,133 @@ async def test_missing_key_makes_no_request(http):
     assert requests == []
 
 
-def test_error_summary_scrubs_the_key_from_non_http_errors():
-    text = news_client.newsdata_error_summary(ValueError(f"bad {CANARY} " + "x" * 500), CANARY)
+def test_error_summary_is_status_or_class_only():
+    """The message is never logged, so a key inside it cannot leak (T5)."""
+    leaky = ValueError(f"bad {CANARY} " + "x" * 500)
+    assert news_client.provider_error_summary(leaky) == "ValueError"
+    assert news_client.provider_error_summary(httpx.ConnectError(f"boom {CANARY}")) == "ConnectError"
+    request = httpx.Request("GET", f"https://x.test/?apikey={CANARY}")
+    status_error = httpx.HTTPStatusError(f"422 {CANARY}", request=request, response=httpx.Response(422, request=request))
+    assert news_client.provider_error_summary(status_error) == "HTTP 422"
+
+
+# --- round 1 (T1): the circuit breaker logs the class, never the message -------------------
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_a_half_open_failure_never_logs_the_exception_text(caplog):
+    clock = _Clock()
+    breaker = CircuitBreaker(name="canary_half_open", failure_threshold=1, recovery_timeout=30.0, clock=clock)
+    caplog.set_level(logging.DEBUG)
+
+    async def failing():
+        raise httpx.ConnectError(f"boom for https://newsdata.io/api/1/latest?apikey={CANARY} key={CANARY}")
+
+    with pytest.raises(httpx.ConnectError):
+        await breaker.call(failing)  # CLOSED -> OPEN (threshold 1)
+    assert breaker.state == CircuitState.OPEN
+    clock.now += 31
+    assert breaker.state == CircuitState.HALF_OPEN
+    with pytest.raises(httpx.ConnectError):
+        await breaker.call(failing)  # the probe fails: HALF_OPEN -> OPEN
+
+    assert breaker.state == CircuitState.OPEN
+    text = _log_text(caplog)
+    assert "HALF_OPEN -> OPEN" in text and "ConnectError" in text
     assert CANARY not in text
-    assert len(text) < 300
+    assert all(r.exc_info is None for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_half_open_failure_through_the_newsdata_path_never_logs_the_key(research_agent, http, caplog):
+    set_handler, requests = http
+    clock = _Clock()
+    research_agent._newsdata_cb = CircuitBreaker(
+        name="canary_half_open_agent", failure_threshold=1, recovery_timeout=30.0, clock=clock
+    )
+    set_handler(_raising_handler(httpx.ConnectError))
+    caplog.set_level(logging.DEBUG)
+
+    assert await research_agent._fetch_newsdata("TCS", "Tata") == []  # opens the breaker
+    clock.now += 31
+    assert await research_agent._fetch_newsdata("TCS", "Tata") == []  # half-open probe fails again
+
+    assert len(requests) == 2
+    assert "HALF_OPEN -> OPEN" in _log_text(caplog)
+    _assert_key_only_in_header(requests, caplog)
+
+
+# --- round 1 (O4): NewsAPI key travels in X-Api-Key, never in the URL --------------------------
+
+NEWSAPI_CANARY = "CANARY-NEWSAPI-KEY-456"
+
+
+@pytest.fixture
+def newsapi_agent(monkeypatch):
+    monkeypatch.setenv("NEWSAPI_KEY", NEWSAPI_CANARY)
+    monkeypatch.delenv("NEWSDATA_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    from agents.research_agent import ResearchAgent
+
+    agent = ResearchAgent()
+    assert agent.newsapi_key == NEWSAPI_CANARY
+    agent._newsapi_cb = CircuitBreaker(name="newsapi_research_test", failure_threshold=1000)
+    return agent
+
+
+def _assert_newsapi_key_only_in_header(requests, caplog):
+    assert requests, "no request was made"
+    for req in requests:
+        assert req.headers["X-Api-Key"] == NEWSAPI_CANARY
+        assert NEWSAPI_CANARY not in str(req.url)
+        assert "apikey" not in req.url.query.decode().lower()
+    assert NEWSAPI_CANARY not in _log_text(caplog)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 426, 429, 500])
+async def test_newsapi_http_error_never_logs_the_key(newsapi_agent, http, caplog, status):
+    set_handler, requests = http
+    set_handler(_status_handler(status))
+    caplog.set_level(logging.DEBUG)
+
+    assert await newsapi_agent._fetch_newsapi("TCS", "Tata") == []
+
+    _assert_newsapi_key_only_in_header(requests, caplog)
+    assert f"HTTP {status}" in _log_text(caplog)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc_type", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_newsapi_transport_error_never_logs_the_key(newsapi_agent, http, caplog, exc_type):
+    set_handler, requests = http
+
+    def handler(request):
+        raise exc_type(f"boom for {request.url} key={NEWSAPI_CANARY}", request=request)
+
+    set_handler(handler)
+    caplog.set_level(logging.DEBUG)
+
+    assert await newsapi_agent._fetch_newsapi("TCS", "Tata") == []
+
+    _assert_newsapi_key_only_in_header(requests, caplog)
+    assert exc_type.__name__ in _log_text(caplog)
+
+
+@pytest.mark.asyncio
+async def test_newsapi_success_sends_the_header_and_parses(newsapi_agent, http, caplog):
+    set_handler, requests = http
+    set_handler(lambda request: httpx.Response(200, json={"articles": [{"title": "T"}]}))
+    caplog.set_level(logging.DEBUG)
+
+    assert await newsapi_agent._fetch_newsapi("TCS", "Tata") == [{"title": "T"}]
+    _assert_newsapi_key_only_in_header(requests, caplog)
+    assert requests[0].url.params["pageSize"] == "5"

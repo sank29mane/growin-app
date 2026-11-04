@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 # Dedicated Circuit Breaker for NewsData.io (SOTA 2026 Resilience API)
 newsdata_circuit = get_circuit_breaker("newsdata", failure_threshold=3, recovery_timeout=30.0)
 
+# Verified against https://newsdata.io/documentation/api-authentication on 2026-11-05:
+# X-ACCESS-KEY is the recommended method, `?apikey=` the alternative.
 # newsdata.io takes the key as a header. Never put it in the query string: httpx
 # puts the full URL into HTTPStatusError text, and that text gets logged.
 NEWSDATA_KEY_HEADER = "X-ACCESS-KEY"
@@ -25,20 +27,23 @@ def newsdata_headers(api_key: Optional[str]) -> Dict[str, str]:
     return {NEWSDATA_KEY_HEADER: api_key} if api_key else {}
 
 
-def newsdata_error_summary(exc: BaseException, api_key: Optional[str] = None) -> str:
+NEWSAPI_KEY_HEADER = "X-Api-Key"  # newsapi.org accepts the key here instead of `apiKey=`
+
+
+def newsapi_headers(api_key: Optional[str]) -> Dict[str, str]:
+    """Request headers carrying the newsapi.org key."""
+    return {NEWSAPI_KEY_HEADER: api_key} if api_key else {}
+
+
+def provider_error_summary(exc: BaseException) -> str:
     """
-    One short, log-safe line for a failed newsdata call. HTTP errors reduce to the
-    status code; transport errors to the exception class. Anything else keeps a
-    bounded message with the key scrubbed. Never include the request, headers or body.
+    One short, log-safe line for a failed news-provider call: the status code for an
+    HTTP error, otherwise the exception class. Never the message, the request, the
+    headers or the body, none of which this function can prove are free of the key.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         return f"HTTP {exc.response.status_code}"
-    if isinstance(exc, httpx.HTTPError):
-        return type(exc).__name__
-    text = str(exc)[:200]
-    if api_key:
-        text = text.replace(api_key, "***")
-    return f"{type(exc).__name__}: {text}"
+    return type(exc).__name__
 
 
 class NewsDataIOClient:
@@ -87,7 +92,7 @@ class NewsDataIOClient:
                 })
             return normalized
         except Exception as e:
-            logger.error(f"NewsDataIOClient fetch failed: {newsdata_error_summary(e, self.api_key)}")
+            logger.error(f"NewsDataIOClient fetch failed: {provider_error_summary(e)}")
             return []
 
     async def fetch_regulatory_news(self, ticker: str) -> List[Dict[str, Any]]:

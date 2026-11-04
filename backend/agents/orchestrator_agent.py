@@ -228,13 +228,22 @@ Query: "{clean_query}"
             return self._heuristic_classify(query)
 
     @staticmethod
-    def _reconcile_ticker(chat_ticker: Optional[str], intent_info: Dict[str, Any]) -> Optional[str]:
+    def _reconcile_ticker(chat_ticker: Optional[str], intent_info: Dict[str, Any], query: Optional[str] = None) -> Optional[str]:
         """
-        The coordinator's TICKER beats the regex guess from chat when they disagree.
-        A heuristic-only intent (no routing LLM) never overrides the chat guess.
-        If neither side found a ticker the result stays None.
+        Pick the ticker for this request.
+
+        1. An explicit `$SYMBOL` the user typed always wins.
+        2. Otherwise the coordinator's TICKER beats the regex guess from chat, provided it
+           passes the same validation as the heuristic (a stop word like BUY is rejected).
+        3. A heuristic-only intent (no routing LLM) never overrides the chat guess.
+        4. If nothing qualifies the result is whatever chat found, else None.
         """
-        routed = intent_info.get("primary_ticker")
+        from utils import extract_dollar_ticker, validate_ticker_symbol
+
+        explicit = extract_dollar_ticker(query or "")
+        if explicit:
+            return explicit
+        routed = validate_ticker_symbol(intent_info.get("primary_ticker"))
         if routed and intent_info.get("ticker_source") == "coordinator":
             if chat_ticker and chat_ticker != routed:
                 logger.info(f"Ticker: coordinator {routed} overrides heuristic {chat_ticker}")
@@ -306,7 +315,7 @@ Query: "{clean_query}"
         # 2. Routing Phase
         status_manager.set_status("orchestrator", "working", "Classifying Intent...")
         intent_info = await self._classify_intent(query)
-        ticker = self._reconcile_ticker(ticker, intent_info)
+        ticker = self._reconcile_ticker(ticker, intent_info, query)
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:
             from utils import extract_ticker_from_text
@@ -610,7 +619,7 @@ Query: "{clean_query}"
         
         # 1. Routing & Context (Fast)
         intent_info = await self._classify_intent(query)
-        ticker = self._reconcile_ticker(ticker, intent_info)
+        ticker = self._reconcile_ticker(ticker, intent_info, query)
             
         # Context bridging for "Deep Dive" or follow-ups without explicit tickers (Depth Limit: 5)
         if not ticker and history:

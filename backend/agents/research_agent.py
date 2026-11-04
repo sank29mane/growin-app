@@ -20,7 +20,7 @@ from market_context import ResearchData, NewsArticle
 from utils.error_handler import handle_error
 from typing import Dict, Any, List, Optional
 from utils.http_client import agent_http_client
-from utils.news_client import newsdata_headers, newsdata_error_summary
+from utils.news_client import newsdata_headers, newsapi_headers, provider_error_summary
 import logging
 import os
 import asyncio
@@ -317,7 +317,7 @@ class ResearchAgent(BaseAgent):
                             'is_regulatory': True
                         })
                 except Exception as e:
-                    logger.error(f"RNS newsData.io failed: {newsdata_error_summary(e, self.newsdata_key)}")
+                    logger.error(f"RNS newsData.io failed: {provider_error_summary(e)}")
 
             # 2. SEC Filings / News via Search Plugin
             if not is_uk and self.tavily_key:
@@ -371,16 +371,16 @@ class ResearchAgent(BaseAgent):
                 "language": "en",
                 "sortBy": "relevancy",
                 "pageSize": 5,
-                "apiKey": self.newsapi_key
             }
             
             url = "https://newsapi.org/v2/everything"
-            data = await agent_http_client.execute_with_breaker(self._newsapi_cb, "GET", url, params=params)
+            data = await agent_http_client.execute_with_breaker(
+                self._newsapi_cb, "GET", url, params=params, headers=newsapi_headers(self.newsapi_key)
+            )
 
             return data.get('articles', [])
         except Exception as e:
-
-            handle_error(e, "NewsAPI failed", logger, raise_error=False)
+            logger.error(f"NewsAPI failed: {provider_error_summary(e)}")
             return []
 
     async def _fetch_tavily(self, ticker: str, company_name: str) -> List[Dict]:
@@ -491,7 +491,7 @@ class ResearchAgent(BaseAgent):
             # provider is a failed research step, not an empty article list.
             raise
         except Exception as e:
-            logger.error(f"NewsData.io failed: {newsdata_error_summary(e, self.newsdata_key)}")
+            logger.error(f"NewsData.io failed: {provider_error_summary(e)}")
             return []
 
     async def _generate_smart_query(self, user_query: str) -> Optional[Dict]:

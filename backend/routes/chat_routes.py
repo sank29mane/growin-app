@@ -409,13 +409,7 @@ async def analyze_portfolio(request: AnalyzeRequest):
         from agents.orchestrator_agent import OrchestratorAgent
         
         # Extract ticker from query (simple approach)
-        ticker = None
-        if request.query:
-            words = request.query.upper().split()
-            for word in words:
-                if len(word) >= 3 and len(word) <= 5 and word.isalpha():
-                    ticker = word
-                    break
+        ticker = extract_ticker_from_text(request.query) if request.query else None
         
         orchestrator = OrchestratorAgent(
             mcp_client=state.mcp_client,
