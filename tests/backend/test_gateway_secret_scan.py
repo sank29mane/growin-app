@@ -1097,6 +1097,117 @@ def test_r2_the_short_user_id_regex_is_found_across_a_chunk_edge(tmp_path):
         assert scan.USER_ID in scan.scan_files([path], spec, label="edge").hits.get(str(path), set()), where
 
 
+# --- short user id: lookarounds at a window edge (no false FAIL, no false negative, one report)
+
+
+def _short_id() -> str:
+    return "Zq" + _digits(5)
+
+
+def _place(path: Path, size: int, parts: dict[int, bytes]) -> Path:
+    """A `.`-filled file of `size` bytes with each byte string written at its offset."""
+    buffer = bytearray(b"." * size)
+    for offset, data in parts.items():
+        assert 0 <= offset and offset + len(data) <= size
+        buffer[offset : offset + len(data)] = data
+    path.write_bytes(bytes(buffer))
+    return path
+
+
+def _short_hit(path: Path, spec) -> bool:
+    return scan.USER_ID in scan.scan_files([path], spec, label="edge").hits.get(str(path), set())
+
+
+@pytest.mark.parametrize("neighbour", [b"x", b"7"], ids=["letter", "digit"])
+def test_edge_a_short_id_inside_a_longer_run_ending_at_the_chunk_edge_does_not_fail(tmp_path, neighbour):
+    """The id ends on the last byte of chunk 1; the next byte (first of chunk 2) is alphanumeric."""
+    short = _short_id().encode()
+    spec = scan.Spec({scan.USER_ID: short.decode()})
+    path = _place(tmp_path / "f.bin", scan.CHUNK + 4096, {scan.CHUNK - len(short): short, scan.CHUNK: neighbour})
+    assert not _short_hit(path, spec)
+
+
+@pytest.mark.parametrize("neighbour", [b"x", b"7"], ids=["letter", "digit"])
+def test_edge_a_short_id_after_an_alnum_byte_that_fell_out_of_the_carried_window_does_not_fail(tmp_path, neighbour):
+    """The id starts on the first carried byte of window 2; its real left neighbour is alphanumeric
+    and sits just outside the carried window, so only window 1 saw it."""
+    short = _short_id().encode()
+    spec = scan.Spec({scan.USER_ID: short.decode()})
+    carry_start = scan.CHUNK - spec.overlap
+    path = _place(tmp_path / "f.bin", scan.CHUNK + 4096, {carry_start - 1: neighbour, carry_start: short})
+    assert not _short_hit(path, spec)
+
+
+def test_edge_a_short_id_inside_a_run_that_straddles_the_chunk_edge_does_not_fail(tmp_path):
+    short = _short_id().encode()
+    spec = scan.Spec({scan.USER_ID: short.decode()})
+    run = b"x" * 30 + short + b"y" * 30
+    path = _place(tmp_path / "f.bin", scan.CHUNK + 4096, {scan.CHUNK - 30 - len(short) // 2: run})
+    assert not _short_hit(path, spec)
+
+
+def test_edge_a_genuine_short_id_is_still_caught_at_every_edge_position(tmp_path):
+    short = _short_id().encode()
+    spec = scan.Spec({scan.USER_ID: short.decode()})
+    n = len(short)
+    size = scan.CHUNK + 4096
+    cases = {
+        "ends-on-last-byte-of-chunk-1": {scan.CHUNK - n: short},
+        "starts-at-first-byte-of-chunk-2": {scan.CHUNK: short},
+        "starts-on-first-carried-byte": {scan.CHUNK - spec.overlap: short},
+        "starts-on-second-carried-byte": {scan.CHUNK - spec.overlap + 1: short},
+        "straddles-the-edge": {scan.CHUNK - n // 2: short},
+        "ends-on-last-byte-of-the-final-chunk": {size - n: short},
+    }
+    for name, parts in cases.items():
+        assert _short_hit(_place(tmp_path / f"{name}.bin", size, parts), spec), name
+    # a file that is exactly one chunk and ends with the id: the id ends the final window
+    exact = _place(tmp_path / "exact.bin", scan.CHUNK, {scan.CHUNK - n: short})
+    assert _short_hit(exact, spec)
+    # a file that is one chunk plus the id's last byte only
+    tiny_tail = _place(tmp_path / "tail.bin", scan.CHUNK + 1, {scan.CHUNK + 1 - n: short})
+    assert _short_hit(tiny_tail, spec)
+
+
+def test_edge_short_id_verdict_does_not_depend_on_chunk_size():
+    """Sweep every chunk size over a stream long enough to trim the carry: a wrapped id never hits,
+    a standalone id always does (first, middle and last byte of the stream included)."""
+    short = _short_id().encode()
+    spec = scan.Spec({scan.USER_ID: short.decode()})
+    filler = b"." * 150
+    wrapped = [b"x" + short + b"y", b"7" + short, short + b"7", b"x" + short, short + b"y"]
+    standalone = [short, b" " + short + b" ", b"=" + short, short + b"\n"]
+    for case in wrapped:
+        stream = filler + case + filler
+        for size in range(1, 220):
+            chunks = [stream[i : i + size] for i in range(0, len(stream), size)]
+            assert not scan.scan_chunks(chunks, spec).hits, (case, size)
+    for case in standalone:
+        for stream in (case + filler, filler + case + filler, filler + case):
+            for size in range(1, 220):
+                chunks = [stream[i : i + size] for i in range(0, len(stream), size)]
+                assert scan.scan_chunks(chunks, spec).hits == {scan.USER_ID}, (case, stream[:3], size)
+
+
+def test_edge_a_short_id_in_the_overlap_is_found_in_one_window_and_reported_once(tmp_path):
+    short = _short_id().encode()
+    seen: list[set[str]] = []
+
+    class Recording(scan.Spec):
+        def search(self, window, already=None, **kw):
+            found = super().search(window, already, **kw)
+            seen.append(found)
+            return found
+
+    spec = Recording({scan.USER_ID: short.decode()})
+    # the id sits wholly inside the carried bytes, so window 1 and window 2 both contain it
+    path = _place(tmp_path / "f.bin", scan.CHUNK + 4096, {scan.CHUNK - 20: short})
+    report = scan.scan_files([path], spec, label="edge")
+    assert report.hits == {str(path): {scan.USER_ID}}
+    assert [h for h in seen if scan.USER_ID in h] == [{scan.USER_ID}]  # window 2 skips a class already hit
+    assert len(report.hits) == 1 and report.status == "FAIL"
+
+
 def test_r2_the_per_path_user_id_exclusion_covers_the_short_form_too(tmp_path, fakes):
     short = "Ab" + _digits(5)
     (tmp_path / "private").mkdir()
