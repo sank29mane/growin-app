@@ -1361,13 +1361,33 @@ def test_the_sell_ids_are_the_ones_the_runner_mints_and_the_replay_shares_its_pa
 
     exit_id = exit_intent_id(exit_obligation_id("halve", ISIN_A, date(2026, 10, 28)), 1)
     assert exit_id == EXIT_OK
-    assert runner._EXIT_ID.fullmatch(exit_id) and vm_replay._EXIT_ID is runner._EXIT_ID  # shared, not copied
+    assert runner._EXIT_ID.fullmatch(exit_id) and vm_replay._EXIT_ID.fullmatch(exit_id)
+    assert vm_replay._EXIT_ID.pattern == runner._EXIT_ID.pattern  # copied, so pinned equal
+    assert vm_replay._EXIT_ID.flags == runner._EXIT_ID.flags
     swing = swing_signal_id(date(2026, 10, 28), ISIN_A)
     assert vm_replay._SWING_ID.fullmatch(swing)
     assert 'signal_id=f"swing-{as_of:%Y%m%d}-{isin}"' in (REPO / "backend" / "shadow_india" / "runner.py").read_text()
     assert vm_replay._ISIN_PATTERN in runner._EXIT_ID.pattern  # one ISIN shape across the exit and swing ids
     assert (vm_replay.LEG_ENTRY, vm_replay.LEG_EXIT, vm_replay.LEG_SWING) == (LEG_ENTRY, LEG_EXIT, LEG_SWING)
 
+
+
+def test_importing_the_replay_pulls_in_no_relay_execution_or_network_module():
+    """``vm_replay`` must stay pure: a fresh interpreter that imports it has no broker, execution, runner or httpx."""
+
+    import subprocess
+
+    probe = (
+        "import sys, shadow_india.vm_replay\n"
+        "bad = sorted(m for m in sys.modules if m.split('.')[0] in ('brokers', 'execution', 'httpx', 'ssl')\n"
+        "             or m in ('shadow_india.runner', 'shadow_india.admission', 'shadow_india.__main__'))\n"
+        "print('|'.join(bad))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(REPO / 'backend')!r})\n" + probe],
+        capture_output=True, text=True, check=True, timeout=60,
+    )
+    assert result.stdout.strip() == ""
 
 # --- a missing field is a typed refusal ------------------------------------------------------------------------------
 

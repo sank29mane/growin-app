@@ -61,9 +61,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
-# The runner's own leg names and exit-id pattern: shared, never copied, so an id the runner mints cannot drift from
-# the id this file accepts. (The swing id has no pattern in the runner; ``_SWING_ID`` below is pinned to it by a test.)
-from .runner import _EXIT_ID, LEG_ENTRY, LEG_EXIT, LEG_SWING
+# The runner's leg names and exit-id pattern, copied rather than imported: importing ``runner`` would pull the relay
+# client, the execution service and httpx into this pure module. A test pins every value equal to the runner's, so an
+# id the runner mints cannot drift from the id this file accepts; another test pins the import closure.
+LEG_ENTRY = "entry"
+LEG_EXIT = "exit"
+LEG_SWING = "swing"
+_EXIT_ID = re.compile(r"^exit-(halve|stop|flatten)-\d{8}-[A-Z]{2}[A-Z0-9]{9}[0-9]-t[1-9][0-9]*\Z")
 
 D06_LABEL = "Mac simulation plus separately tested VM guards"
 
