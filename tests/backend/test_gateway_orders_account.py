@@ -434,10 +434,15 @@ class FakeReads:
         return self.by_call[call]
 
 
-def account(today: datetime, *, holdings, trades, orders=()) -> reads.BreezeAccount:
+NO_CALENDAR = (frozenset(), frozenset())  # weekdays only: the netting tests below pick their own dates
+
+
+def account(today: datetime, *, holdings, trades, orders=(), calendar=NO_CALENDAR) -> reads.BreezeAccount:
     fake = FakeReads(demat_holdings_raw=holdings, trade_list_raw=trades, order_list_raw=list(orders))
     holder = master_mod.MasterHolder(lambda: master_zip([("1001", "TESTCO", "EQ", ISIN_A), ("1002", "ABC", "EQ", ISIN_B)]), lambda: today.date())
-    built = reads.BreezeAccount(reads=fake, master=holder, clock=Clock(today))  # type: ignore[arg-type]
+    built = reads.BreezeAccount(  # type: ignore[arg-type]
+        reads=fake, master=holder, clock=Clock(today), holidays=calendar[0], special_sessions=calendar[1]
+    )
     built.fake = fake  # type: ignore[attr-defined]
     return built
 
@@ -484,6 +489,77 @@ def test_monday_nets_friday_sales_not_sunday():
         trades=[trade_row("s1", "TESTCO", "Sell", 4, "11", "16-Oct-2026")],  # the Friday before
     )
     assert {h.isin: h.quantity for h in acct.snapshot().holdings} == {ISIN_A: 6}
+
+
+WEDNESDAY_AFTER_DIWALI = datetime(2026, 11, 11, 4, 30, tzinfo=timezone.utc)  # 10:00 IST; Tue 10 Nov is a listed holiday
+
+
+def test_a_monday_sale_is_netted_on_the_wednesday_after_a_tuesday_holiday():
+    # Mon 9 Nov sale, Tue 10 Nov closed: the demat quantity still shows it on Wed 11 Nov.
+    # Counting the weekday only (Tue) would skip the netting and latch account_mismatch.
+    acct = account(
+        WEDNESDAY_AFTER_DIWALI,
+        holdings=[holding_row(ISIN_A, 60)],
+        trades=[trade_row("s1", "TESTCO", "Sell", 40, "11", "09-Nov-2026")],
+        calendar=sessions.load_calendar(),
+    )
+    assert {h.isin: h.quantity for h in acct.snapshot().holdings} == {ISIN_A: 20}
+
+
+def test_the_netting_window_stops_at_the_previous_trading_day_not_earlier():
+    acct = account(
+        WEDNESDAY_AFTER_DIWALI,
+        holdings=[holding_row(ISIN_A, 60)],
+        trades=[trade_row("s1", "TESTCO", "Sell", 40, "11", "06-Nov-2026")],  # Friday: settled before Mon 9 Nov
+        calendar=sessions.load_calendar(),
+    )
+    assert {h.isin: h.quantity for h in acct.snapshot().holdings} == {ISIN_A: 60}
+
+
+def test_snapshot_refuses_when_the_holiday_table_does_not_cover_today():
+    acct = account(
+        datetime(2027, 1, 5, 4, 30, tzinfo=timezone.utc),
+        holdings=[holding_row(ISIN_A, 60)],
+        trades=[],
+        calendar=sessions.load_calendar(),
+    )
+    with pytest.raises(LimitsError):
+        acct.snapshot()
+    assert acct.fake.calls == []  # refused before any Breeze read
+
+
+def test_an_unreadable_holiday_table_stops_the_account_port_being_built(monkeypatch):
+    def unreadable():
+        raise LimitsError("holiday table is unreadable")
+
+    monkeypatch.setattr(reads, "load_calendar", unreadable)
+    with pytest.raises(LimitsError):
+        reads.BreezeAccount(reads=FakeReads(), master=None, clock=Clock(WEDNESDAY))  # type: ignore[arg-type]
+
+
+def test_previous_trading_day_skips_weekends_holidays_and_counts_special_sessions():
+    cal = sessions.load_calendar()
+    assert sessions.previous_trading_day(date(2026, 11, 11), *cal) == date(2026, 11, 9)  # Tue 10 Nov closed
+    assert sessions.previous_trading_day(date(2026, 11, 9), *cal) == date(2026, 11, 8)  # the Sunday Muhurat session
+    assert sessions.previous_trading_day(date(2026, 11, 8), *cal) == date(2026, 11, 6)  # Friday
+    assert sessions.previous_trading_day(date(2026, 10, 21), *cal) == date(2026, 10, 19)  # Tue 20 Oct closed
+    assert sessions.previous_trading_day(date(2026, 12, 28), *cal) == date(2026, 12, 24)  # Fri 25 Dec closed, then the weekend
+    assert sessions.previous_trading_day(date(2026, 10, 21), (), ()) == date(2026, 10, 20)
+    with pytest.raises(TypeError):
+        sessions.previous_trading_day(datetime(2026, 11, 11), *cal)
+
+
+def test_the_table_covers_through_the_end_of_its_last_year_and_warns_in_the_last_30_days():
+    cal = sessions.load_calendar()
+    assert sessions.covered_through(*cal) == date(2026, 12, 31)
+    assert sessions.calendar_covers(date(2026, 12, 31), *cal)
+    assert not sessions.calendar_covers(date(2027, 1, 1), *cal)
+    assert sessions.covered_through((), ()) is None and sessions.calendar_covers(date(2030, 1, 1), (), ())
+    assert sessions.coverage_warning(date(2026, 11, 5), *cal) is None
+    assert sessions.coverage_warning(date(2026, 11, 30), *cal) is None  # 31 days left
+    assert "2026-12-31" in (sessions.coverage_warning(date(2026, 12, 1), *cal) or "")  # 30 days left
+    assert "ended" in (sessions.coverage_warning(date(2027, 1, 2), *cal) or "")
+    assert sessions.coverage_warning(date(2027, 1, 2), (), ()) is None
 
 
 def test_snapshot_asks_for_a_year_of_trades_and_todays_orders_only():

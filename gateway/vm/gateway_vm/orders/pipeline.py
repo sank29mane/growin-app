@@ -247,7 +247,7 @@ class OrderPipeline:
         expires_at) and a monotonic deadline that a wall-clock step cannot move.
         """
         codes: list[str] = []
-        if session and not session_open(to_ist(cur.wall)):
+        if session and not session_open(to_ist(cur.wall)):  # reads the packaged holiday table
             codes.append("session_closed")
         if challenge is not None and cur.mono is not None:
             wall_dead = cur.epoch >= challenge.expires_at
@@ -670,6 +670,8 @@ class RuleGuard:
                 kill_enabled=kill.enabled,
                 tick_reference=reference,
                 tick_table=self._tick_table,
+                holidays=self._holidays,
+                special_sessions=self._special_sessions,
             )
             return GuardResult(codes=codes, kill=kill.label, latches=state.latch_names())
 

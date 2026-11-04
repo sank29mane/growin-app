@@ -1029,7 +1029,14 @@ def test_production_accepts_a_reference_from_the_month_before_the_session(real: 
     assert real.mint(limit_price="100.01").challenge_id
 
 
-def test_production_january_session_wants_december(real: RealRig):
+def test_production_january_session_wants_december(real: RealRig, monkeypatch):
+    # About the tick reference month, not the calendar: give the table a 2027 row so
+    # 2027-01-04 is inside its coverage (the packaged table lists 2026 only).
+    from gateway_vm.orders import sessions
+
+    holidays, special = sessions.load_calendar()
+    monkeypatch.setattr(sessions, "load_calendar", lambda *_a: (holidays | {date(2027, 1, 26)}, special))
+    real.pipeline = real.build(real.store)  # the guard reads the calendar when it is built
     real.market.quotes["TESTCO"] = quote_for(session_date=date(2027, 1, 4))
     real.clock.now = datetime(2027, 1, 4, 4, 30, 0, tzinfo=timezone.utc)  # 10:00 IST, a Monday
     real.tick_reference.default = D("249.90")

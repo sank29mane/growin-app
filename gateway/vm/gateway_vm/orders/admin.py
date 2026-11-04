@@ -42,13 +42,14 @@ from typing import Any, Callable, TextIO
 from . import OrderRefusal
 from .alerts import FileAlertPort
 from .audit import AuditBroken, AuditLog
-from .limits import DEFAULT_LIMITS_PATH, Limits, LimitsError, load_limits
+from .limits import DEFAULT_LIMITS_PATH, Limits, LimitsError, load_limits, to_ist
 from .risk import (
     AlertPort,
     ResetRefused,
     reset_latch,
     session_end_check,
 )
+from .sessions import coverage_warning, load_calendar
 from .store import AUDIT_FILE, StateStore
 
 _ISIN = re.compile(r"IN[A-Z0-9]{9}[0-9]")
@@ -198,9 +199,16 @@ def main(
                 )
                 if result.sent:
                     store.save(state)
+            try:  # warn-only: the daily run is where an operator sees the table running out
+                calendar_warning: str | None = coverage_warning(
+                    to_ist(clock()).date(), *load_calendar()
+                )
+            except LimitsError:
+                calendar_warning = "holiday table is unreadable: orders are refused"
             _print(
                 out,
                 {
+                    "calendar_warning": calendar_warning,
                     "alerts_sent": len(result.sent),
                     "alerts_failed": len(result.failed),
                     "audit_failed": result.audit_failed,

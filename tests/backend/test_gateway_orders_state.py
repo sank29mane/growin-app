@@ -1017,6 +1017,37 @@ def test_session_end_sends_nothing_before_1530_or_without_an_open_exit_or_on_wee
     assert port.alerts == []
 
 
+def test_session_end_skips_a_listed_holiday_and_alerts_on_a_special_session_day(tmp_path):
+    # Real packaged table: Tue 2026-11-10 is a holiday, Sun 2026-11-08 is the Muhurat session.
+    port = Port()
+    assert risk.session_end_check(_stopped_state(), Clock("2026-11-10T16:00:00+05:30"), port).sent == ()
+    assert risk.session_end_check(_stopped_state(), Clock("2026-11-15T16:00:00+05:30"), port).sent == ()  # plain Sunday
+    assert port.alerts == []
+    result = risk.session_end_check(_stopped_state(), Clock("2026-11-08T16:00:00+05:30"), port)
+    assert len(result.sent) == 1 and port.alerts[0].session_date.isoformat() == "2026-11-08"
+    assert len(risk.session_end_check(_stopped_state(), Clock("2026-11-11T16:00:00+05:30"), Port()).sent) == 1
+
+
+def test_session_end_with_an_unreadable_table_falls_back_to_weekdays_and_never_alerts_less(monkeypatch):
+    def unreadable(*_a, **_k):
+        raise vm_limits.LimitsError("holiday table is unreadable")
+
+    monkeypatch.setattr(risk, "load_calendar", unreadable)
+    port = Port()
+    assert len(risk.session_end_check(_stopped_state(), Clock("2026-11-10T16:00:00+05:30"), port).sent) == 1  # holiday: over-alert
+    assert risk.session_end_check(_stopped_state(), Clock("2026-11-15T16:00:00+05:30"), port).sent == ()  # Sunday: as before
+
+
+def test_admin_session_end_check_warns_in_the_last_30_days_of_the_table(tmp_path):
+    store = _seeded(tmp_path)
+    _, out, _ = _run(store.directory, "session-end-check", clock=Clock("2026-10-12T15:30:00+05:30"), port=Port())
+    assert json.loads(out)["calendar_warning"] is None
+    (tmp_path / "late").mkdir()
+    store = _seeded(tmp_path / "late")
+    code, out, _ = _run(store.directory, "session-end-check", clock=Clock("2026-12-10T15:30:00+05:30"), port=Port())
+    assert code == 0 and "2026-12-31" in json.loads(out)["calendar_warning"]
+
+
 def test_session_end_handles_each_open_exit_separately(tmp_path):
     state = _stopped_state()
     state.stops[OTHER] = {"session": "2026-10-09", "quantity": 7}

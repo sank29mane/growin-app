@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from ..breeze_client import BreezeClient, BreezeError, classify_payload
 from ..contract import (
@@ -38,9 +38,10 @@ from ..contract import (
 from ..events import EventLog
 from ..session import Authorization, BudgetGate, Credentials, SessionManager, charge_budget
 from ..transport import Timeouts
-from .limits import IST, ZERO, AccountSnapshot, Holding, OpenOrder, Quote, TickTable, Trade, load_tick_table
+from .limits import IST, ZERO, AccountSnapshot, Holding, LimitsError, OpenOrder, Quote, TickTable, Trade, load_tick_table
 from .master import MasterHolder, MasterMap
 from .pipeline import DatedTickReference, previous_month
+from .sessions import calendar_covers, load_calendar, previous_trading_day
 
 BARS_ROWS_CAP = 1000  # a response this long may have been cut: it is never treated as complete
 BARS_CHUNK_DAYS = 365
@@ -396,32 +397,43 @@ def _ist_today(clock: Any) -> date:
     return clock.now_utc().astimezone(IST).date()
 
 
-def _previous_weekday(day: date) -> date:
-    prior = day - timedelta(days=1)
-    while prior.weekday() >= 5:
-        prior -= timedelta(days=1)
-    return prior
-
-
 class BreezeAccount:
     """AccountPort: fresh holdings, working orders and the trade list, from three GETs.
 
     Holdings lag fills by a settlement day, so a sale made today (or on the previous
-    weekday) still shows in the demat quantity. Those sales are netted off the holding
-    before the guard compares it with the ledger; otherwise every sale would latch
-    account_mismatch. Netting can only lower a holding, so it never hides a buy and
+    trading day, by the NSE holiday table) still shows in the demat quantity. Those
+    sales are netted off the holding before the guard compares it with the ledger;
+    otherwise every sale would latch account_mismatch. Netting can only lower a holding, so it never hides a buy and
     never lets a sell exceed what the ledger holds. A holding has no price in this
     response, so cost is ZERO and the cap rules read the VM ledger's cost instead.
     """
 
-    def __init__(self, *, reads: BreezeReads, master: MasterHolder, clock: Any) -> None:
+    def __init__(
+        self,
+        *,
+        reads: BreezeReads,
+        master: MasterHolder,
+        clock: Any,
+        holidays: Iterable[date] | None = None,
+        special_sessions: Iterable[date] | None = None,
+    ) -> None:
         self._reads = reads
         self._master = master
         self._clock = clock
+        if holidays is None or special_sessions is None:
+            table_holidays, table_special = load_calendar()  # LimitsError if unreadable
+            holidays = table_holidays if holidays is None else holidays
+            special_sessions = table_special if special_sessions is None else special_sessions
+        self._holidays = frozenset(holidays)
+        self._special_sessions = frozenset(special_sessions)
 
     def snapshot(self) -> AccountSnapshot:
         master = self._master.current()
         today = _ist_today(self._clock)
+        if not calendar_covers(today, self._holidays, self._special_sessions):
+            # Past the table's last year the unsettled window cannot be placed, and a
+            # wrong window latches account_mismatch. Refuse the read instead.
+            raise LimitsError("holiday table does not cover today")
         held = parse_holdings(self._reads.success("demat_holdings_raw"))
         first = today - timedelta(days=TRADE_LOOKBACK_DAYS)
         trades = parse_trades(
@@ -442,7 +454,7 @@ class BreezeAccount:
             ),
             master,
         )
-        unsettled = _previous_weekday(today)
+        unsettled = previous_trading_day(today, self._holidays, self._special_sessions)
         for trade in trades:
             if trade.side == "sell" and trade.executed_at is not None:
                 if trade.executed_at.astimezone(IST).date() >= unsettled:

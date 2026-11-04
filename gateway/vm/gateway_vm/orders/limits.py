@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .challenge import canonical_bytes
 from .intent import Intent
@@ -315,9 +315,36 @@ class RiskFlags:
 # ---------------------------------------------------------------- evaluator
 
 
-def session_open(now_ist: datetime) -> bool:
-    """09:15 <= t < 15:10 IST, Monday to Friday. 15:09:59 is open, 15:10:00 is not."""
+def session_open(
+    now_ist: datetime,
+    *,
+    holidays: Iterable[date] | None = None,
+    special_sessions: Iterable[date] | None = None,
+) -> bool:
+    """09:15 <= t < 15:10 IST on a normal NSE session day. 15:09:59 is open, 15:10:00 is not.
+
+    Closed on weekends, on every listed holiday, and on every listed special session
+    (a Muhurat session has its own hours that the table does not carry, so it stays
+    closed: the safe side), and on any day past the last year the holiday table lists
+    (an unlisted holiday would look like a normal day). With no calendar passed the
+    repo table is read; one that cannot be read closes every day.
+    """
     if now_ist.weekday() >= 5:
+        return False
+    from . import sessions  # sessions imports LimitsError from this module
+
+    try:
+        if holidays is None or special_sessions is None:
+            table_holidays, table_special = sessions.load_calendar()
+            holidays = table_holidays if holidays is None else holidays
+            special_sessions = table_special if special_sessions is None else special_sessions
+        listed_holidays, listed_special = frozenset(holidays), frozenset(special_sessions)
+    except LimitsError:
+        return False
+    day = now_ist.date()
+    if day in listed_holidays or day in listed_special:
+        return False
+    if not sessions.calendar_covers(day, listed_holidays, listed_special):
         return False
     return SESSION_OPEN <= now_ist.time() < ORDER_CUTOFF
 
@@ -350,6 +377,8 @@ def evaluate(
     kill_enabled: bool,
     tick_reference: Decimal | None,
     tick_table: TickTable | None = None,
+    holidays: Iterable[date] | None = None,
+    special_sessions: Iterable[date] | None = None,
 ) -> tuple[str, ...]:
     """Ordered reason codes; empty means every rule passes.
 
@@ -383,7 +412,7 @@ def evaluate(
         codes.append("stop_open")
     if buy and flags.halt:
         codes.append("halt_latch")
-    if not session_open(now_ist):
+    if not session_open(now_ist, holidays=holidays, special_sessions=special_sessions):
         codes.append("session_closed")
 
     fresh = (

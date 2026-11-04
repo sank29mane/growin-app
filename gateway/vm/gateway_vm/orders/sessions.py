@@ -105,3 +105,60 @@ def expected_sessions(
             out.append(day)
         day += timedelta(days=1)
     return out
+
+
+COVERAGE_WARN_DAYS = 30
+
+
+def is_session_day(day: date, holidays: Iterable[date], special_sessions: Iterable[date]) -> bool:
+    """A normal weekday that is not a listed holiday, or a listed special session."""
+    if day in frozenset(special_sessions):
+        return True
+    return day.weekday() < 5 and day not in frozenset(holidays)
+
+
+def previous_trading_day(
+    day: date, holidays: Iterable[date], special_sessions: Iterable[date]
+) -> date:
+    """The latest session day strictly before ``day`` (a listed special session counts)."""
+    if isinstance(day, datetime):
+        raise TypeError("a date, not a datetime")
+    skip = frozenset(holidays)
+    extra = frozenset(special_sessions)
+    prior = day - timedelta(days=1)
+    while not is_session_day(prior, skip, extra):
+        prior -= timedelta(days=1)
+    return prior
+
+
+def covered_through(holidays: Iterable[date], special_sessions: Iterable[date]) -> date | None:
+    """Last day the table speaks for: 31 December of the latest year it lists.
+
+    None when the table lists nothing at all (a legal but empty table says nothing
+    about coverage, so no coverage rule applies to it).
+    """
+    years = [d.year for d in (*holidays, *special_sessions)]
+    return date(max(years), 12, 31) if years else None
+
+
+def calendar_covers(day: date, holidays: Iterable[date], special_sessions: Iterable[date]) -> bool:
+    """False once ``day`` is past the last year the table lists: an unlisted holiday
+    there would read as a normal session, so the day must be refused, not guessed."""
+    through = covered_through(holidays, special_sessions)
+    return through is None or day <= through
+
+
+def coverage_warning(
+    today: date, holidays: Iterable[date], special_sessions: Iterable[date]
+) -> str | None:
+    """A line for the operator once the table is within COVERAGE_WARN_DAYS of its end
+    (or past it), else None. No order is refused for this until the end has passed."""
+    through = covered_through(holidays, special_sessions)
+    if through is None:
+        return None
+    left = (through - today).days
+    if left > COVERAGE_WARN_DAYS:
+        return None
+    if left < 0:
+        return f"holiday table ended {through.isoformat()}: orders are refused until the next year is added"
+    return f"holiday table ends {through.isoformat()} ({left} days): add the next NSE holiday list"
