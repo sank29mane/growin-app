@@ -84,6 +84,7 @@ class _CountingSocket:
         self.raw = raw
         self.sent = 0
         self.deadline: float | None = None  # monotonic; set per request
+        self.base_timeout: float | None = None  # the per-operation timeout; set per request
 
     def send(self, data, flags: int = 0) -> int:
         taken = self.raw.send(data, flags)
@@ -93,8 +94,13 @@ class _CountingSocket:
     def sendall(self, data, flags: int = 0) -> None:
         view = memoryview(data).cast("B")
         while view:
-            if self.deadline is not None and time.monotonic() >= self.deadline:
-                raise TimeoutError("write passed the total deadline")
+            if self.deadline is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("write passed the total deadline")
+                # one blocking send may not run past the deadline either
+                cap = remaining if self.base_timeout is None else min(self.base_timeout, remaining)
+                self.raw.settimeout(cap)
             taken = self.send(view, flags)
             if taken <= 0:  # no progress: treat as a broken connection, never spin
                 raise BrokenPipeError("send took no bytes")
@@ -293,6 +299,7 @@ class PooledTransport:
                 sock = conn.sock = _CountingSocket(sock)
             sock.sent = 0
             sock.deadline = deadline
+            sock.base_timeout = timeouts.read_s
             try:
                 conn.request(method, path, body=body, headers=dict(headers))
             except (TimeoutError, ssl.SSLError):

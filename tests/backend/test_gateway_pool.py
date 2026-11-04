@@ -873,6 +873,9 @@ class _NoProgressSocket:
     def __init__(self) -> None:
         self.calls = 0
 
+    def settimeout(self, value) -> None:
+        pass
+
     def send(self, data, flags: int = 0) -> int:
         self.calls += 1
         return 0
@@ -890,6 +893,9 @@ def test_a_send_that_takes_no_bytes_is_a_broken_pipe_not_a_spin():
 class _TrickleSendSocket:
     """A socket that takes one byte per send, slowly, like a peer reading a trickle."""
 
+    def settimeout(self, value) -> None:
+        pass
+
     def send(self, data, flags: int = 0) -> int:
         time.sleep(0.01)
         return 1 if len(data) else 0
@@ -903,3 +909,41 @@ def test_a_write_cannot_outlive_the_total_deadline():
         sock.sendall(b"x" * 10_000)
     assert time.monotonic() - started < 1.0
     assert 0 < sock.sent < 10_000
+
+
+class _BlockingSendSocket:
+    """A socket whose next send blocks for its whole timeout, like a peer that stopped reading."""
+
+    def __init__(self) -> None:
+        self.timeout: float | None = None
+        self.timeouts: list[float] = []
+
+    def settimeout(self, value) -> None:
+        self.timeout = value
+        self.timeouts.append(value)
+
+    def send(self, data, flags: int = 0) -> int:
+        time.sleep(self.timeout if self.timeout is not None else 5.0)
+        raise TimeoutError("timed out")
+
+
+def test_one_blocking_send_cannot_run_past_the_total_deadline():
+    raw = _BlockingSendSocket()
+    sock = _CountingSocket(raw)
+    sock.base_timeout = 5.0  # the per-operation timeout alone would let this send block for 5 s
+    sock.deadline = time.monotonic() + 0.1
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        sock.sendall(b"x" * 100)
+    assert time.monotonic() - started < 1.0
+    assert raw.timeouts and raw.timeouts[-1] <= 0.1
+
+
+def test_the_per_send_timeout_never_exceeds_the_base_timeout():
+    raw = _BlockingSendSocket()
+    sock = _CountingSocket(raw)
+    sock.base_timeout = 0.05
+    sock.deadline = time.monotonic() + 30.0
+    with pytest.raises(TimeoutError):
+        sock.sendall(b"x")
+    assert raw.timeouts == [0.05]
