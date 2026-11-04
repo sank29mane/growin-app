@@ -466,23 +466,19 @@ def test_a_special_session_stays_closed_to_orders_on_a_weekday_too():
 
 
 def test_an_unreadable_holiday_table_closes_every_day(monkeypatch):
-    from gateway_vm.orders import sessions
-
     def unreadable(*_a, **_k):
         raise vm.LimitsError("holiday table is unreadable")
 
-    monkeypatch.setattr(sessions, "load_calendar", unreadable)
+    monkeypatch.setattr(vm, "load_calendar", unreadable)
     assert not vm.session_open(_ist("2026-10-08T10:00:00+05:30"))
     # An injected calendar does not need the file.
     assert vm.session_open(_ist("2026-10-08T10:00:00+05:30"), holidays=(), special_sessions=())
 
 
 def test_a_day_past_the_last_year_in_the_table_is_closed_not_guessed_open():
-    from gateway_vm.orders import sessions
-
     assert vm.session_open(_ist("2026-12-31T10:00:00+05:30"))
     assert not vm.session_open(_ist("2027-01-05T10:00:00+05:30"))  # the packaged table lists 2026 only
-    holidays, special = sessions.load_calendar()
+    holidays, special = vm.load_calendar()
     with_2027 = holidays | {date(2027, 1, 26)}
     assert vm.session_open(_ist("2027-01-05T10:00:00+05:30"), holidays=with_2027, special_sessions=special)
     assert not vm.session_open(_ist("2027-01-26T10:00:00+05:30"), holidays=with_2027, special_sessions=special)
@@ -497,6 +493,22 @@ def test_evaluate_answers_session_closed_on_a_holiday_for_an_otherwise_clean_buy
     case["now_ist"] = "2026-11-09T10:00:00+05:30"
     case["quote"] = dict(case["quote"], session_date="2026-11-09")
     assert "session_closed" not in run_case(case)
+
+
+def test_limits_module_stands_alone_for_the_shadow_replay():
+    # backend/shadow_india/vm_replay.py loads only limits, intent and challenge from a
+    # recorded build. A limits.py that imports sessions would fail to load there.
+    import ast
+
+    tree = ast.parse(Path(vm.__file__).read_text(encoding="utf-8"))
+    imported = {
+        (node.module or "") if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in (node.names if isinstance(node, ast.Import) else [None])
+    }
+    assert not any(m.split(".")[-1] in {"sessions", "reads", "risk", "pipeline"} for m in imported)
+    assert vm.session_open(_ist("2026-11-09T10:00:00+05:30")) and not vm.session_open(_ist("2026-11-10T10:00:00+05:30"))
 
 
 def test_session_helpers_use_ist_not_the_host_zone():

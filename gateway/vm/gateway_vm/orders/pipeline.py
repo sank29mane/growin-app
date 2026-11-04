@@ -670,8 +670,6 @@ class RuleGuard:
                 kill_enabled=kill.enabled,
                 tick_reference=reference,
                 tick_table=self._tick_table,
-                holidays=self._holidays,
-                special_sessions=self._special_sessions,
             )
             return GuardResult(codes=codes, kill=kill.label, latches=state.latch_names())
 

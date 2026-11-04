@@ -315,6 +315,82 @@ class RiskFlags:
 # ---------------------------------------------------------------- evaluator
 
 
+# ---------------------------------------------------------------- calendar
+# The shadow replay loads this module on its own (limits, intent, challenge), so the
+# calendar the session check needs is defined here, not in sessions.py.
+
+HOLIDAY_TABLE_PATH = Path(__file__).parent / "data" / "nse_trading_holidays.json"
+HOLIDAY_SCHEMA = "growin.gateway.nse_trading_holidays/2"
+_HOLIDAY_MAX_FILE = 65536
+
+
+def _strict_holidays(text: str) -> object:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        out: dict[str, object] = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError("duplicate key")
+            out[key] = value
+        return out
+
+    def bad(_: str) -> object:
+        raise ValueError("number")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_float=bad, parse_constant=bad)
+
+
+def _holiday_dates(listed: object, *, weekdays_only: bool) -> frozenset[date]:
+    if not isinstance(listed, list):
+        raise ValueError("not a list")
+    days: list[date] = []
+    for item in listed:
+        if not isinstance(item, str) or len(item) != 10:
+            raise ValueError("date")
+        day = date.fromisoformat(item)
+        if weekdays_only and day.weekday() >= 5:
+            raise ValueError("weekend")
+        days.append(day)
+    if len(set(days)) != len(days):
+        raise ValueError("duplicate")
+    return frozenset(days)
+
+
+def load_calendar(path: str | Path = HOLIDAY_TABLE_PATH) -> tuple[frozenset[date], frozenset[date]]:
+    """(holidays, special_sessions), or a LimitsError if the table cannot be trusted."""
+    try:
+        file = Path(path)
+        if file.stat().st_size > _HOLIDAY_MAX_FILE:
+            raise ValueError("too large")
+        raw = _strict_holidays(file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("schema") != HOLIDAY_SCHEMA:
+            raise ValueError("schema")
+        holidays = _holiday_dates(raw["holidays"], weekdays_only=True)
+        special = _holiday_dates(raw["special_sessions"], weekdays_only=False)
+        if holidays & special:
+            raise ValueError("a date cannot be both a holiday and a special session")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LimitsError("holiday table is unreadable") from exc
+    return holidays, special
+
+
+def covered_through(holidays: Iterable[date], special_sessions: Iterable[date]) -> date | None:
+    """Last day the table speaks for: 31 December of the latest year it lists.
+
+    None when the table lists nothing at all (a legal but empty table says nothing
+    about coverage, so no coverage rule applies to it).
+    """
+    years = [d.year for d in (*holidays, *special_sessions)]
+    return date(max(years), 12, 31) if years else None
+
+
+def calendar_covers(day: date, holidays: Iterable[date], special_sessions: Iterable[date]) -> bool:
+    """False once ``day`` is past the last year the table lists: an unlisted holiday
+    there would read as a normal session, so the day must be refused, not guessed."""
+    through = covered_through(holidays, special_sessions)
+    return through is None or day <= through
+
+
+
 def session_open(
     now_ist: datetime,
     *,
@@ -331,11 +407,9 @@ def session_open(
     """
     if now_ist.weekday() >= 5:
         return False
-    from . import sessions  # sessions imports LimitsError from this module
-
     try:
         if holidays is None or special_sessions is None:
-            table_holidays, table_special = sessions.load_calendar()
+            table_holidays, table_special = load_calendar()
             holidays = table_holidays if holidays is None else holidays
             special_sessions = table_special if special_sessions is None else special_sessions
         listed_holidays, listed_special = frozenset(holidays), frozenset(special_sessions)
@@ -344,7 +418,7 @@ def session_open(
     day = now_ist.date()
     if day in listed_holidays or day in listed_special:
         return False
-    if not sessions.calendar_covers(day, listed_holidays, listed_special):
+    if not calendar_covers(day, listed_holidays, listed_special):
         return False
     return SESSION_OPEN <= now_ist.time() < ORDER_CUTOFF
 
@@ -377,8 +451,6 @@ def evaluate(
     kill_enabled: bool,
     tick_reference: Decimal | None,
     tick_table: TickTable | None = None,
-    holidays: Iterable[date] | None = None,
-    special_sessions: Iterable[date] | None = None,
 ) -> tuple[str, ...]:
     """Ordered reason codes; empty means every rule passes.
 
@@ -412,7 +484,7 @@ def evaluate(
         codes.append("stop_open")
     if buy and flags.halt:
         codes.append("halt_latch")
-    if not session_open(now_ist, holidays=holidays, special_sessions=special_sessions):
+    if not session_open(now_ist):  # reads the packaged holiday table
         codes.append("session_closed")
 
     fresh = (
