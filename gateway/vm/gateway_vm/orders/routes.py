@@ -1,10 +1,11 @@
-"""The five growin-orders/1 routes (O2) and the wiring behind them (63-05).
+"""The six growin-orders/1 routes (O2, plus the 64-10 key read) and the wiring behind them (63-05).
 
     POST /v1/orders/intents     mint a challenge for one intent
     POST /v1/orders/authorize   verify the Mac's signature, re-run every check, audit
     POST /v1/orders/halt        set mac_halt (restricts; nothing clears it here)
     GET  /v1/orders/state       kill state, latches, drawdown, peak_date, last_evaluated_session
     GET  /v1/orders/audit       at most 200 audit entries after after_seq
+    GET  /v1/orders/key         the key_id the pipeline checks at mint (64-10, D-36)
 
 The handlers add nothing to the 63-01 pipeline. They check the relay bearer, bind the
 Breeze session token for the ports, call mint or authorize, and shape the answer. A
@@ -14,7 +15,9 @@ constant refusal object and no route here places, changes or withdraws an order.
 Order of a Breeze-backed route: bearer check, order configuration ready, body
 validation, the Breeze session (require_active), then the pipeline, whose ports charge
 the relay budget before each Breeze GET. halt, state and audit need only the bearer:
-they never touch Breeze and halt only restricts.
+they never touch Breeze and halt only restricts. key needs the bearer and an active
+session (so an unbound token never answers) and reads one in-memory attribute: no Breeze
+call, kill read, egress check, budget charge or write.
 
 If the limits file, the order key or the state directory cannot be trusted at start,
 every order route answers 503 with the reason (config_invalid, state_unreadable) while
@@ -45,6 +48,7 @@ from . import (
     ROUTE_AUTHORIZE,
     ROUTE_HALT,
     ROUTE_INTENTS,
+    ROUTE_KEY,
     ROUTE_STATE,
     OrderRefusal,
     intent_invalid,
@@ -407,3 +411,10 @@ def mount_order_routes(
         except AuditBroken:
             raise refusal("audit_broken") from None
         return JSONResponse({"contract": CONTRACT, "entries": entries})
+
+    @app.get(ROUTE_KEY, dependencies=[Depends(_no_query)])
+    def current_key(token: str | None = Depends(bearer)):
+        authorization = session.authorize(token)
+        if authorization.failure:
+            raise authorization.failure
+        return JSONResponse({"contract": CONTRACT, "key_id": pipeline().key_id})

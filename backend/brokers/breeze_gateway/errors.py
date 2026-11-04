@@ -107,6 +107,14 @@ class IntradayRouteUnavailable(NotFound):
     """
 
 
+class OrdersKeyRouteUnavailable(NotFound):
+    """The VM answered 404 for /v1/orders/key: it runs a build older than 64-10.
+
+    Raised only by OrdersClient.current_key. The caller refuses the run with reason
+    ``route_unavailable``; nothing retries and nothing falls back to the audit read.
+    """
+
+
 class MethodNotAllowed(RelayError):
     code = "METHOD_NOT_ALLOWED"
 

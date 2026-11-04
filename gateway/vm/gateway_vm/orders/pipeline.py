@@ -186,6 +186,11 @@ class OrderPipeline:
         # raise if the authority behind those reads (the Breeze session) is gone.
         self._recheck = recheck
 
+    @property
+    def key_id(self) -> str:
+        """The key id this pipeline checks at mint (D-36). The same PinnedKey, read-only."""
+        return self._key.key_id
+
     # -- helpers -----------------------------------------------------------
 
     def _sample(self) -> _Sample:

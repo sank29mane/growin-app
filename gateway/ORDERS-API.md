@@ -113,7 +113,7 @@ wins and this file is wrong.
 
 ## The VM routes and reads (63-05)
 
-- **Where.** `create_app(..., orders=OrderService)` mounts the five O2 routes. `main.build_app` always builds the
+- **Where.** `create_app(..., orders=OrderService)` mounts the five O2 routes and the 64-10 key read (six). `main.build_app` always builds the
   service from `limits_path` and `order_key_path` in relay.json (defaults `/etc/growin-gateway/limits.json` and
   `/etc/growin-gateway/order-key.json`) and the StateDirectory. The limits and key files are loaded once, at start.
 - **Contract per path.** `/v1/orders/` (trailing slash) is `growin-orders/1`; everything else, including the bare
@@ -132,6 +132,16 @@ wins and this file is wrong.
   state error) while health and the data routes keep working. One `config_alarm` event is logged at start.
 - **`GET /v1/orders/state`** adds `alerts_logged`: the number of stop-exit alerts written to `alerts.jsonl` in the
   StateDirectory (below). The other fields are as O2.
+- **`GET /v1/orders/key`** (64-10, D-36; additive under O8, O2 stays as written). Answers exactly
+  `{"contract": "growin-orders/1", "key_id": "<64 lowercase hex>"}`: the `key_id` of the `PinnedKey` the running
+  pipeline compares against at mint, read from that object at request time (no copy, no cache, no key-file read).
+  GET only, no query string. It needs the relay bearer and an active session (any other state answers the usual
+  `NO_SESSION`, `SESSION_EXPIRED` or `EGRESS_MISMATCH`, so an unbound token never gets the id). It makes no Breeze
+  call, egress check, kill read or budget charge, and writes nothing: no audit entry, state, challenge or counter.
+  A bad key file answers 503 `config_invalid` like every order route. The key is loaded once at start, so a
+  rotation (replace the file, restart the service) changes the field and the mint check together. The Mac reads it
+  once before it writes anything (`OrdersClient.current_key()`, CLI `orders-key`); an older VM answers 404 and the
+  Mac treats that as `route_unavailable`, with no fallback to the audit read. The mint check stays the second line.
 - **Alert channel.** The external channel is deferred by the operator, so `session_end_check` writes each alert to
   `alerts.jsonl` (append only, mode 0600, fsynced, ISIN and session date and quantity, nothing else). The Mac reads
   the `stop_exit_open` and `alert_failed` entries from the audit and the count from `state`. An unreadable alert

@@ -88,6 +88,7 @@ def _parser() -> argparse.ArgumentParser:
         "--procedure-version", required=True, type=int, help="approved CAS snapshot procedure version (no default)"
     )
     sub.add_parser("orders-state", help="VM order state: kill, latches, drawdown (read only)")
+    sub.add_parser("orders-key", help="the key id the VM checks at mint (read only)")
     audit = sub.add_parser("orders-audit", help="VM order audit entries (read only)")
     audit.add_argument("--after-seq", type=int, default=0)
     login = sub.add_parser("login", help="log in through the relay")
@@ -186,6 +187,8 @@ def main(
                 say(f"peak_date {order_state.peak_date or 'none'}")
                 say(f"last_evaluated_session {order_state.last_evaluated_session or 'none'}")
                 say(f"alerts_logged {order_state.alerts_logged}")
+            elif args.command == "orders-key":
+                say(f"key_id {OrdersClient(relay).current_key()}")
             elif args.command == "orders-audit":
                 if args.after_seq < 0:
                     raise RelayArgumentError("after_seq")
