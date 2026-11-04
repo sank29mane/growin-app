@@ -389,13 +389,11 @@ def _dotted(node: ast.AST) -> str:
     return ast.dump(node)
 
 
-def key_handler_violations(source: str) -> list[str]:
-    """Why the key handler is more than bearer, failure gate and one in-memory read. Empty is clean."""
-    tree = ast.parse(source)
+def _key_handlers(tree: ast.AST) -> list[ast.FunctionDef]:
     mount = next(
         n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "mount_order_routes"
     )
-    handlers = [
+    return [
         n
         for n in ast.walk(mount)
         if isinstance(n, ast.FunctionDef)
@@ -409,9 +407,73 @@ def key_handler_violations(source: str) -> list[str]:
             for d in n.decorator_list
         )
     ]
+
+
+def _is_none(node: ast.AST | None) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _tests_failure(test: ast.expr) -> bool:
+    """`authorization.failure` or `authorization.failure is not None`; never a negation."""
+    if _dotted(test) == "authorization.failure":
+        return True
+    return (
+        isinstance(test, ast.Compare)
+        and _dotted(test.left) == "authorization.failure"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.IsNot)
+        and _is_none(test.comparators[0])
+    )
+
+
+def _is_failure_gate(stmt: ast.stmt) -> bool:
+    """`if authorization.failure: raise authorization.failure`, matched by node, not by text.
+
+    The honest spellings `is not None` and `raise ... from None` keep the gate, so they match.
+    """
+    return (
+        isinstance(stmt, ast.If)
+        and _tests_failure(stmt.test)
+        and not stmt.orelse
+        and len(stmt.body) == 1
+        and isinstance(stmt.body[0], ast.Raise)
+        and stmt.body[0].exc is not None
+        and _dotted(stmt.body[0].exc) == "authorization.failure"
+        and (stmt.body[0].cause is None or _is_none(stmt.body[0].cause))
+    )
+
+
+def _is_authorize_assign(stmt: ast.stmt) -> bool:
+    return (
+        isinstance(stmt, ast.Assign)
+        and [_dotted(t) for t in stmt.targets] == ["authorization"]
+        and isinstance(stmt.value, ast.Call)
+        and _dotted(stmt.value.func) == "session.authorize"
+    )
+
+
+def _gate_violations(body: list[ast.stmt]) -> list[str]:
+    """The failure gate must exist, follow the authorize call, and precede every key read."""
+    gates = [i for i, stmt in enumerate(body) if _is_failure_gate(stmt)]
+    if len(gates) != 1:
+        return [f"failure gate: expected one, found {len(gates)}"]
+    gate = gates[0]
+    if not any(_is_authorize_assign(stmt) for stmt in body[:gate]):
+        return ["failure gate: no session.authorize assignment before it"]
+    for stmt in body[:gate]:
+        if not _is_authorize_assign(stmt) and any(
+            isinstance(n, ast.Call) and _dotted(n.func) in {"pipeline", "JSONResponse"} for n in ast.walk(stmt)
+        ):
+            return ["failure gate: the key is read before it"]
+    return []
+
+
+def key_handler_violations(source: str) -> list[str]:
+    """Why the key handler is more than bearer, failure gate and one in-memory read. Empty is clean."""
+    handlers = _key_handlers(ast.parse(source))
     if len(handlers) != 1:
         return [f"expected one key handler, found {len(handlers)}"]
-    found: list[str] = []
+    found: list[str] = _gate_violations(handlers[0].body)
     for node in (n for stmt in handlers[0].body for n in ast.walk(stmt)):
         if isinstance(node, ast.Call) and _dotted(node.func) not in HANDLER_ALLOWED_CALLS:
             found.append("call " + _dotted(node.func))
@@ -424,32 +486,121 @@ def key_handler_violations(source: str) -> list[str]:
     return found
 
 
+def mutate_key_handler(source: str, mutate) -> str:
+    """Parse the routes source, let `mutate(handler_body)` edit the key handler, return unparsed source.
+
+    Anchored on the AST, so reformatting the handler (a split return, different quoting) cannot
+    make a plant silently miss.
+    """
+    tree = ast.parse(source)
+    handlers = _key_handlers(tree)
+    assert len(handlers) == 1
+    mutate(handlers[0].body)
+    return ast.unparse(ast.fix_missing_locations(tree))
+
+
+def plant_before_return(statement: str):
+    """Insert `statement` just before the handler's final return, found by node."""
+    planted = ast.parse(statement).body
+
+    def mutate(body: list[ast.stmt]) -> None:
+        assert isinstance(body[-1], ast.Return)
+        body[-1:-1] = planted
+
+    return mutate
+
+
 def test_k11_the_key_handler_calls_only_authorize_pipeline_and_the_response():
     source = VM_ROUTES_FILE.read_text(encoding="utf-8")
     assert key_handler_violations(source) == []
 
 
-ANCHOR = '        return JSONResponse({"contract": CONTRACT, "key_id": pipeline().key_id})'
+def test_k11_a_no_op_rewrite_of_the_handler_stays_clean():
+    # Control for the plants below: unparse alone must not turn the scan red.
+    source = VM_ROUTES_FILE.read_text(encoding="utf-8")
+    assert key_handler_violations(mutate_key_handler(source, lambda body: None)) == []
 
 
 @pytest.mark.parametrize(
-    "plant",
+    "plant, reason",
     [
-        "        session.require_active(authorization)\n",
-        "        session.require_egress(token)\n",
-        "        service.kill.read()\n",
-        "        charge_budget(None, None)\n",
-        "        service.audit.append({})\n",
-        "        load_order_key('x')\n",
-        "        with service.store.lock():\n            pass\n",
+        ("session.require_active(authorization)", "call session.require_active"),
+        ("session.require_egress(token)", "call session.require_egress"),
+        ("service.kill.read()", "call service.kill.read"),
+        ("charge_budget(None, None)", "call charge_budget"),
+        ("service.audit.append({})", "call service.audit.append"),
+        ("load_order_key('x')", "call load_order_key"),
+        ("with service.store.lock():\n    pass", "With"),
     ],
     ids=["require_active", "require_egress", "kill_read", "charge_budget", "audit_append", "load_order_key", "store_lock"],
 )
-def test_k11_each_planted_side_effect_turns_the_scan_red(plant):
+def test_k11_each_planted_side_effect_turns_the_scan_red(plant, reason):
     source = VM_ROUTES_FILE.read_text(encoding="utf-8")
-    assert source.count(ANCHOR) == 1
-    planted = source.replace(ANCHOR, plant + ANCHOR)
-    assert key_handler_violations(planted) != []
+    found = key_handler_violations(mutate_key_handler(source, plant_before_return(plant)))
+    assert reason in found
+    # The gate is untouched, so a red scan here is the plant's doing and nothing else's.
+    assert not any(v.startswith("failure gate") for v in found)
+
+
+def _drop_gate(body: list[ast.stmt]) -> None:
+    body[:] = [stmt for stmt in body if not _is_failure_gate(stmt)]
+
+
+def _hollow_gate(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.body = [ast.Pass()]
+
+
+def _inverted_gate(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.test = ast.UnaryOp(op=ast.Not(), operand=stmt.test)
+
+
+def _gate_after_read(body: list[ast.stmt]) -> None:
+    gate = next(i for i, stmt in enumerate(body) if _is_failure_gate(stmt))
+    body.insert(gate, ast.parse("pipeline()").body[0])
+
+
+def _gate_from_none(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.body[0].cause = ast.Constant(value=None)
+
+
+def _gate_is_not_none(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.test = ast.parse("authorization.failure is not None", mode="eval").body
+
+
+def _gate_is_none(body: list[ast.stmt]) -> None:
+    for stmt in body:
+        if _is_failure_gate(stmt):
+            stmt.test = ast.parse("authorization.failure is None", mode="eval").body
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_gate_from_none, _gate_is_not_none],
+    ids=["raise_from_none", "is_not_none"],
+)
+def test_k11_an_honest_respelling_of_the_failure_gate_stays_clean(mutate):
+    # Controls for the gate check: these keep the gate working, so the scan must not cry wolf.
+    source = VM_ROUTES_FILE.read_text(encoding="utf-8")
+    assert key_handler_violations(mutate_key_handler(source, mutate)) == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_drop_gate, _hollow_gate, _inverted_gate, _gate_is_none, _gate_after_read],
+    ids=["dropped", "hollow", "inverted", "is_none", "after_read"],
+)
+def test_k11_a_handler_without_a_working_failure_gate_turns_the_scan_red(mutate):
+    source = VM_ROUTES_FILE.read_text(encoding="utf-8")
+    found = key_handler_violations(mutate_key_handler(source, mutate))
+    assert any(v.startswith("failure gate") for v in found)
 
 
 # ---------------------------------------------------------------- K12
