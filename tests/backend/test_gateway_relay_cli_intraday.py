@@ -645,6 +645,7 @@ def nse_desc(kind: str):
 
 
 def build_pilot(root: Path, master_day: date = D) -> Path:
+    import cas_testkit as ck
     from pilot_data.bhavcopy import ingest_cm_legacy
     from pilot_data.security_master import ingest_security_master
     from pilot_data.store import PilotDataStore
@@ -653,14 +654,14 @@ def build_pilot(root: Path, master_day: date = D) -> Path:
         ingest_security_master(
             store,
             nse_desc("security_master"),
-            kit.security_master_bytes([kit.MASTER_RELIND, kit.MASTER_NIFBEE]),
+            kit.security_master_bytes([ck.ICICI_REL, ck.ICICI_NIF]),
             snapshot_date=master_day,
             snapshot_date_basis="test_fixture",
         )
         rows = [
-            kit.cm_legacy_row("RELIANCE", "EQ", "INE002A01018", "100", "101", "99", "100", trade_date=D,
+            kit.cm_legacy_row("RELIANCE", "EQ", ck.ISIN_REL, "100", "101", "99", "100", trade_date=D,
                               volume="3750"),
-            kit.cm_legacy_row("NIFTYBEES", "EQ", "INF204KB14I2", "100", "101", "98", "100", trade_date=D,
+            kit.cm_legacy_row("NIFTYBEES", "EQ", ck.ISIN_NIFTY, "100", "101", "98", "100", trade_date=D,
                               volume="7500"),
         ]
         ingest_cm_legacy(store, nse_desc("cm_legacy"), kit.cm_legacy_zip(D, rows), trade_date=D)
@@ -681,7 +682,7 @@ def import_cas(pilot_root: Path, tmp_path: Path, monkeypatch, day: date = D, *, 
     log = ck.ProcedureLogFile(tmp_path / "procedure.json")
     monkeypatch.setattr(cas_class, "PROCEDURE_PATH", log.path)
     log.approve(1)
-    rows = [ck.nse_row("RELIANCE", "EQ", "INE002A01018", "1"), ck.nse_row("NIFTYBEES", "EQ", "INF204KB14I2", "0")]
+    rows = [ck.nse_row("RELIANCE", "EQ", ck.ISIN_REL, "1"), ck.nse_row("NIFTYBEES", "EQ", ck.ISIN_NIFTY, "0")]
     path = ck.write_snapshot(tmp_path / "inbox", name_day or day, rows)
     cas_snapshots.import_snapshot(pilot_root, path, name_day or day, 1, calendar=ck.calendar_for(tmp_path))
     return log
@@ -723,6 +724,8 @@ def test_probe_compare_offline_no_client(env: Env, pilot_root: Path, monkeypatch
 
 
 def test_probe_compare_prints_ttq_ratio_class_and_extremes(env: Env, pilot_root: Path, cas_log):
+    import cas_testkit as ck
+
     env.step("S-3")
     env.step("S-6")
     code, lines = compare(env, pilot_root)
@@ -730,12 +733,12 @@ def test_probe_compare_prints_ttq_ratio_class_and_extremes(env: Env, pilot_root:
     assert lines[0] == "compare probe_date 2026-10-21 symbols 3 saved_hashes verified"
     relind = next(line for line in lines if line.startswith("symbol RELIND bhavcopy_ttq"))
     assert "bhavcopy_ttq 3750 bar_volume_sum_day_window 3750 ratio 1.0000" in relind
-    assert "class cas nse_symbol RELIANCE isin INE002A01018 series EQ snapshot_date 2026-10-21 " in relind
+    assert f"class cas nse_symbol RELIANCE isin {ck.ISIN_REL} series EQ snapshot_date 2026-10-21 " in relind
     assert "procedure_version 1 " in relind and "u24_status unverified icici_pin 2026-10-21:" in relind
     assert "U-23" in relind and "pre-open and block-deal" in relind  # the note rides on every ratio line
     nifbee = next(line for line in lines if line.startswith("symbol NIFBEE bhavcopy_ttq"))
     assert "bhavcopy_ttq 7500 bar_volume_sum_day_window 3750 ratio 0.5000" in nifbee
-    assert "class non_cas nse_symbol NIFTYBEES isin INF204KB14I2 series EQ" in nifbee
+    assert f"class non_cas nse_symbol NIFTYBEES isin {ck.ISIN_NIFTY} series EQ" in nifbee
     assert "U-23" in nifbee
     assert "symbol RELIND day_high bhavcopy 101 bars 101 match true" in lines
     assert "symbol RELIND day_low bhavcopy 99 bars 99 match true" in lines

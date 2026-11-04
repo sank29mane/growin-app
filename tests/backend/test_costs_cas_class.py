@@ -46,7 +46,7 @@ def no_network(monkeypatch):
 
 def row(**changes):
     values = dict(
-        isin="INE002A01018", nse_symbol="RELIANCE", series="EQ", cas_class=CAS, snapshot_date=D,
+        isin="INE0REL01005", nse_symbol="RELIANCE", series="EQ", cas_class=CAS, snapshot_date=D,
         snapshot_sha256=H["snap"], index_sha256=H["index"], procedure_version=1, spec_sha256=H["spec"],
         impl_sha256=H["impl"], u24_status="unverified", u24_evidence_ref=None, stock_code="RELIND",
         icici_ref=IciciRef(D, H["snap"], H["row"]),
@@ -129,7 +129,7 @@ def test_cas_class_row_carries_the_provenance_and_has_no_default():
     assert (value.cas_class, value.procedure_version, value.u24_status) == (CAS, 1, "unverified")
     assert row(cas_class=NON_CAS).cas_class == NON_CAS
     with pytest.raises(TypeError):
-        CasClassRow(isin="INE002A01018")  # type: ignore[call-arg]
+        CasClassRow(isin="INE0REL01005")  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize(

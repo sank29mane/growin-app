@@ -930,6 +930,11 @@ def _assess_day(
     if (cas_row.isin, cas_row.nse_symbol, cas_row.series) != (isin, nse_symbol, series):
         facts.update(_cas_facts(cas_row, nse_symbol, "identity_mismatch", "row_instrument_differs_from_pinned"))
         return finish(SESSION_SCOPE_UNKNOWN)
+    # Only ``resolve_broker`` yields a row with the Breeze code and the ICICI master pin. A row shaped like the
+    # display path's (``resolve_symbol``: no code, no pin) never feeds a decision.
+    if cas_row.stock_code != stock_code or cas_row.icici_ref is None:
+        facts.update(_cas_facts(cas_row, nse_symbol, "identity_mismatch", "row_not_from_resolve_broker"))
+        return finish(SESSION_SCOPE_UNKNOWN)
     facts.update(_cas_facts(cas_row, nse_symbol))
     facts["continuous_end"] = schedule.continuous_end_for(cas_row.cas_class).strftime("%H:%M")
     # R-15: sum over every bar in D, admitted by any attempt or not.

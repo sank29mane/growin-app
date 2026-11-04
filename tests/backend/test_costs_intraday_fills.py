@@ -615,6 +615,19 @@ def test_cas_row_instrument_mismatch_refused():
         assert day.verdict_code == ifs.SESSION_SCOPE_UNKNOWN
 
 
+def test_cas_row_not_from_resolve_broker_refused():
+    """A row without the ICICI pin, or for another Breeze code, has the display path's shape and never decides."""
+    no_pin = dataclasses.replace(cas_row(), icici_ref=None)
+    other_code = dataclasses.replace(cas_row(), stock_code="OTHERCO")
+    no_code = dataclasses.replace(cas_row(), stock_code=None)
+    for row in (no_pin, other_code, no_code):
+        day = assess(cas=row)
+        assert (day.cas_class, day.cas_sub_reason, day.cas_detail) == (
+            None, "identity_mismatch", "row_not_from_resolve_broker")
+        assert day.verdict_code == ifs.SESSION_SCOPE_UNKNOWN
+    assert assess(cas=cas_row()).cas_class == "cas"
+
+
 def test_cas_attempt_symbol_pin_mismatch():
     """The attempt pins the NSE symbol; evidence of the day for another symbol cannot be admitted."""
     day = assess()

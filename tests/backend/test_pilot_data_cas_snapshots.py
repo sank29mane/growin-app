@@ -3,6 +3,9 @@
 Every snapshot here is a small synthetic file built in the test. No test reads a real NSE file, and the
 network sentinel below fails any socket use. The plants in the PR body (28 to 35) are each caught by one of
 the tests named in them.
+
+The snapshot_on and snapshot_by_sha unit tests live here, not in the security-master test file, because they exist
+only for this procedure and are pinned by its fingerprint.
 """
 
 from __future__ import annotations
@@ -41,7 +44,11 @@ from costs.cas_class import (
 )
 from market_data import models as market_models
 from pilot_data import cas_snapshots as cs
+from pilot_data import core as pd_core
+from pilot_data import models as pd_models
 from pilot_data import security_master as sm
+from pilot_data import store as pd_store
+from pilot_data.core import PilotDataError
 from pilot_data.store import DB_FILE_NAME, PilotDataStore
 
 REPO = Path(__file__).resolve().parents[2]
@@ -278,7 +285,7 @@ def test_cas_identity_symbol_mismatch_unknown(world: ck.World) -> None:
     world.import_()
     stale = world.resolve("TATOLD")  # ICICI says TATAMOTORS; the active NSE row for the ISIN is TMPV
     assert isinstance(stale, CasUnresolved)
-    assert (stale.sub_reason, stale.detail) == ("identity_mismatch", "no_active_row")
+    assert (stale.sub_reason, stale.detail) == ("identity_mismatch", "icici_symbol_not_active_for_isin")
     absent = world.resolve("ABSENT")
     assert isinstance(absent, CasUnresolved)
     assert (absent.sub_reason, absent.detail) == ("identity_mismatch", "isin_not_in_snapshot")
@@ -344,37 +351,96 @@ def test_cas_active_row_predicate(series: str, del_flag: str, eligibility: str, 
 # ---- resolve reads stored bytes only -----------------------------------------------------
 
 
+FLIPPED_FLAG_MAP = {"1": NON_CAS, "0": CAS, "anything_else": "unknown"}
+
+
 def test_cas_resolve_never_reparses(world: ck.World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real spec change is approved as v2. Replaying v1 must still give the stored v1 class, so it cannot re-derive."""
     world.import_()
     expected = world.resolve("RELIND")
+    assert isinstance(expected, CasClassRow) and expected.cas_class == CAS
+    monkeypatch.setitem(cs.SPEC, "flag_map", FLIPPED_FLAG_MAP)  # a re-parse under the new spec would say non_cas
+    world.log.approve(2)
 
     def boom(*_args: Any, **_kwargs: Any) -> Any:
         raise AssertionError("resolution re-parsed the raw snapshot")
 
     monkeypatch.setattr(cs, "parse_snapshot", boom)
     monkeypatch.setattr(cs, "build_index", boom)
+    monkeypatch.setattr(cs, "_group_verdict", boom)
+    monkeypatch.setattr(cs.gzip, "GzipFile", boom)
+    monkeypatch.setattr(cs.csv, "reader", boom)
     assert world.resolve("RELIND") == expected
-    assert cs.resolve_symbol(world.root, D, 1, "RELIANCE").isin == ck.ISIN_REL
+    shown = cs.resolve_symbol(world.root, D, 1, "RELIANCE")
+    assert isinstance(shown, CasClassRow) and shown.cas_class == CAS and shown.isin == ck.ISIN_REL
 
 
-def test_cas_reprocess_under_new_procedure(world: ck.World) -> None:
+def test_cas_reprocess_under_new_procedure(world: ck.World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """v2 is a real spec change (the flag map flips). v1 still resolves to its stored class, v2 to its own."""
     world.import_()
     first = world.resolve("RELIND")
-    old_index = index_path(world).read_bytes()
+    first_nif = world.resolve("NIFBEE")
+    assert (first.cas_class, first_nif.cas_class) == (CAS, NON_CAS)
+    v1_file = index_path(world)
+    old_index = v1_file.read_bytes()
+    old_spec = cs.running_identity()[0]
+
+    monkeypatch.setitem(cs.SPEC, "flag_map", FLIPPED_FLAG_MAP)
+    assert cs.running_identity()[0] != old_spec
+    # Code nobody approved never resolves, even for the version it was once approved for.
+    unapproved = world.resolve("RELIND")
+    assert isinstance(unapproved, CasUnresolved)
+    assert (unapproved.sub_reason, unapproved.detail) == ("procedure_unapproved", "running_implementation_differs_from_entry")
+    assert refusal(lambda: cs.reindex(world.root, D, 1)) == "procedure_identity_differs"
+
     world.log.approve(2, u24_status="verified", u24_evidence_ref="e" * 64)
-    outcome = cs.reindex(world.root, D, 2)
-    assert outcome.index_written
+    assert cs.reindex(world.root, D, 2).index_written
     second = world.resolve("RELIND", version=2)
     assert isinstance(second, CasClassRow)
     assert (second.procedure_version, second.u24_status, second.u24_evidence_ref) == (2, "verified", "e" * 64)
+    assert second.cas_class == NON_CAS and second.cas_class != first.cas_class  # its own class
+    assert world.resolve("NIFBEE", version=2).cas_class == CAS
     assert second.snapshot_sha256 == first.snapshot_sha256
-    assert second.index_sha256 != first.index_sha256
+    assert (second.spec_sha256, second.index_sha256) != (first.spec_sha256, first.index_sha256)
     # The recorded result under version 1 is unchanged and its index is byte-identical.
     assert world.resolve("RELIND") == first
-    assert index_path(world).read_bytes() == old_index
+    assert world.resolve("NIFBEE") == first_nif
+    assert index_path(world) == v1_file and v1_file.read_bytes() == old_index
     # A reindex of a version that is not approved, or already stored, changes nothing.
     assert refusal(lambda: cs.reindex(world.root, D, 3)) == "procedure_unapproved"
     assert cs.reindex(world.root, D, 2).index_written is False
+
+
+def test_cas_v1_replays_after_an_implementation_change_is_approved(
+    world: ck.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repro of O1: import under v1, change the implementation, approve v2, reindex. v1 must still resolve."""
+    world.import_()
+    first = world.resolve("RELIND")
+    original = market_models.is_valid_isin
+
+    def is_valid_isin_v2(value: object) -> bool:  # same behaviour, different source
+        return bool(original(value)) is True
+
+    monkeypatch.setattr(market_models, "is_valid_isin", is_valid_isin_v2)
+    assert world.resolve("RELIND").detail == "running_implementation_differs_from_entry"
+    world.log.approve(2)
+    cs.reindex(world.root, D, 2)
+    second = world.resolve("RELIND", version=2)
+    assert isinstance(second, CasClassRow) and second.impl_sha256 != first.impl_sha256
+    assert world.resolve("RELIND") == first  # v1 replay, recorded under the older implementation
+    assert refusal(lambda: world.import_(D_NEXT)) == "procedure_identity_differs"  # import still wants entry 1 exactly
+
+    def is_valid_isin_v3(value: object) -> bool:  # a third source, never approved
+        return bool(original(value)) is True
+
+    monkeypatch.setattr(market_models, "is_valid_isin", is_valid_isin_v3)
+    for version in (1, 2):
+        verdict = world.resolve("RELIND", version=version)
+        assert isinstance(verdict, CasUnresolved)
+        assert (verdict.sub_reason, verdict.detail) == ("procedure_unapproved", "running_implementation_differs_from_entry")
+    world.log.revoke(2)  # v2's identity is no longer approved, and v3 never was
+    assert isinstance(world.resolve("RELIND"), CasUnresolved)
 
 
 def test_cas_index_replace_refused(world: ck.World) -> None:
@@ -531,20 +597,122 @@ def _global_names(code: types.CodeType) -> set[str]:
     return found
 
 
-def test_cas_procedure_fingerprint_covers_validator_globals() -> None:
+def _functions_of(target: Any) -> list[types.FunctionType]:
+    if inspect.isfunction(target):
+        return [target]
+    home = inspect.getsourcefile(target)  # skip functions a framework (pydantic) attaches to the class
+    return [m for m in vars(target).values() if inspect.isfunction(m) and m.__code__.co_filename == home]
+
+
+OWNER_CLASSES = (PilotDataStore, pd_models.SecurityMasterRow)
+READ_THROUGH = {"_sm", "_models", "store", "_store", "_core", "_pd_models"}
+
+
+def uncovered_dependencies() -> list[str]:
+    """Globals and store or row methods that a fingerprinted callable reads but the fingerprint does not cover."""
+    covered_attrs = {attr for _, _, attr in cs.FINGERPRINTED}
+    covered = covered_attrs | set(cs.FINGERPRINTED_VALUE_NAMES) | set(cs.INERT_GLOBALS)
+    whole_classes = {getattr(owner, attr) for _, owner, attr in cs.FINGERPRINTED if inspect.isclass(getattr(owner, attr))}
+    problems: list[str] = []
+    for name, owner, attr in cs.FINGERPRINTED:
+        for fn in _functions_of(getattr(owner, attr)):
+            names = _global_names(fn.__code__)
+            module_globals = fn.__globals__
+            used = {n for n in names if n in module_globals and not n.startswith("__")
+                    and not isinstance(module_globals[n], types.ModuleType)}
+            problems += [f"{name}: global {n}" for n in sorted(used - covered)]
+            for cls in OWNER_CLASSES:
+                for n in sorted(names):
+                    if (inspect.isfunction(vars(cls).get(n)) and n not in covered_attrs
+                            and n not in cs.INERT_METHODS and cls not in whole_classes):
+                        problems.append(f"{name}: method {cls.__name__}.{n}")
+    return problems
+
+
+def uncovered_module_reads(source: str | None = None) -> list[str]:
+    """Attributes cas_snapshots.py reads from another module or from the store that nothing fingerprints."""
+    tree = ast.parse(Path(cs.__file__).read_text() if source is None else source)
+    covered = {attr for _, _, attr in cs.FINGERPRINTED} | set(cs.FINGERPRINTED_VALUE_NAMES)
+    covered |= set(cs.INERT_SM_ATTRS) | set(cs.INERT_METHODS)
+    problems = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in READ_THROUGH
+                and node.attr not in covered):
+            problems.append(f"{node.value.id}.{node.attr}")
+    return sorted(set(problems))
+
+
+def uncovered_helper() -> None:  # a global of this test module, used by the planted dependency below
+    return None
+
+
+def test_cas_procedure_fingerprint_covers_dependencies() -> None:
+    """Called methods count, not just modules: store open, query, blob read, the row digest and the helpers under it."""
     parts = cs.impl_parts()
-    functions = cs.fingerprinted_functions()
-    covered = {fn.__name__ for fn in functions.values()} | {"_ISIN_SHAPE", "_ROW_COLUMNS"} | set(cs.INERT_GLOBALS)
-    for name, fn in functions.items():
-        assert name in parts, name
-        module_globals = fn.__globals__
-        used = {n for n in _global_names(fn.__code__) if n in module_globals and not n.startswith("__")}
-        used -= {n for n in used if isinstance(module_globals[n], types.ModuleType)}
-        assert used <= covered, f"{name} reads globals outside the fingerprint: {sorted(used - covered)}"
-    for name in ("pilot_data/cas_snapshots.py", "costs/cas_class.py", "market_data.models._ISIN_SHAPE",
-                 "security_master._ROW_COLUMNS"):
-        assert name in parts
-    assert len(parts) == 10
+    assert set(parts) == {name for name, _, _ in cs.FINGERPRINTED} | {
+        "pilot_data/cas_snapshots.py", "costs/cas_class.py", "market_data.models._ISIN_SHAPE",
+        "security_master._ROW_COLUMNS", "store._HASH_RE", "store.DB_FILE_NAME",
+    }
+    assert len(parts) == 22
+    assert set(cs.fingerprinted_functions()) == {name for name, _, _ in cs.FINGERPRINTED}
+    assert {"store.PilotDataStore.read_blob", "models.SecurityMasterRow", "core.canonical_sha256"} <= set(parts)
+    assert uncovered_dependencies() == []
+    assert uncovered_module_reads() == []
+
+
+def test_cas_procedure_fingerprint_walk_catches_an_uncovered_dependency(monkeypatch: pytest.MonkeyPatch) -> None:
+    def lookup_with_extra_reads(store: Any, snapshot: Any, stock_code: str) -> Any:
+        uncovered_helper()  # a global nobody fingerprinted
+        store.table_exists("security_master_rows")  # a store method nobody fingerprinted
+        return None
+
+    monkeypatch.setattr(sm, "lookup_stock_code", lookup_with_extra_reads)
+    problems = uncovered_dependencies()
+    assert "security_master.lookup_stock_code: global uncovered_helper" in problems
+    assert "security_master.lookup_stock_code: method PilotDataStore.table_exists" in problems
+    planted = Path(cs.__file__).read_text() + "\n_x = _sm.require_fresh_snapshot\n_y = store.table_exists\n"
+    assert uncovered_module_reads(planted) == ["_sm.require_fresh_snapshot", "store.table_exists"]
+
+
+def _changed_function(*_args: Any, **_kwargs: Any) -> Any:
+    return None
+
+
+class _ChangedClass:
+    pass
+
+
+@pytest.mark.parametrize("name", [name for name, _, _ in cs.FINGERPRINTED])
+def test_cas_procedure_fingerprint_changes_when_each_callable_changes(
+    name: str, world: ck.World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Patch each fingerprinted callable's source: ``impl_sha256`` must move, so the old approval no longer fits."""
+    (_, owner, attr), = [entry for entry in cs.FINGERPRINTED if entry[0] == name]
+    world.import_()
+    _, impl = cs.running_identity()
+    assert isinstance(world.resolve("RELIND"), CasClassRow)
+    replacement = _ChangedClass if inspect.isclass(getattr(owner, attr)) else _changed_function
+    monkeypatch.setattr(owner, attr, replacement)
+    assert cs.running_identity()[1] != impl, f"patching {name} left impl_sha256 unchanged"
+
+
+def test_cas_unchecked_blob_read_is_not_the_approved_implementation(world: ck.World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S1: ``read_blob`` verifies the ICICI master bytes. Replacing it with an unchecked read voids the approval."""
+    world.import_()
+    sha = world.icici_sha[D]
+    blob = world.root / "blobs" / "sha256" / sha[:2] / sha
+    blob.chmod(0o644)
+    blob.write_bytes(blob.read_bytes() + b"\n")
+    assert world.resolve("RELIND").detail == "icici_blob_blob_integrity"
+
+    def read_blob_unchecked(self: Any, source_sha256: str) -> bytes:
+        return self._blob_path(source_sha256).read_bytes()
+
+    monkeypatch.setattr(PilotDataStore, "read_blob", read_blob_unchecked)
+    verdict = world.resolve("RELIND")
+    assert not isinstance(verdict, CasClassRow), "a corrupt ICICI blob resolved under the existing approval"
+    assert isinstance(verdict, CasUnresolved)
+    assert (verdict.sub_reason, verdict.detail) == ("procedure_unapproved", "running_implementation_differs_from_entry")
 
 
 PINNED_SOURCE_SHA = {
@@ -554,6 +722,16 @@ PINNED_SOURCE_SHA = {
     "security_master._row_from_db": "50fe499f1f471dc694848be660478e8d93d04e00e848aaae51f37991ad782fee",
     "security_master._snapshot_from_db": "db162247251bf6b997fbf7c1eb6d37a6017d81ae917353530de9439bc9b6a3b5",
     "market_data.models.is_valid_isin": "2f651134fd1dfe4984c0372c4e6c42b5b1502d25bfb30c0e48181f3c3dd1622b",
+    "store.PilotDataStore.__init__": "77bc9a41360053e004eafde3e3a079ddc6d9cabfdee5dfa701a9cd31fe74d886",
+    "store.PilotDataStore._open_core": "cca7e07c521edc54b681afa50c36511ac3efe13e4d7952d0d59a919805dab2ee",
+    "store.PilotDataStore.query": "10049c2094055a63b3cb26e5e39aefb4f763f100ee01b47991e08aa828e3050d",
+    "store.PilotDataStore.read_blob": "3fbbec9ff42b82b1c4659f6e49cf297d1f1e3f3b33b04977845b62bb4387862f",
+    "store.PilotDataStore._blob_path": "68f399698abcc514128e47ff15e04ce49bb47d4513a16e86ad73ff5037ff3e93",
+    "models._Frozen": "06adcd9412501dd59bf8f16fde5cbacdb514bee1c7a7750b13f0c860d340ef10",
+    "models.SecurityMasterRow": "b3bb87d9b5cc018edff66f483840b62a7577760fce55dcac7e906e2bc61ffad7",
+    "core.canonical_sha256": "3d40031e6bb46498e1c07fd9a1a9c5cb5fa0e426074a39cc85b776e15cc1bb06",
+    "core._reject_inexact": "c4448e1c4dd6be20e227243fd1b8d0a8a469f82cc4dde320f976291870be5838",
+    "core.sha256_hex": "dd1292a7056e396570427d4cbfdb65d7e8a0ebd8a4c5e6c4514c7850cb2325a7",
 }
 
 
@@ -570,6 +748,8 @@ def test_cas_procedure_icici_read_change_requires_approval(world: ck.World, monk
         "token, stock_code, series, company_name, tick_size_raw, isin, nse_symbol, listing_raw, delisting_raw, "
         "delete_flag_raw"
     )
+    assert parts["store._HASH_RE"] == {"pattern": "^[0-9a-f]{64}$", "flags": 32}
+    assert parts["store.DB_FILE_NAME"] == "pilot_india.duckdb"
     world.import_()
     _, impl = cs.running_identity()
     real = sm.snapshot_on
@@ -705,6 +885,13 @@ def _sc_icici_missing(w: ck.World) -> Any:
     return w.resolve("RELIND", D_PREV)
 
 
+def _sc_icici_blob_missing(w: ck.World) -> Any:
+    w.import_()
+    sha = w.icici_sha[D]
+    (w.root / "blobs" / "sha256" / sha[:2] / sha).unlink()
+    return w.resolve("RELIND")
+
+
 def _sc_index_missing(w: ck.World) -> Any:
     w.import_()
     w.log.approve(2)
@@ -722,6 +909,7 @@ def _sc_log_absent(w: ck.World) -> Any:
 BRANCHES: dict[str, tuple[Callable[[ck.World], Any], str, str]] = {
     "no_snapshot_for_date": (_sc_missing, "snapshot_missing", "no_snapshot_for_date"),
     "icici_master_missing": (_sc_icici_missing, "snapshot_missing", "icici_master_missing"),
+    "icici_blob_missing": (_sc_icici_blob_missing, "snapshot_missing", "icici_blob_missing"),
     "index_missing_for_procedure": (_sc_index_missing, "snapshot_missing", "index_missing_for_procedure"),
     "stored_entry_is_for_another_date": (_sc_wrong_date, "snapshot_wrong_date", "stored_entry_is_for_another_date"),
     "raw_bytes_do_not_match_their_hash": (_sc_hash, "snapshot_hash_mismatch", "raw_bytes_do_not_match_their_hash"),
@@ -731,7 +919,8 @@ BRANCHES: dict[str, tuple[Callable[[ck.World], Any], str, str]] = {
     "icici_isin_fails_validator": (_imported("DUMMYC"), "identity_invalid", "icici_isin_fails_validator"),
     "icici_unmapped": (_imported("NOSUCH"), "identity_mismatch", "icici_unmapped"),
     "isin_not_in_snapshot": (_imported("ABSENT"), "identity_mismatch", "isin_not_in_snapshot"),
-    "symbol_has_no_active_row": (_imported("TATOLD"), "identity_mismatch", "no_active_row"),
+    "icici_symbol_not_active_for_isin": (
+        _imported("TATOLD"), "identity_mismatch", "icici_symbol_not_active_for_isin"),
     "isin_has_no_active_row": (_imported("GONECO"), "identity_mismatch", "no_active_row"),
     "stock_code_ambiguous": (_imported("TWINC"), "identity_ambiguous", "stock_code_ambiguous"),
     "symbol_carries_more_than_one_isin": (_imported("AMBIG"), "identity_ambiguous", "symbol_carries_more_than_one_isin"),
@@ -858,6 +1047,52 @@ def test_cas_icici_blob_and_row_corruption_refused(world: ck.World) -> None:
     verdict = world.resolve("RELIND")
     assert isinstance(verdict, CasUnresolved)
     assert (verdict.sub_reason, verdict.detail) == ("snapshot_hash_mismatch", "icici_row_does_not_match_its_hash")
+
+
+def test_cas_required_series_disagreement_reported(world: ck.World) -> None:
+    """S2: a required BE instrument with the EQ mapping's code, ISIN and symbol is a disagreement, not a pass."""
+    eq = {"stock_code": "RELIND", "isin": ck.ISIN_REL, "nse_symbol": "RELIANCE", "series": "EQ"}
+    be = {**eq, "series": "BE"}
+    outcome = world.import_(required=[eq, be])
+    assert outcome.report["required_total"] == 2
+    assert outcome.report["required_unresolved"] == [
+        {**be, "sub_reason": "identity_mismatch", "detail": "required_row_disagrees"}
+    ]
+
+
+def test_cas_icici_store_errors_are_not_hash_mismatches(world: ck.World, monkeypatch: pytest.MonkeyPatch) -> None:
+    """O4: a store that cannot be opened or queried is its own detail, never snapshot_hash_mismatch."""
+    world.import_()
+
+    def failing_open(error: Exception) -> Callable[..., Any]:
+        def open_store(*_args: Any, **_kwargs: Any) -> Any:
+            raise error
+
+        return open_store
+
+    cases = [
+        (PilotDataError("store_identity_corrupt", "x"), "icici_store_error_store_identity_corrupt"),
+        (PilotDataError("store_workspace_mismatch", "x"), "icici_store_error_store_workspace_mismatch"),
+        (duckdb.IOException("could not set lock on file"), "icici_store_error_duckdb"),
+    ]
+    for error, detail in cases:
+        with pytest.MonkeyPatch.context() as local:
+            local.setattr(cs, "PilotDataStore", failing_open(error))
+            verdict = world.resolve("RELIND")
+        assert isinstance(verdict, CasUnresolved)
+        assert (verdict.sub_reason, verdict.detail) == ("snapshot_missing", detail)
+    for error, detail in [(duckdb.IOException("busy"), "icici_store_error_duckdb"),
+                          (PilotDataError("table_name_invalid", "x"), "icici_store_error_table_name_invalid")]:
+        def snapshot_on_fails(store: Any, day: date, _e: Exception = error) -> Any:
+            raise _e
+
+        with pytest.MonkeyPatch.context() as local:
+            local.setattr(sm, "snapshot_on", snapshot_on_fails)
+            verdict = world.resolve("RELIND")
+        assert isinstance(verdict, CasUnresolved) and verdict.sub_reason == "snapshot_missing"
+        assert verdict.detail == detail
+    # Nothing was left patched, and the blob_missing branch is its own scenario (``icici_blob_missing`` in BRANCHES).
+    assert isinstance(world.resolve("RELIND"), CasClassRow)
 
 
 # ---- inputs, formats and the importer ----------------------------------------------------
@@ -1018,7 +1253,7 @@ def test_cas_cli_import_show_check_verify_reindex(world: ck.World) -> None:
     lines = text.splitlines()
     assert code == 0 and lines[0].startswith("stock_code RELIND class cas nse_symbol RELIANCE")
     assert f"icici_pin {D.isoformat()}:{world.icici_sha[D]}:" in lines[0]
-    assert lines[1] == "stock_code TATOLD session_scope_unknown identity_mismatch no_active_row"
+    assert lines[1] == "stock_code TATOLD session_scope_unknown identity_mismatch icici_symbol_not_active_for_isin"
     assert run_cli("verify", *common) == (0, f"verify date {D.isoformat()} procedure_version 1 ok\n")
     raw_path(world).write_bytes(b"x")
     code, text = run_cli("verify", *common)

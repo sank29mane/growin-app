@@ -20,7 +20,8 @@ Rules, all from D-34 and the operator's 2026-11-04 decision on the four defaults
   EQ, ``DelFlg`` N, ``ElgbltyNrmlMkt`` 1, ``SctyStsNrmlMkt`` 1 or 6. U-24 (does the file dated D apply to
   session D) is carried as the ``u24_status`` of the approved entry; ``verified`` is what gates QP-2b.
 * Resolution reads the stored bytes and the stored index only. It never re-parses the raw file, so an
-  approved newer procedure cannot change a recorded result.
+  approved newer procedure cannot change a recorded result. The running code must equal some approved,
+  unrevoked entry, so a version-N result replays after version N+1 is approved while unapproved code never resolves.
 * Decision paths (64-04 close, the session script, probe compare) call only ``resolve_broker``.
   ``resolve_symbol`` is for ``show``.
 
@@ -44,6 +45,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import duckdb
 from costs import cas_class as _cas
 from costs.cas_class import (
     CAS,
@@ -59,7 +61,10 @@ from costs.cas_class import (
 )
 from market_data import models as _models
 
+from . import core as _core
+from . import models as _pd_models
 from . import security_master as _sm
+from . import store as _store
 from .core import PilotDataError, canonical_sha256, sha256_hex
 from .nse_calendar import PinnedCalendar, load_pinned_calendar
 from .store import PilotDataStore
@@ -119,10 +124,18 @@ _COLUMNS = SPEC["columns"]
 _NO_ACTIVE_ROW = "no_active_row"
 _GROUP_VERDICTS = ("identity_invalid", "flag_unknown", "flag_conflict", _NO_ACTIVE_ROW)
 
-# Globals the ICICI read functions may touch without being part of the fingerprint: table creation and the
-# imported types. Anything else they read must be fingerprinted, or ``test_cas_procedure_fingerprint_covers_
-# validator_globals`` fails.
-INERT_GLOBALS = frozenset({"ensure_master_tables", "PilotDataError", "SecurityMasterRow", "MasterSnapshotRef"})
+# Names the fingerprinted code may read or call without being part of the fingerprint: table creation, the
+# imported types, and the writable-open path of the store (this module only opens it read-only). Anything else
+# they touch must be fingerprinted, or ``test_cas_procedure_fingerprint_covers_dependencies`` fails.
+INERT_GLOBALS = frozenset(
+    {
+        "ensure_master_tables", "PilotDataError", "SecurityMasterRow", "MasterSnapshotRef", "Path", "SCHEMA_VERSION",
+        "_CORE_DDL", "_CORE_TABLES", "utc_naive", "datetime", "timezone", "Decimal",
+    }
+)
+INERT_METHODS = frozenset({"close", "ensure_table"})
+# Attributes this module reads through ``_sm`` that are not part of the approved read (the change report only).
+INERT_SM_ATTRS = frozenset({"master_rows", "MasterSnapshotRef"})
 
 
 class CasSnapshotError(PilotDataError):
@@ -140,21 +153,49 @@ def _source_bytes(module: Any) -> bytes:
     return Path(inspect.getsourcefile(module) or "").read_bytes()
 
 
+# Every callable whose source is hashed into ``impl_sha256``: (part name, owner, attribute). They are read through
+# the owner at call time so a patch is seen. The ICICI path (blob integrity, row digest, store open and query) is in
+# here as well as the NSE side. ``test_cas_procedure_fingerprint_covers_dependencies`` walks this table and fails on
+# any global or store/row method one of these reads that is neither here nor listed as inert.
+FINGERPRINTED: tuple[tuple[str, Any, str], ...] = (
+    ("market_data.models.is_valid_isin", _models, "is_valid_isin"),
+    ("security_master.snapshot_on", _sm, "snapshot_on"),
+    ("security_master.snapshot_by_sha", _sm, "snapshot_by_sha"),
+    ("security_master.lookup_stock_code", _sm, "lookup_stock_code"),
+    ("security_master._row_from_db", _sm, "_row_from_db"),
+    ("security_master._snapshot_from_db", _sm, "_snapshot_from_db"),
+    ("store.PilotDataStore.__init__", PilotDataStore, "__init__"),
+    ("store.PilotDataStore._open_core", PilotDataStore, "_open_core"),
+    ("store.PilotDataStore.query", PilotDataStore, "query"),
+    ("store.PilotDataStore.read_blob", PilotDataStore, "read_blob"),
+    ("store.PilotDataStore._blob_path", PilotDataStore, "_blob_path"),
+    ("models._Frozen", _pd_models, "_Frozen"),
+    ("models.SecurityMasterRow", _pd_models, "SecurityMasterRow"),
+    ("core.canonical_sha256", _core, "canonical_sha256"),
+    ("core._reject_inexact", _core, "_reject_inexact"),
+    ("core.sha256_hex", _core, "sha256_hex"),
+)
+# The module-level values read by the fingerprinted code, by the variable name the walk test looks for.
+FINGERPRINTED_VALUE_NAMES = frozenset({"_ISIN_SHAPE", "_ROW_COLUMNS", "_HASH_RE", "DB_FILE_NAME"})
+
+
+def _regex_part(pattern: re.Pattern[str]) -> dict[str, Any]:
+    return {"pattern": pattern.pattern, "flags": int(pattern.flags)}
+
+
 def impl_parts() -> dict[str, Any]:
     """Every input of ``impl_sha256``, by name. Read through the modules at call time so a patch is seen."""
-    isin_shape = _models._ISIN_SHAPE
-    return {
+    parts: dict[str, Any] = {
         "pilot_data/cas_snapshots.py": sha256_hex(_source_bytes(sys.modules[__name__])),
         "costs/cas_class.py": sha256_hex(_source_bytes(_cas)),
-        "market_data.models.is_valid_isin": sha256_hex(inspect.getsource(_models.is_valid_isin).encode("utf-8")),
-        "market_data.models._ISIN_SHAPE": {"pattern": isin_shape.pattern, "flags": int(isin_shape.flags)},
-        "security_master.snapshot_on": sha256_hex(inspect.getsource(_sm.snapshot_on).encode("utf-8")),
-        "security_master.snapshot_by_sha": sha256_hex(inspect.getsource(_sm.snapshot_by_sha).encode("utf-8")),
-        "security_master.lookup_stock_code": sha256_hex(inspect.getsource(_sm.lookup_stock_code).encode("utf-8")),
-        "security_master._row_from_db": sha256_hex(inspect.getsource(_sm._row_from_db).encode("utf-8")),
-        "security_master._snapshot_from_db": sha256_hex(inspect.getsource(_sm._snapshot_from_db).encode("utf-8")),
+        "market_data.models._ISIN_SHAPE": _regex_part(_models._ISIN_SHAPE),
         "security_master._ROW_COLUMNS": _sm._ROW_COLUMNS,
+        "store._HASH_RE": _regex_part(_store._HASH_RE),
+        "store.DB_FILE_NAME": _store.DB_FILE_NAME,
     }
+    for name, owner, attribute in FINGERPRINTED:
+        parts[name] = sha256_hex(inspect.getsource(getattr(owner, attribute)).encode("utf-8"))
+    return parts
 
 
 def impl_sha256() -> str:
@@ -162,15 +203,8 @@ def impl_sha256() -> str:
 
 
 def fingerprinted_functions() -> dict[str, Callable[..., Any]]:
-    """The functions whose source is in the fingerprint, keyed by the part name; the walk test reads this."""
-    return {
-        "market_data.models.is_valid_isin": _models.is_valid_isin,
-        "security_master.snapshot_on": _sm.snapshot_on,
-        "security_master.snapshot_by_sha": _sm.snapshot_by_sha,
-        "security_master.lookup_stock_code": _sm.lookup_stock_code,
-        "security_master._row_from_db": _sm._row_from_db,
-        "security_master._snapshot_from_db": _sm._snapshot_from_db,
-    }
+    """The callables whose source is in the fingerprint, keyed by the part name."""
+    return {name: getattr(owner, attribute) for name, owner, attribute in FINGERPRINTED}
 
 
 def running_identity() -> tuple[str, str]:
@@ -568,7 +602,7 @@ def _icici_report(root: Path, session_date: date, index: Mapping[str, Any]) -> d
     out: dict[str, Any] = {"master": "icici_master_missing", "disagreements": [], "multi_snapshot_dates": []}
     try:
         store = PilotDataStore(Path(root), workspace="india", read_only=True)
-    except PilotDataError:
+    except (PilotDataError, duckdb.Error):
         return out
     with store:
         try:
@@ -577,7 +611,7 @@ def _icici_report(root: Path, session_date: date, index: Mapping[str, Any]) -> d
                 "SELECT snapshot_date FROM security_master_snapshots GROUP BY snapshot_date HAVING count(*) > 1 "
                 "ORDER BY snapshot_date"
             )
-        except PilotDataError:
+        except (PilotDataError, duckdb.Error):
             return out
         out["multi_snapshot_dates"] = [row[0].isoformat() for row in dated]
         if snapshot is None:
@@ -626,7 +660,7 @@ def build_report(
         verdict = resolve_broker(root, session_date, version, item["stock_code"], IciciPin.select(session_date))
         if isinstance(verdict, CasUnresolved):
             unresolved.append({**dict(item), "sub_reason": verdict.sub_reason, "detail": verdict.detail})
-        elif (verdict.isin, verdict.nse_symbol) != (item["isin"], item["nse_symbol"]):
+        elif (verdict.isin, verdict.nse_symbol, verdict.series) != (item["isin"], item["nse_symbol"], item["series"]):
             unresolved.append({**dict(item), "sub_reason": "identity_mismatch", "detail": "required_row_disagrees"})
     return {
         "session_date": session_date.isoformat(),
@@ -698,6 +732,7 @@ def _read_cas(root: Path, session_date: date, version: int) -> _CasState:
 @dataclass(frozen=True)
 class _IciciState:
     missing: str | None = None
+    unreadable: str | None = None  # the store could not be read for a reason that is not "no such master"
     wrong_date: str | None = None
     hash_bad: str | None = None
     snapshot: _sm.MasterSnapshotRef | None = None
@@ -706,15 +741,21 @@ class _IciciState:
     ambiguous: bool = False
 
 
+def _store_error(exc: Exception) -> str:
+    """Detail for a store that failed to open or answer. Its own prefix, so it never reads as a hash mismatch."""
+    code = exc.code if isinstance(exc, PilotDataError) else "duckdb"
+    return f"icici_store_error_{code}"
+
+
 def _read_icici(root: Path, session_date: date, stock_code: str, pin: IciciPin) -> _IciciState:
     if pin.kind == "select" and pin.snapshot_date != session_date:
         return _IciciState(wrong_date="icici_pin_date_mismatch")
     try:
         store = PilotDataStore(Path(root), workspace="india", read_only=True)
-    except PilotDataError as exc:
-        if exc.code in ("store_missing", "store_identity_missing"):
+    except (PilotDataError, duckdb.Error) as exc:
+        if isinstance(exc, PilotDataError) and exc.code in ("store_missing", "store_identity_missing"):
             return _IciciState(missing="icici_master_missing")
-        return _IciciState(hash_bad=f"icici_store_{exc.code}")
+        return _IciciState(unreadable=_store_error(exc))
     with store:
         try:
             if pin.kind == "select":
@@ -722,26 +763,35 @@ def _read_icici(root: Path, session_date: date, stock_code: str, pin: IciciPin) 
             else:
                 assert pin.snapshot_sha256 is not None
                 snapshot = _sm.snapshot_by_sha(store, pin.snapshot_sha256, session_date)
-        except PilotDataError as exc:
-            if exc.code == "store_read_only":
+        except (PilotDataError, duckdb.Error) as exc:
+            if isinstance(exc, PilotDataError) and exc.code == "store_read_only":
                 return _IciciState(missing="icici_master_missing")
-            return _IciciState(hash_bad=f"icici_store_{exc.code}")
+            return _IciciState(unreadable=_store_error(exc))
         if snapshot is None:
             return _IciciState(missing="icici_master_missing")
         try:
             store.read_blob(snapshot.snapshot_sha256)
         except PilotDataError as exc:
+            if exc.code == "blob_missing":
+                return _IciciState(snapshot=snapshot, missing="icici_blob_missing")
             return _IciciState(snapshot=snapshot, hash_bad=f"icici_blob_{exc.code}")
         try:
             row = _sm.lookup_stock_code(store, snapshot, stock_code)
-        except PilotDataError:
-            return _IciciState(snapshot=snapshot, ambiguous=True)
+        except PilotDataError as exc:
+            if exc.code == "stock_code_ambiguous":
+                return _IciciState(snapshot=snapshot, ambiguous=True)
+            return _IciciState(snapshot=snapshot, unreadable=_store_error(exc))
+        except duckdb.Error as exc:
+            return _IciciState(snapshot=snapshot, unreadable=_store_error(exc))
         if row is None:
             return _IciciState(snapshot=snapshot)
-        stored = store.query(
-            "SELECT row_sha256 FROM security_master_rows WHERE snapshot_sha256 = ? AND stock_code = ? AND series = ?",
-            [snapshot.snapshot_sha256, row.stock_code, row.series],
-        )
+        try:
+            stored = store.query(
+                "SELECT row_sha256 FROM security_master_rows WHERE snapshot_sha256 = ? AND stock_code = ? AND series = ?",
+                [snapshot.snapshot_sha256, row.stock_code, row.series],
+            )
+        except (PilotDataError, duckdb.Error) as exc:
+            return _IciciState(snapshot=snapshot, unreadable=_store_error(exc))
         recomputed = row.row_sha256()
         if len(stored) != 1 or stored[0][0] != recomputed:
             return _IciciState(snapshot=snapshot, hash_bad="icici_row_does_not_match_its_hash")
@@ -774,7 +824,13 @@ def _unresolved(
 
 
 def _check_procedure(version: int, cas: _CasState) -> tuple[ProcedureEntry | None, str | None]:
-    """(entry, detail). A detail means procedure_unapproved."""
+    """(entry, detail). A detail means procedure_unapproved.
+
+    The requested version must be approved and unrevoked, and the stored index must record exactly that entry.
+    The running code only has to equal SOME approved, unrevoked entry: a result recorded under version N replays
+    unchanged after a newer version is approved (the stored index is read, never re-derived), while code nobody
+    approved never resolves. Import and reindex are stricter: they require the running hashes to equal entry N.
+    """
     try:
         log = load_procedure_log()
     except (ValueError, OSError):
@@ -785,7 +841,12 @@ def _check_procedure(version: int, cas: _CasState) -> tuple[ProcedureEntry | Non
     assert cas.index is not None
     if cas.index.get("procedure") != entry.as_dict():
         return None, "index_identity_differs_from_entry"
-    if impl_sha256() != entry.impl_sha256:
+    spec, impl = running_identity()
+    if not any(
+        approval.spec_sha256 == spec and approval.impl_sha256 == impl
+        for approval in log.approvals
+        if approval.procedure_version not in log.revoked
+    ):
         return None, "running_implementation_differs_from_entry"
     return entry, None
 
@@ -858,6 +919,8 @@ def resolve_broker(
         return stop("snapshot_missing", cas.missing)
     if icici.missing is not None:
         return stop("snapshot_missing", icici.missing)
+    if icici.unreadable is not None:
+        return stop("snapshot_missing", icici.unreadable)
     if cas.wrong_date is not None:
         return stop("snapshot_wrong_date", cas.wrong_date)
     if icici.wrong_date is not None:
@@ -880,10 +943,16 @@ def resolve_broker(
     if not _models.is_valid_isin(row.isin):
         return stop("identity_invalid", "icici_isin_fails_validator", entry)
     group, active_row = _group_row(cas.index, row.isin, row.nse_symbol)
+    # Guard, not dead code: the index was built under the recorded procedure, whose validator can differ from the
+    # running approved one when an older version is replayed. The row's own ISIN passed the running validator above.
     if group is not None and group["sub_reason"] == "identity_invalid":
         return stop("identity_invalid", "isin_fails_validator", entry)
-    if group is None or active_row is None:
-        return stop("identity_mismatch", _NO_ACTIVE_ROW if group is not None else "isin_not_in_snapshot", entry)
+    if group is None:
+        return stop("identity_mismatch", "isin_not_in_snapshot", entry)
+    if active_row is None:
+        if any(evidence["active"] for evidence in group["rows"]):
+            return stop("identity_mismatch", "icici_symbol_not_active_for_isin", entry)
+        return stop("identity_mismatch", _NO_ACTIVE_ROW, entry)
     if len(cas.index["symbols"].get(row.nse_symbol, ())) > 1:
         return stop("identity_ambiguous", "symbol_carries_more_than_one_isin", entry)
     return _group_result(

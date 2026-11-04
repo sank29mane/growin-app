@@ -2,7 +2,8 @@
 
 Everything here is built in the test: small gz files in the shape of ``NSE_CM_security_DDMMYYYY.csv.gz``, a tiny
 ICICI master, a pinned calendar and an approval log written to a temp path. No real NSE file, no network, no secret.
-ISINs are real-shaped ones that pass the validator (or are generated with a check digit computed here).
+Every ISIN is generated here with a computed check digit (no real company's ISIN), so no fixture reads as a
+claim about a real security's closing-auction class.
 """
 
 from __future__ import annotations
@@ -52,11 +53,11 @@ def isin_with_check(body11: str) -> str:
     return body11 + str((10 - total % 10) % 10)
 
 
-ISIN_REL = "INE002A01018"
-ISIN_NIFTY = "INF204KB14I2"
-ISIN_TMPV = "INE155A01022"
-ISIN_HDFC = "INE040A01034"
-ISIN_CAN = "INE476A01022"
+ISIN_REL = isin_with_check("INE0REL0100")
+ISIN_NIFTY = isin_with_check("INF0NIF0100")
+ISIN_TMPV = isin_with_check("INE0TMP0100")
+ISIN_HDFC = isin_with_check("INE0HDF0100")
+ISIN_CAN = isin_with_check("INE0CAN0100")
 ISIN_DVR = isin_with_check("IN9000A0100")  # an IN9 (DVR-style) id is valid
 ISIN_UNK1 = isin_with_check("INE0UNK0100")
 ISIN_UNK2 = isin_with_check("INE0UNK0200")
@@ -178,7 +179,12 @@ class ProcedureLogFile:
         self._append({"revokes": version, "operator_approval": {"line": "revoked in a test", "date": "2026-11-06"}})
 
 
-ICICI_STALE = kit.master_row(3457, "TATOLD", "EQ", "TATA MOTORS OLD NAME", "0.01", "2", ISIN_TMPV, "TATAMOTORS")
+ICICI_REL = kit.master_row(2885, "RELIND", "EQ", "RELIANCE FIXTURE", "0.01", "10", ISIN_REL, "RELIANCE")
+ICICI_NIF = kit.master_row(10576, "NIFBEE", "EQ", "NIFTYBEES FIXTURE", "0.01", "10", ISIN_NIFTY, "NIFTYBEES")
+ICICI_TMPV = kit.master_row(3456, "TATMOT", "EQ", "TMPV FIXTURE", "0.01", "2", ISIN_TMPV, "TMPV")
+ICICI_HDFC = kit.master_row(1333, "HDFBAN", "EQ", "HDFCBANK FIXTURE", "0.01", "1", ISIN_HDFC, "HDFCBANK")
+ICICI_CAN = kit.master_row(10794, "CANBAN", "EQ", "CANBK FIXTURE", "0.01", "2", ISIN_CAN, "CANBK")
+ICICI_STALE = kit.master_row(3457, "TATOLD", "EQ", "TMPV OLD NAME", "0.01", "2", ISIN_TMPV, "TATAMOTORS")
 ICICI_HDFC_BE = kit.master_row(7777, "HDFBE", "BE", "HDFC BANK BE", "0.01", "1", ISIN_HDFC, "HDFCBANK")
 ICICI_DVR = kit.master_row(8001, "DVRCO", "EQ", "DVR CO", "0.01", "1", ISIN_DVR, "DVRCO")
 ICICI_DUMMY = kit.master_row(8002, "DUMMYC", "EQ", "DUMMY CO", "0.01", "1", ISIN_DUMMY, "DUMMYCO")
@@ -192,8 +198,8 @@ ICICI_ABSENT = kit.master_row(8008, "ABSENT", "EQ", "ABSENT CO", "0.01", "1", IS
 ICICI_TWIN_EQ = kit.master_row(8009, "TWINC", "EQ", "TWIN EQ", "0.01", "1", ISIN_REL, "RELIANCE")
 ICICI_TWIN_BE = kit.master_row(8010, "TWINC", "BE", "TWIN BE", "0.01", "1", ISIN_REL, "RELIANCE")
 ICICI_ROWS = [
-    kit.MASTER_RELIND, kit.MASTER_NIFBEE, kit.MASTER_TATMOT, ICICI_STALE, kit.MASTER_HDFBAN, ICICI_HDFC_BE,
-    kit.MASTER_CANBAN, ICICI_DVR, ICICI_DUMMY, ICICI_UNK1, ICICI_UNK2, ICICI_CONF, ICICI_NOACT, ICICI_AMB, ICICI_ABSENT, ICICI_TWIN_EQ, ICICI_TWIN_BE,
+    ICICI_REL, ICICI_NIF, ICICI_TMPV, ICICI_STALE, ICICI_HDFC, ICICI_HDFC_BE,
+    ICICI_CAN, ICICI_DVR, ICICI_DUMMY, ICICI_UNK1, ICICI_UNK2, ICICI_CONF, ICICI_NOACT, ICICI_AMB, ICICI_ABSENT, ICICI_TWIN_EQ, ICICI_TWIN_BE,
 ]
 
 
