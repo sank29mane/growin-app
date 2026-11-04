@@ -3,25 +3,33 @@ import asyncio
 import sys
 import os
 import pytest
-from dotenv import load_dotenv
 
 # Add backend to path
 sys.path.append(os.path.abspath("backend"))
 
 from agents.research_agent import ResearchAgent
 
-load_dotenv()
+LIVE_OPT_IN_VAR = "GROWIN_LIVE_PROVIDER_TESTS"
 
+
+@pytest.mark.skipif(
+    os.getenv(LIVE_OPT_IN_VAR) != "1",
+    reason=f"live NewsData.io call through ResearchAgent; set {LIVE_OPT_IN_VAR}=1 to run",
+)
 @pytest.mark.asyncio
 async def test_newsdata_integration():
     """
-    Test real integration with NewsData.io (if API key is present).
+    Test real integration with NewsData.io. Opt-in only (GROWIN_LIVE_PROVIDER_TESTS=1):
+    the dotenv file is loaded here, after the opt-in, never at import time.
     """
+    from dotenv import load_dotenv
+
+    load_dotenv()
     api_key = os.getenv("NEWSDATA_API_KEY")
     if not api_key:
         pytest.skip("Skipping NewsData.io test: NEWSDATA_API_KEY not found in env")
 
-    print(f"\n🧪 Testing NewsData.io Integration with key: {api_key[:5]}...")
+    print("\n🧪 Testing NewsData.io Integration")
     
     agent = ResearchAgent()
     

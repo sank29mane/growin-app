@@ -23,6 +23,9 @@ TICKER_STOP_WORDS = {
     "ADX", "OBV", "CCI", "OK", "AI", "IPO", "CEO", "CFO", "NSE", "BSE", "LSE", "NYSE",
     "SIP", "ISA", "SIPP", "KYC", "PAN", "EMI", "ROI", "EPS", "YTD", "ATH", "FII", "DII",
     "USA", "GDP", "CPI", "NAV", "AUM", "EBITDA", "FAQ", "ASAP", "FYI", "PDF", "FD", "INVEST",
+    # Ampersand abbreviations. `&` stays legal in a symbol because NSE lists M&M, so
+    # these are rejected by name rather than by the character.
+    "P&L", "M&A", "R&D", "Q&A", "S&P", "S&P500", "PNL",
 }
 
 # Ticker candidates: the base is 2-12 characters (NSE symbols run long: BAJAJFINSV,
