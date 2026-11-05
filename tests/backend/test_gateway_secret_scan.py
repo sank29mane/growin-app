@@ -1291,3 +1291,211 @@ def test_item7_the_git_command_asks_for_text_diffs(tmp_path, fakes):
 
     scan.scan_git_history(tmp_path, scan.Spec(fakes.values), run_git=runner)
     assert seen == [["log", "-p", "--all", "--no-color", "--text"]]
+
+
+# --- shape regexes and the session-token run at a window edge (lookaheads and the lookbehind)
+# The whole-buffer scan is the oracle: whatever it reports, every chunking must report, no more and no less.
+
+_B64URL_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+_EDGE_USER = "Zq48213"  # synthetic, 7 characters: the raw short-id regex is live in these specs
+_EDGE_TOKEN43 = "".join(_B64URL_CHARS[(i * 7 + 3) % 64] for i in range(43))  # synthetic 43-character token
+_EDGE_SESSION = base64.b64encode(f"{_EDGE_USER}:1234567".encode()).decode()  # 15 bytes: 20 characters, no padding
+_EDGE_FILLER = b"." * 300  # longer than the overlap, so the carry is trimmed before the case
+
+
+def _edge_spec():
+    return scan.Spec({scan.USER_ID: _EDGE_USER}, shapes=True)
+
+
+def _chunked(stream: bytes, size: int) -> list[bytes]:
+    return [stream[i : i + size] for i in range(0, len(stream), size)]
+
+
+def _edge_scan(stream: bytes, size: int, spec=None) -> set[str]:
+    return scan.scan_chunks(_chunked(stream, size), spec or _edge_spec()).hits
+
+
+def _assert_same_at_every_size(case: bytes, expected: set[str], sizes=range(1, 330)) -> None:
+    spec = _edge_spec()
+    for stream in (_EDGE_FILLER + case + _EDGE_FILLER, case + _EDGE_FILLER, _EDGE_FILLER + case):
+        whole = scan.scan_chunks([stream], spec).hits
+        assert whole == expected, (case, whole)  # the oracle says what the case is
+        for size in sizes:
+            assert _edge_scan(stream, size, spec) == whole, (case, stream[:2], size)
+
+
+_LONGER_TAILS = [b"x", b"7", b"-", b"_", b"Zz9"]  # more token characters follow: the 43 are not the whole run
+_EDGE_PREFIXES = {
+    "bearer": b"Authorization: Bearer ",
+    "bearer-quoted": b'{"authorization":"bearer  ',
+    "relay_token_json": b'{"relay_token": "',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_EDGE_PREFIXES))
+def test_edge_a_43_char_token_inside_a_longer_run_does_not_fail_at_any_chunk_size(name):
+    for tail in _LONGER_TAILS:
+        case = _EDGE_PREFIXES[name] + _EDGE_TOKEN43.encode() + tail
+        _assert_same_at_every_size(case, set())
+
+
+@pytest.mark.parametrize("name", sorted(_EDGE_PREFIXES))
+def test_edge_a_genuine_43_char_token_is_caught_at_every_chunk_size(name):
+    for tail in (b'"', b" ", b"\n", b".", b""):  # a non-token byte, or the end of the stream, follows
+        case = _EDGE_PREFIXES[name] + _EDGE_TOKEN43.encode() + tail
+        _assert_same_at_every_size(case, {scan.RELAY_TOKEN})
+
+
+def test_edge_a_43_char_token_ending_on_the_last_byte_of_a_chunk_then_more_base64():
+    """The reported failing input: the token fills one chunk's tail exactly, the next chunk starts with
+    more token characters. Both a header and a JSON value, at the exact split."""
+    spec = _edge_spec()
+    for prefix in (b"Authorization: Bearer ", b'"relay_token":"'):
+        head = _EDGE_FILLER + prefix + _EDGE_TOKEN43.encode()
+        assert scan.scan_chunks([head, b"Abc9" + _EDGE_FILLER], spec).hits == set()
+        assert scan.scan_chunks([head, b'"' + _EDGE_FILLER], spec).hits == {scan.RELAY_TOKEN}
+        assert scan.scan_chunks([head], spec).hits == {scan.RELAY_TOKEN}  # the stream ends on the token
+
+
+_SESSION_VALUES = [b"abc123def456", b"A1b2C3d4", b"abcdef9"]
+
+
+def test_edge_an_api_session_value_inside_a_longer_run_does_not_fail_at_any_chunk_size():
+    """The value is {6,64}: a 64-character value followed by more alphanumerics is a longer run (no hit), and
+    so is any value followed by an underscore. A shorter value followed by letters is itself a hit."""
+    long_value = b"a1" * 32  # 64 characters, a digit among them
+    for sep in (b"api_session=", b"apisession: ", b'api_session="', b"API_SESSION%3D"):
+        for tail in (b"x", b"7", b"_", b"Zz9"):
+            _assert_same_at_every_size(sep + long_value + tail, set(), sizes=range(1, 200))
+        for value in _SESSION_VALUES:
+            _assert_same_at_every_size(sep + value + b"_", set(), sizes=range(1, 160))
+
+
+def test_edge_a_genuine_api_session_value_is_caught_at_every_chunk_size():
+    for value in _SESSION_VALUES:
+        for tail in (b'"', b"&", b"\n", b" ", b""):
+            _assert_same_at_every_size(b"api_session=" + value + tail, {scan.SESSION_CODE}, sizes=range(1, 160))
+
+
+def test_edge_a_digit_that_arrives_in_the_next_chunk_still_makes_an_api_session_hit():
+    """The positive lookahead needs a digit in the value; the value is split before it appears."""
+    spec = _edge_spec()
+    stream = _EDGE_FILLER + b"api_session=abcdefgh7ijk;" + _EDGE_FILLER
+    for size in range(1, 330):
+        assert _edge_scan(stream, size, spec) == {scan.SESSION_CODE}, size
+
+
+def test_edge_a_session_token_run_inside_a_longer_run_does_not_fail_at_any_chunk_size():
+    token = _EDGE_SESSION.encode()
+    for case in (token + b"A", token + b"x7", b"Q" + token, b"AAAA" + token, b"+/" + token + b"/+", b"Qz" * 70 + token):
+        _assert_same_at_every_size(b" " + case + b" ", set())
+
+
+def test_edge_a_genuine_session_token_run_is_caught_at_every_chunk_size():
+    token = _EDGE_SESSION.encode()
+    for case in (token, b" " + token + b" ", b"=" + token + b"\n", b"token " + token + b'"'):
+        _assert_same_at_every_size(case, {scan.SESSION_TOKEN})
+
+
+def test_edge_a_session_token_run_that_loses_its_left_neighbour_to_the_carry_does_not_fail():
+    """The run's first byte is the first carried byte of window 2, and its real left neighbour is another
+    base64 character that only window 1 saw."""
+    token = _EDGE_SESSION.encode()
+    spec = _edge_spec()
+    stream = _EDGE_FILLER + b"Q" + token + _EDGE_FILLER
+    assert scan.scan_chunks([stream], spec).hits == set()
+    first = len(_EDGE_FILLER) + 1 + len(token)  # window 1 ends just past the token
+    for size in range(first - 4, first + 4):
+        assert _edge_scan(stream, size, spec) == set(), size
+    carry_start = len(_EDGE_FILLER) + 1  # chunk 1 ends so the carry begins exactly at the token
+    for extra in range(0, 3):
+        size = carry_start + spec.overlap - 1 + extra
+        assert _edge_scan(stream, size, spec) == set(), size
+
+
+# --- differential: chunked scan versus the whole buffer, seeded synthetic inputs
+
+_RAND_SIZES = (1, 2, 3, 5, 8, 13, 31, 64, 97, 130, 131, 132, 133, 200, 257, 512)
+
+
+def _rand_run(rng, n: int, alphabet: str = _B64URL_CHARS) -> bytes:
+    return "".join(rng.choice(alphabet) for _ in range(n)).encode()
+
+
+def _rand_fragment(rng, hostile: bool) -> bytes:
+    """One piece of a synthetic stream. `hostile` keeps every secret-shaped piece one byte short of a hit
+    (a longer run, an underscore, a wrapped id): the whole-buffer scan finds nothing, so any chunked hit
+    is a false FAIL."""
+    kind = rng.randrange(11)
+    alnum = _B64URL_CHARS[:-2]
+    if kind == 0:
+        return b"." * rng.randrange(1, 140)
+    if kind == 1:
+        return rng.choice([b" ", b"\n", b'"', b"=", b"&", b"\t"])
+    if kind == 2:
+        return _rand_run(rng, rng.randrange(1, 70))
+    if kind == 3:
+        prefix = rng.choice([b"Authorization: Bearer ", b'"authorization":"bearer\t', b"authorization=Bearer  "])
+        n = rng.choice([41, 42, 44, 45, 60] if hostile else [41, 42, 43, 43, 43, 44, 45])
+        return prefix + _rand_run(rng, n) + (b"" if hostile else rng.choice([b"", b'"', b" ", b"x"]))
+    if kind == 4:
+        n = rng.choice([42, 44, 50] if hostile else [42, 43, 43, 44])
+        return b'"relay_token": "' + _rand_run(rng, n) + (b"" if hostile else rng.choice([b"", b'"', b"7"]))
+    if kind == 5:
+        sep = rng.choice([b"api_session=", b"apisession: ", b'API_SESSION="'])
+        if hostile:
+            return sep + _rand_run(rng, rng.choice([65, 70, 90]), alnum) + b"1" if rng.random() < 0.5 else sep + b"ab12_"
+        value = _rand_run(rng, rng.choice([3, 6, 9, 20, 63, 64, 65, 70]), alnum)
+        return sep + value + rng.choice([b"", b"&", b"_", b"x"])
+    if kind == 6:
+        token = _EDGE_SESSION.encode()
+        if hostile:
+            return rng.choice([b"Q", b"+/", _rand_run(rng, 130)]) + token + rng.choice([b"", b"A", b" "])
+        return rng.choice([b"", b"Q", b"+/", _rand_run(rng, 130)]) + token + rng.choice([b"", b"A", b" ", b"/"])
+    if kind == 7:
+        if hostile:
+            return rng.choice([b"x", b"7", b"_"]) + _EDGE_USER.encode() + rng.choice([b"y", b"7"])
+        return _EDGE_USER.encode() if rng.random() < 0.5 else _EDGE_USER.lower().encode()
+    if kind == 8:
+        return rng.choice([b"x", b"7"]) + _EDGE_USER.encode() + rng.choice([b"y", b"7", b"" if not hostile else b"z"])
+    if kind == 9:
+        if hostile:
+            return b"."
+        return rng.choice([b"x-sessiontoken: ", b"X-Checksum=token "]) + _rand_run(rng, rng.randrange(6, 70), alnum)
+    return _rand_run(rng, rng.randrange(120, 200))  # a long base64 run: no shape fits it
+
+
+def test_edge_chunked_scan_matches_the_whole_buffer_on_seeded_random_inputs():
+    import random
+
+    spec = _edge_spec()
+    classes_seen: set[str] = set()
+    clean = hit = 0
+    for seed in range(160):
+        rng = random.Random(seed)
+        hostile = seed % 2 == 0
+        data = b"".join(_rand_fragment(rng, hostile) for _ in range(rng.randrange(8, 40)))
+        whole = scan.scan_chunks([data], spec).hits
+        classes_seen |= whole
+        clean += not whole
+        hit += bool(whole)
+        for size in _RAND_SIZES + (rng.randrange(1, len(data) + 1),):
+            assert _edge_scan(data, size, spec) == whole, (seed, size)
+    # the generator reaches every class and both verdicts, so the agreement above is not vacuous
+    assert {scan.RELAY_TOKEN, scan.SESSION_CODE, scan.SESSION_TOKEN, scan.USER_ID} <= classes_seen
+    assert clean >= 20 and hit >= 20
+
+
+# --- max_bytes: a cut-short stream does not accept an edge match (test hook only)
+
+
+def test_edge_a_stream_cut_by_max_bytes_does_not_accept_a_match_on_the_artificial_edge():
+    spec = _edge_spec()
+    for case in (b"Authorization: Bearer " + _EDGE_TOKEN43.encode(), b"api_session=abcdef7", _EDGE_USER.encode()):
+        stream = _EDGE_FILLER + case + b"xyz" + _EDGE_FILLER
+        cut = len(_EDGE_FILLER) + len(case)
+        out = scan.scan_chunks([stream], spec, max_bytes=cut)
+        assert out.partial and out.hits == set(), case
+        # exactly max_bytes of input is a complete stream, not a partial one
+        whole = scan.scan_chunks([stream[:cut]], spec, max_bytes=cut)
+        assert not whole.partial and whole.hits, case
