@@ -2174,6 +2174,18 @@ def test_a_rerun_that_differs_from_the_stored_record_is_replay_nondeterministic(
     assert sink.defects == [(vm_replay.NONDETERMINISTIC, S1, vm_replay.NONDETERMINISTIC)] and sink.sessions == []
 
 
+def test_a_rerun_whose_session_defects_differ_from_the_stored_record_is_replay_nondeterministic(sc: Scenario):
+    """Break-proof (#646 residual): leave ``defects`` out of the comparison and a rerun that no longer finds the stored
+    session defect reads ``already_recorded``."""
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.replay(S1, real_sink(sc, S1))
+    kept = {k: v for k, v in stored(sc, "vm_replay")[0].items() if k in SCHEMAS["vm_replay"][0]}
+    sc.raw(S1, "vm_replay", {**kept, "defects": [vm_replay.NONDETERMINISTIC]})  # equal in every field but the defects
+    sink = Sink()
+    again = sc.replay(S1, sink)
+    assert again.already_recorded is False and again.verdict == "FAIL" and vm_replay.NONDETERMINISTIC in again.defects
+
+
 def test_a_decide_day_with_no_replay_record_fails_the_stored_verdict(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
     sc.intent(S2, "buy", 1, "100.00", isin=ISIN_B)

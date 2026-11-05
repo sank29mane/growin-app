@@ -993,7 +993,8 @@ def _stored_replays(records: Sequence[Mapping[str, Any]], session_id: str) -> li
 
 
 def _same_as_stored(stored: Mapping[str, Any], result: SessionReplay) -> bool:
-    """The fields the record keeps, against a fresh result: verdict, build, both limits hashes, the count and the reasons."""
+    """The fields the record keeps, against a fresh result: verdict, build, both limits hashes, the count, the reasons and
+    the session defects (a rerun that finds a different defect set is not the same replay, #646 residual)."""
 
     return (
         stored.get("verdict") == result.verdict
@@ -1002,6 +1003,7 @@ def _same_as_stored(stored: Mapping[str, Any], result: SessionReplay) -> bool:
         and stored.get("mint_limits_sha256") == result.mint_limits_sha256
         and stored.get("intents_compared") == result.intents_compared
         and list(stored.get("divergence_reasons", [])) == [d.reason for d in result.divergences]
+        and list(stored.get("defects", [])) == list(result.defects)
     )
 
 
