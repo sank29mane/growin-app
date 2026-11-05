@@ -115,6 +115,14 @@ class OrdersKeyRouteUnavailable(NotFound):
     """
 
 
+class OrdersBuildRouteUnavailable(NotFound):
+    """The VM answered 404 for /v1/orders/build: it runs a build older than 64-05 Task 2b.
+
+    Raised only by OrdersClient.current_build. The caller refuses the run with reason
+    ``route_unavailable``; nothing retries and nothing falls back to the health ``version``.
+    """
+
+
 class MethodNotAllowed(RelayError):
     code = "METHOD_NOT_ALLOWED"
 
@@ -185,6 +193,14 @@ class IntentInvalid(OrderError):
     code = "INTENT_INVALID"
 
 
+class OrdersBuildUnstamped(OrdersUnavailable):
+    """The VM answered 503 ``build_unstamped``: its deploy carries no commit stamp.
+
+    Raised only by OrdersClient.current_build, from an ORDERS_UNAVAILABLE reply whose reason is
+    ``build_unstamped``. Every other ORDERS_UNAVAILABLE reply stays an OrdersUnavailable.
+    """
+
+
 ORDER_CODE_TO_CLASS: dict[str, type[RelayError]] = {
     **CODE_TO_CLASS,
     **{
@@ -224,6 +240,14 @@ class RelayProtocolError(RelayError):
     """
 
     code = "RELAY_PROTOCOL_ERROR"
+
+
+class OrdersBuildInvalid(RelayProtocolError):
+    """The /v1/orders/build answer is not the shape the Mac accepts.
+
+    ``reason`` is a short closed word (``bad_json``, ``duplicate_key``, ``bad_field``,
+    ``digest_mismatch``) and never a value from the body.
+    """
 
 
 class RelayUnavailable(RelayError):

@@ -71,6 +71,7 @@ from gateway_vm.orders.verify import PinnedKey  # noqa: E402
 
 KEY_PATH = "/v1/orders/key"
 VM_ROUTES_FILE = ROOT / "gateway" / "vm" / "gateway_vm" / "orders" / "routes.py"
+VM_BUILD_FILE = ROOT / "gateway" / "vm" / "gateway_vm" / "orders" / "build.py"
 HEX_A = "a" * 64
 RID = "0123456789abcdef"
 MAC_TOKEN = "mac-token-CANARY-0001"
@@ -381,6 +382,35 @@ HANDLER_ALLOWED_NAMES = {"session", "token", "authorization", "pipeline", "JSONR
 HANDLER_ALLOWED_ATTRS = {"authorize", "failure", "key_id"}
 
 
+class HandlerSpec:
+    """Where a read-only handler lives and what it may touch: one spec for the key route, one for build."""
+
+    def __init__(self, mount, route, calls, names, attrs, answer_calls):
+        self.mount, self.route = mount, route
+        self.calls, self.names, self.attrs = calls, names, attrs
+        self.answer_calls = answer_calls  # calls that must not run before the failure gate
+
+
+KEY_SPEC = HandlerSpec(
+    "mount_order_routes",
+    "ROUTE_KEY",
+    HANDLER_ALLOWED_CALLS,
+    HANDLER_ALLOWED_NAMES,
+    HANDLER_ALLOWED_ATTRS,
+    {"pipeline", "JSONResponse"},
+)
+# 64-05 Task 2b: the build route is a second read-only handler under the same scan. Its answer is a
+# dict closed over at mount time, so it may call nothing but the gate, the response and the one refusal.
+BUILD_SPEC = HandlerSpec(
+    "mount_build_route",
+    "ROUTE_BUILD",
+    {"session.authorize", "JSONResponse", "OrderRefusal"},
+    {"session", "token", "authorization", "JSONResponse", "OrderRefusal", "body"},
+    {"authorize", "failure"},
+    {"JSONResponse", "OrderRefusal"},
+)
+
+
 def _dotted(node: ast.AST) -> str:
     if isinstance(node, ast.Name):
         return node.id
@@ -389,10 +419,8 @@ def _dotted(node: ast.AST) -> str:
     return ast.dump(node)
 
 
-def _key_handlers(tree: ast.AST) -> list[ast.FunctionDef]:
-    mount = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "mount_order_routes"
-    )
+def _key_handlers(tree: ast.AST, spec: HandlerSpec = KEY_SPEC) -> list[ast.FunctionDef]:
+    mount = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == spec.mount)
     return [
         n
         for n in ast.walk(mount)
@@ -403,7 +431,7 @@ def _key_handlers(tree: ast.AST) -> list[ast.FunctionDef]:
             and d.func.attr == "get"
             and d.args
             and isinstance(d.args[0], ast.Name)
-            and d.args[0].id == "ROUTE_KEY"
+            and d.args[0].id == spec.route
             for d in n.decorator_list
         )
     ]
@@ -452,7 +480,7 @@ def _is_authorize_assign(stmt: ast.stmt) -> bool:
     )
 
 
-def _gate_violations(body: list[ast.stmt]) -> list[str]:
+def _gate_violations(body: list[ast.stmt], answer_calls: set[str] = KEY_SPEC.answer_calls) -> list[str]:
     """The failure gate must exist, follow the authorize call, and precede every key read."""
     gates = [i for i, stmt in enumerate(body) if _is_failure_gate(stmt)]
     if len(gates) != 1:
@@ -462,38 +490,38 @@ def _gate_violations(body: list[ast.stmt]) -> list[str]:
         return ["failure gate: no session.authorize assignment before it"]
     for stmt in body[:gate]:
         if not _is_authorize_assign(stmt) and any(
-            isinstance(n, ast.Call) and _dotted(n.func) in {"pipeline", "JSONResponse"} for n in ast.walk(stmt)
+            isinstance(n, ast.Call) and _dotted(n.func) in answer_calls for n in ast.walk(stmt)
         ):
             return ["failure gate: the key is read before it"]
     return []
 
 
-def key_handler_violations(source: str) -> list[str]:
-    """Why the key handler is more than bearer, failure gate and one in-memory read. Empty is clean."""
-    handlers = _key_handlers(ast.parse(source))
+def key_handler_violations(source: str, spec: HandlerSpec = KEY_SPEC) -> list[str]:
+    """Why the handler is more than bearer, failure gate and one in-memory read. Empty is clean."""
+    handlers = _key_handlers(ast.parse(source), spec)
     if len(handlers) != 1:
         return [f"expected one key handler, found {len(handlers)}"]
-    found: list[str] = _gate_violations(handlers[0].body)
+    found: list[str] = _gate_violations(handlers[0].body, spec.answer_calls)
     for node in (n for stmt in handlers[0].body for n in ast.walk(stmt)):
-        if isinstance(node, ast.Call) and _dotted(node.func) not in HANDLER_ALLOWED_CALLS:
+        if isinstance(node, ast.Call) and _dotted(node.func) not in spec.calls:
             found.append("call " + _dotted(node.func))
-        if isinstance(node, ast.Attribute) and node.attr not in HANDLER_ALLOWED_ATTRS:
+        if isinstance(node, ast.Attribute) and node.attr not in spec.attrs:
             found.append("attribute " + node.attr)
-        if isinstance(node, ast.Name) and node.id not in HANDLER_ALLOWED_NAMES:
+        if isinstance(node, ast.Name) and node.id not in spec.names:
             found.append("name " + node.id)
         if isinstance(node, (ast.With, ast.AsyncWith, ast.Await, ast.Try)):
             found.append(type(node).__name__)
     return found
 
 
-def mutate_key_handler(source: str, mutate) -> str:
+def mutate_key_handler(source: str, mutate, spec: HandlerSpec = KEY_SPEC) -> str:
     """Parse the routes source, let `mutate(handler_body)` edit the key handler, return unparsed source.
 
     Anchored on the AST, so reformatting the handler (a split return, different quoting) cannot
     make a plant silently miss.
     """
     tree = ast.parse(source)
-    handlers = _key_handlers(tree)
+    handlers = _key_handlers(tree, spec)
     assert len(handlers) == 1
     mutate(handlers[0].body)
     return ast.unparse(ast.fix_missing_locations(tree))
@@ -601,6 +629,54 @@ def test_k11_a_handler_without_a_working_failure_gate_turns_the_scan_red(mutate)
     source = VM_ROUTES_FILE.read_text(encoding="utf-8")
     found = key_handler_violations(mutate_key_handler(source, mutate))
     assert any(v.startswith("failure gate") for v in found)
+
+
+def test_k11_the_scan_reaches_the_build_handler_and_it_is_clean():
+    source = VM_BUILD_FILE.read_text(encoding="utf-8")
+    assert key_handler_violations(source, BUILD_SPEC) == []
+    assert key_handler_violations(mutate_key_handler(source, lambda body: None, BUILD_SPEC), BUILD_SPEC) == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_drop_gate, _hollow_gate, _inverted_gate, _gate_is_none],
+    ids=["dropped", "hollow", "inverted", "is_none"],
+)
+def test_k11_a_build_handler_without_a_working_failure_gate_turns_the_scan_red(mutate):
+    source = VM_BUILD_FILE.read_text(encoding="utf-8")
+    found = key_handler_violations(mutate_key_handler(source, mutate, BUILD_SPEC), BUILD_SPEC)
+    assert any(v.startswith("failure gate") for v in found)
+
+
+def _answer_before_gate(body: list[ast.stmt]) -> None:
+    gate = next(i for i, stmt in enumerate(body) if _is_failure_gate(stmt))
+    body.insert(gate, ast.parse("raise OrderRefusal(503, 'ORDERS_UNAVAILABLE', 'build_unstamped')").body[0])
+
+
+def test_k11_a_build_answer_given_before_the_gate_turns_the_scan_red():
+    source = VM_BUILD_FILE.read_text(encoding="utf-8")
+    found = key_handler_violations(mutate_key_handler(source, _answer_before_gate, BUILD_SPEC), BUILD_SPEC)
+    assert any(v.startswith("failure gate") for v in found)
+
+
+@pytest.mark.parametrize(
+    "plant, reason",
+    [
+        ("session.require_active(authorization)", "call session.require_active"),
+        ("service.kill.read()", "call service.kill.read"),
+        ("charge_budget(None, None)", "call charge_budget"),
+        ("service.audit.append({})", "call service.audit.append"),
+        ("open('x').read()", "call open"),
+        ("read_build_identity(None)", "call read_build_identity"),
+        ("with service.store.lock():\n    pass", "With"),
+    ],
+    ids=["require_active", "kill_read", "charge_budget", "audit_append", "file_read", "recompute", "store_lock"],
+)
+def test_k11_each_planted_side_effect_in_the_build_handler_turns_the_scan_red(plant, reason):
+    source = VM_BUILD_FILE.read_text(encoding="utf-8")
+    found = key_handler_violations(mutate_key_handler(source, plant_before_return(plant), BUILD_SPEC), BUILD_SPEC)
+    assert reason in found
+    assert not any(v.startswith("failure gate") for v in found)
 
 
 # ---------------------------------------------------------------- K12

@@ -24,7 +24,16 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
 from .client import ORDERS_CONTRACT, RelayClient
-from .errors import NotFound, OrdersKeyRouteUnavailable, RelayProtocolError
+from .errors import (
+    NotFound,
+    OrdersBuildInvalid,
+    OrdersBuildRouteUnavailable,
+    OrdersBuildUnstamped,
+    OrdersKeyRouteUnavailable,
+    OrdersUnavailable,
+    RelayContractMismatch,
+    RelayProtocolError,
+)
 
 ROUTE_INTENTS = "/v1/orders/intents"
 ROUTE_AUTHORIZE = "/v1/orders/authorize"
@@ -32,6 +41,7 @@ ROUTE_HALT = "/v1/orders/halt"
 ROUTE_STATE = "/v1/orders/state"
 ROUTE_AUDIT = "/v1/orders/audit"
 ROUTE_KEY = "/v1/orders/key"
+ROUTE_BUILD = "/v1/orders/build"
 
 ORDER_PURPOSE = "growin.relay.order"
 SIGNED_VERSION = 1
@@ -69,6 +79,9 @@ _ISIN = re.compile(r"^IN[A-Z0-9]{9}[0-9]$")
 _LIMIT_PRICE = re.compile(r"^[0-9]{1,7}(\.[0-9]{1,2})?$")
 _BATCH_ID = re.compile(r"^[a-z0-9-]{8,64}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT40 = re.compile(r"^[0-9a-f]{40}\Z")
+_BUILD_PATH = re.compile(r"^[a-z0-9_][a-z0-9_./-]{0,95}\Z")
+MAX_BUILD_FILES = 64
 _CHALLENGE_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _AFTER_SEQ_MAX = 10**12
@@ -314,6 +327,47 @@ class VmAuditEntry:
     raw: Mapping[str, Any]
 
 
+@dataclass(frozen=True)
+class VmBuild:
+    """The build the VM runs: the deploy commit, a sha256 of every file under its ``orders/``, one digest."""
+
+    commit: str
+    orders_sha256: Mapping[str, str]
+    digest: str
+
+
+def build_digest(commit: str, orders_sha256: Mapping[str, str]) -> str:
+    """The one digest recipe: sorted-key compact ASCII JSON of the commit and the sorted file map."""
+    payload = {"commit": commit, "orders": dict(sorted(orders_sha256.items()))}
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise _DuplicateKey
+        out[key] = value
+    return out
+
+
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _no_constant(_: str) -> Any:
+    raise ValueError("constant")
+
+
+def _build_path_ok(path: object) -> bool:
+    return (
+        isinstance(path, str)
+        and _BUILD_PATH.fullmatch(path) is not None
+        and all(part not in ("", ".", "..") for part in path.split("/"))
+    )
+
+
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -486,6 +540,72 @@ class OrdersClient:
             raise _fail("bad_field", rid)
         return key_id
 
+    def current_build(self) -> VmBuild:
+        """64-05 Task 2b ``GET /v1/orders/build``: the build the VM runs (OI-9).
+
+        One GET, no params, never retried, no audit or health fallback. The body is parsed
+        strictly: a duplicate key anywhere refuses. The key set is exactly ``contract``,
+        ``commit``, ``orders_sha256`` and ``digest``; the commit is 40 lowercase hex; the map
+        holds 1 to 64 safe relative paths, each with a 64-hex value; and the digest recomputed
+        here by the one recipe must equal the one sent. A 404 is
+        ``OrdersBuildRouteUnavailable`` (an older VM); ``build_unstamped`` is
+        ``OrdersBuildUnstamped``; any other error passes through.
+        """
+
+        try:
+            reply = self._relay._send(  # noqa: SLF001 - same package; the raw bytes are parsed strictly below
+                "GET", ROUTE_BUILD, auth="session", contract=ORDERS_CONTRACT
+            )
+        except NotFound as err:
+            raise OrdersBuildRouteUnavailable(
+                err.code,
+                http_status=err.http_status,
+                reason="route_unavailable",
+                request_id=err.request_id,
+            ) from None
+        except OrdersUnavailable as err:
+            if err.reason == "build_unstamped":
+                raise OrdersBuildUnstamped(
+                    err.code,
+                    http_status=err.http_status,
+                    reason=err.reason,
+                    retryable=err.retryable,
+                    retry_after_s=err.retry_after_s,
+                    request_id=err.request_id,
+                ) from None
+            raise
+        rid = reply.request_id
+        if reply.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise OrdersBuildInvalid(reason="content_type", request_id=rid)
+        try:
+            data = json.loads(reply.body, object_pairs_hook=_strict_object, parse_constant=_no_constant)
+        except _DuplicateKey:
+            raise OrdersBuildInvalid(reason="duplicate_key", request_id=rid) from None
+        except ValueError:
+            raise OrdersBuildInvalid(reason="bad_json", request_id=rid) from None
+        if not isinstance(data, dict):
+            raise OrdersBuildInvalid(reason="bad_json", request_id=rid)
+        if data.get("contract") != ORDERS_CONTRACT:
+            raise RelayContractMismatch(reason="body_contract", request_id=rid)
+        commit = data.get("commit")
+        files = data.get("orders_sha256")
+        digest = data.get("digest")
+        if (
+            set(data) != {"contract", "commit", "orders_sha256", "digest"}
+            or not isinstance(commit, str)
+            or _COMMIT40.fullmatch(commit) is None
+            or not isinstance(files, dict)
+            or not 1 <= len(files) <= MAX_BUILD_FILES
+            or not all(_build_path_ok(path) for path in files)
+            or not all(isinstance(v, str) and _HEX64.fullmatch(v) is not None for v in files.values())
+            or not isinstance(digest, str)
+            or _HEX64.fullmatch(digest) is None
+        ):
+            raise OrdersBuildInvalid(reason="bad_field", request_id=rid)
+        if build_digest(commit, files) != digest:
+            raise OrdersBuildInvalid(reason="digest_mismatch", request_id=rid)
+        return VmBuild(commit=commit, orders_sha256=dict(sorted(files.items())), digest=digest)
+
     def audit_all(self) -> tuple[VmAuditEntry, ...]:
         """Every VM audit entry, page by page."""
 
@@ -582,6 +702,8 @@ __all__ = [
     "OrdersState",
     "RelayLink",
     "VmAuditEntry",
+    "VmBuild",
+    "build_digest",
     "canonical_bytes",
     "check_minted_bytes",
     "intent_body",
