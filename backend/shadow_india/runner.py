@@ -1136,6 +1136,12 @@ class ShadowRunner:
     def close(self, session: date) -> CloseReport:
         report = CloseReport(session)
         state = self._state()
+        if not state.aborted:
+            # As in ``decide``: a replay that stopped after its FAIL record still owes a pause, and nothing may be booked
+            # or expired past it (#646 residual).
+            records = self._evidence.records()
+            complete_stored(records, replay_sessions(records), ReplayEnforcementSink(self._evidence))
+            state = self._state()
         if state.aborted:
             report.outcome = "aborted"
         elif any(p.scope == policy.SCOPE_ALL for p in state.open_pauses):

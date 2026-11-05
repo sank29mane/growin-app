@@ -2760,3 +2760,25 @@ def test_decide_writes_the_pause_an_interrupted_replay_still_owes_before_anythin
     assert open_events(world) == [vm_replay.DIVERGENCE]
     settled = len(world.evidence.records())
     assert world.decide().stopped == "open_pause" and len(world.evidence.records()) == settled  # nothing owed twice
+
+
+def test_close_writes_the_pause_an_interrupted_replay_still_owes_and_books_nothing_past_it(world):
+    """#646 residual break-proof: drop the close-time completion and a replay that stopped after its FAIL record lets
+    ``close`` book and expire past a divergence the next decide would have paused on."""
+    from shadow_india import vm_replay
+
+    first = world.decide()
+    assert first.status == "done" and ids_of(first)
+    sha = "0" * 64
+    finding = world.evidence.append("vm_replay", {
+        "session_id": session_id_for(S), "verdict": vm_replay.FAIL, "build_commit": "0" * 40, "build_digest": sha,
+        "limits_sha256": sha, "mint_limits_sha256": sha, "intents_compared": 1, "no_intents": False,
+        "divergence_reasons": ["mac_admitted_vm_refused"], "divergent_intent_id": "intent-1",
+    })  # the replay stopped here: no replay_defect, no pause
+    before = len(world.evidence.records())
+    closed = world.runner.close(S)
+    assert closed.outcome == "paused" and closed.attempts == [] and closed.released == []
+    written = world.evidence.records()[before:]
+    assert [r["kind"] for r in written] == ["replay_defect", "pause", "session_close"]
+    assert {r["finding_seq"] for r in written[:2]} == {finding["seq"]}
+    assert world.records("attempt") == [] and world.records("fill_result") == []
