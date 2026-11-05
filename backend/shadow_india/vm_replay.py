@@ -91,6 +91,8 @@ DAY_MISSING = "replay_day_missing"
 BUILD_HASH_MIXED = "replay_build_hash_mixed"
 SESSION_REFUSED = "replay_session_refused"
 SESSION_OPEN = "replay_session_open"
+NOT_DECIDE_DAY = "replay_not_a_decide_day"
+STRAY_RECORD = "replay_record_outside_decide_days"
 NONDETERMINISTIC = "replay_nondeterministic"
 DEFECT = "replay_defect"
 NOT_REPLAYED = "not_replayed:no_decide"
@@ -1021,6 +1023,8 @@ def replay_session(
     ``already_recorded``, and a different one opens a ``replay_nondeterministic`` defect and is a FAIL.
     """
 
+    if session_id not in replay_sessions(records):  # the open-run day or an operator day is not replayed, and records nothing
+        raise ReplayRefused(NOT_DECIDE_DAY)
     if not any(r.get("kind") == "session_close" and r.get("session_id") == session_id for r in records):
         raise ReplayRefused(SESSION_OPEN)
     build, mint_limits_sha256 = build_from_evidence(records, session_id)
@@ -1073,8 +1077,8 @@ def replay_session(
                 _finish_enforcement(records, session_id, result, max(_seq(r) for r in stored), sink)
             return dataclasses.replace(result, already_recorded=True)
         result = dataclasses.replace(result, verdict=FAIL, defects=result.defects + (NONDETERMINISTIC,))
-        if sink is not None:
-            sink.open_defect(NONDETERMINISTIC, session_id, NONDETERMINISTIC)
+        if sink is not None:  # the nondeterminism defect, and the defect and pause of any divergence this pass found
+            _finish_enforcement(records, session_id, result, max(_seq(r) for r in stored), sink)
         return result
     if sink is not None:
         sink.record_session(result)
@@ -1295,7 +1299,8 @@ def recorded_run_verdict(records: Sequence[Mapping[str, Any]], refused: Mapping[
     """The D-23 verdict from the STORED records only (what 64-05 Task 2 and the entry gate read).
 
     PASS needs all of: at least one decide day; every decide day has a ``vm_replay`` record; every such record is PASS;
-    no ``replay_defect`` record exists for any session; one build digest across the run. A FAIL record is sticky: it is
+    no ``replay_defect`` record exists for any session; no ``vm_replay`` record for a session that is not a decide day
+    (``replay_record_outside_decide_days``); one build digest across the run. A FAIL record is sticky: it is
     never replaced by a later PASS record for the same session, and a ``resume`` of the pause it raised changes nothing
     here (this reads replay records, not pause state). ``refused`` holds the refusal codes of the current pass. Every one
     is kept, even for a session that holds a stored PASS: a later change of the private config must not be hidden by an
@@ -1311,10 +1316,13 @@ def recorded_run_verdict(records: Sequence[Mapping[str, Any]], refused: Mapping[
         held = chosen.get(session)
         if held is None or (held.get("verdict") == PASS and record.get("verdict") != PASS):
             chosen[session] = record  # a FAIL replaces a PASS and never the other way round
-    results = {session: _stored_result(record) for session, record in chosen.items()}
+    stray = sorted(session for session in chosen if session not in wanted)
+    results = {session: _stored_result(record) for session, record in chosen.items() if session in wanted}
     open_refusals = dict(refused or {})  # a stored PASS never hides a refusal of this pass
     run = run_verdict(run_id, wanted, results, open_refusals, not_replayed_sessions(records))
     reasons = list(run.reasons)
+    if stray:  # a replay record for a session that is not a decide day proves nothing and must not count as a replayed day
+        reasons.append(STRAY_RECORD)
     if any(r.get("kind") == "replay_defect" for r in records):
         reasons.append(DEFECT)
     if len({str(r["build_digest"]) for r in stored}) > 1:
@@ -1396,6 +1404,8 @@ __all__ = [
     "ReplaySink",
     "RunReplay",
     "SESSION_OPEN",
+    "NOT_DECIDE_DAY",
+    "STRAY_RECORD",
     "SessionReplay",
     "build_from_evidence",
     "checked_limits",

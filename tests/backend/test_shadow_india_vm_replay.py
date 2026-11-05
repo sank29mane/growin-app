@@ -1891,6 +1891,51 @@ def test_a_resume_before_the_stored_record_does_not_excuse_the_missing_pause(sc:
     assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
 
 
+def test_replay_session_refuses_a_day_that_is_not_a_decide_day_and_records_nothing(sc: Scenario):
+    """Break-proof: without the check the open-run day replays as PASS with no intents and a record is written."""
+    run_start(sc, S0)
+    sc.intent(S1, "buy", 1, "100.00")
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as caught:
+        sc.replay(S0, sink, records=sc.records(S0, S1))
+    assert caught.value.code == vm_replay.NOT_DECIDE_DAY and sink.empty()
+
+
+def planted_pass(sc: Scenario, session: str) -> None:
+    sc.raw(session, "vm_replay", {
+        "verdict": "PASS", "build_commit": sc.identity.commit, "build_digest": sc.identity.digest, "limits_sha256": FILE_SHA,
+        "mint_limits_sha256": sc.mint_sha, "intents_compared": 0, "no_intents": True,
+    })
+
+
+def test_a_stored_record_for_a_non_decide_day_never_makes_an_empty_run_pass(sc: Scenario):
+    run_start(sc, S0)
+    sc.close(S0)
+    planted_pass(sc, S0)
+    run = recorded_run_verdict(sc.records())
+    assert run.verdict == "FAIL" and vm_replay.STRAY_RECORD in run.reasons and vm_replay.DAY_MISSING in run.reasons
+    assert run.sessions == ()
+
+
+def test_a_nondeterministic_rerun_that_now_diverges_also_opens_the_divergence_defect_and_pauses(sc: Scenario):
+    """Break-proof: open only the nondeterminism defect and the new divergence is neither recorded as a defect nor paused."""
+    divergent_session(sc)
+    sc.close(S1)
+    sc.raw(S1, "vm_replay", {
+        "verdict": "PASS", "build_commit": sc.identity.commit, "build_digest": sc.identity.digest, "limits_sha256": FILE_SHA,
+        "mint_limits_sha256": sc.mint_sha, "intents_compared": 1, "no_intents": False,
+    })  # an earlier pass said PASS; this pass finds the VM refusing what the Mac admitted
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL" and vm_replay.NONDETERMINISTIC in again.defects
+    assert sorted((r["code"], r["detail"]) for r in stored(sc, "replay_defect")) == [
+        (vm_replay.DIVERGENCE, "mac_admitted_vm_refused"), (vm_replay.NONDETERMINISTIC, vm_replay.NONDETERMINISTIC),
+    ]
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    before = len(sc.records())
+    sc.replay(S1, real_sink(sc, S1))
+    assert len(sc.records()) == before  # a further rerun finds everything written
+
+
 def test_a_replay_defect_record_alone_fails_the_run_even_with_every_session_passing(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
     sc.replay(S1, real_sink(sc, S1))

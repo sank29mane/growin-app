@@ -25,12 +25,14 @@ from test_shadow_india_vm_replay import (  # noqa: F401 - the sentinel fixture i
     ISIN_A,
     ISIN_B,
     RUN,
+    S0,
     S1,
     S2,
     Scenario,
     identity_of,
     make_vm,
     network_sentinel,
+    run_start,
 )
 
 import shadow_india.vm_replay as vm_replay
@@ -187,14 +189,71 @@ def test_a_refused_session_exits_one_with_a_closed_code_and_writes_nothing(world
     assert tree(world.sc.root) == before
 
 
-def test_an_aborted_run_exits_three_and_writes_nothing(world: World, monkeypatch: pytest.MonkeyPatch):
+def test_an_aborted_run_prints_the_stored_verdict_writes_the_report_if_asked_records_nothing_and_exits_three(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     decide_day(world)
     world.sc.raw(S1, "abort", {"event": "evidence_corrupt", "reason": "test"})
     before = tree(world.sc.root)
     monkeypatch.setattr(EvidenceStore, "open", lambda *a, **k: pytest.fail("the store was opened for writing on an aborted run"))
     code, out = run_cli(world.argv())
-    assert (code, out) == (3, {"aborted": "run_aborted"})
+    assert code == 3 and out["aborted"] == "run_aborted" and out["verdict"] == "FAIL" and out["run"] == RUN
+    assert vm_replay.DAY_MISSING in out["reasons"]  # the stored verdict: nothing was recorded for the decide day
     assert tree(world.sc.root) == before
+    reports = tmp_path / "aborted_reports"
+    code, out = run_cli(world.argv("--out-dir", str(reports), session=False))
+    assert code == 3 and out["aborted"] == "run_aborted"
+    assert "D-23 verdict: FAIL" in (reports / cli.REPLAY_REPORT).read_text()
+    assert tree(world.sc.root) == before
+
+
+def test_out_dir_with_session_is_a_usage_error_not_silently_ignored(world: World, tmp_path: Path):
+    decide_day(world)
+    before = tree(world.sc.root)
+    target = tmp_path / "ignored"
+    code, out = run_cli(world.argv("--out-dir", str(target)))
+    assert code == 2 and out == {}
+    assert not target.exists() and tree(world.sc.root) == before
+
+
+def open_run_day(world: World) -> None:
+    """The open-run day: ``run_start`` and ``vm_build`` and a ``session_close``, no decide."""
+
+    run_start(world.sc, S0)
+    world.sc.close(S0)
+
+
+def test_session_outside_the_decide_days_is_refused_before_the_store_is_opened(world: World, monkeypatch: pytest.MonkeyPatch):
+    """Break-proof: drop the check and ``--session`` on the open-run day records a PASS with ``no_intents``."""
+    decide_day(world)
+    open_run_day(world)
+    before = tree(world.sc.root)
+    monkeypatch.setattr(EvidenceStore, "open", lambda *a, **k: pytest.fail("the store was opened for a day that is not replayed"))
+    argv = world.argv()
+    argv[argv.index(DAY1)] = "2026-10-26"  # the date of S0, the open-run day
+    assert run_cli(argv) == (1, {"refused": vm_replay.NOT_DECIDE_DAY})
+    assert tree(world.sc.root) == before
+
+
+def test_a_replay_record_on_a_non_decide_day_fails_the_run_through_the_cli(world: World):
+    """Break-proof: count any stored record and an empty or padded run reads PASS, exit 0."""
+    decide_day(world)
+    code, out = run_cli(world.argv(session=False))
+    assert code == 0 and out["verdict"] == "PASS" and out["sessions"] == 1
+    (template,) = [r for r in read_records(world.sc.root, RUN) if r["kind"] == "vm_replay"]
+    open_run_day(world)
+    forged = {k: v for k, v in template.items() if k in vm_replay_schema()} | {"no_intents": True, "intents_compared": 0}
+    world.sc.raw(S0, "vm_replay", forged)  # what the old --session path wrote for the open-run day
+    code, out = run_cli(world.argv(session=False))
+    assert code == 1 and out["verdict"] == "FAIL" and vm_replay.STRAY_RECORD in out["reasons"]
+    assert out["sessions"] == 1 and S0 in out["not_replayed"]
+
+
+def vm_replay_schema() -> set[str]:
+    from shadow_india.evidence import SCHEMAS
+
+    required, optional = SCHEMAS["vm_replay"]
+    return set(required) | set(optional)
 
 
 def test_all_replays_every_decide_day_prints_the_recorded_verdict_and_writes_a_report_only_with_out_dir(

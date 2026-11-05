@@ -151,7 +151,9 @@ def _parser() -> argparse.ArgumentParser:
         "--private-dir", default=None,
         help="private/ directory holding the india/ config files; the limits are read only from here",
     )
-    replay.add_argument("--out-dir", default=None, help="with --all: write 64-VM-REPLAY.md here (nothing is written without it)")
+    replay.add_argument(
+        "--out-dir", default=None, help="only with --all: write 64-VM-REPLAY.md here (nothing is written without it)"
+    )
     return parser
 
 
@@ -379,13 +381,16 @@ def _replay_command(
     literals = _forbidden_literals(args, forbidden_source)  # no registered source: refused before anything is read
     limits = _replay_limits(args.private_dir)
     records = read_records(args.root, args.run_id)  # read-only: the store is opened only once a replay will write
-    if policy.state_from_records(records).aborted:
-        _print(out, {"aborted": "run_aborted"})
+    if policy.state_from_records(records).aborted:  # appends would raise EvidenceAborted: print the stored verdict, write nothing
+        _report(args, vm_replay.recorded_run_verdict(records), out, {"aborted": "run_aborted"})
         return EXIT_ABORTED
     decide_days = vm_replay.replay_sessions(records)
     if args.all_sessions and not decide_days:  # nothing to replay and nothing to write: the verdict is replay_day_missing
         return _finish_all(args, vm_replay.recorded_run_verdict(records), out)
     session_id = decide_days[-1] if args.all_sessions else session_id_for(args.session)
+    if session_id not in decide_days:  # refused before the store is opened: the open-run day and operator days are not replayed
+        _print(out, {"refused": vm_replay.NOT_DECIDE_DAY})
+        return EXIT_REFUSED
     store = EvidenceStore.open(args.root, run_id=args.run_id, session_id=session_id, forbidden=literals)
     sink = EvidenceReplaySink(store)
     manifest_hashes = dict(store.manifest.hashes)
@@ -414,7 +419,7 @@ def _replay_command(
     return _finish_all(args, vm_replay.recorded_run_verdict(store.records(), run.refused), out)
 
 
-def _finish_all(args: argparse.Namespace, recorded: vm_replay.RunReplay, out: TextIO) -> int:
+def _report(args: argparse.Namespace, recorded: vm_replay.RunReplay, out: TextIO, extra: Optional[dict[str, Any]] = None) -> None:
     """Print the recorded D-23 verdict and, only with ``--out-dir``, write the report file."""
 
     if args.out_dir is not None:
@@ -422,10 +427,15 @@ def _finish_all(args: argparse.Namespace, recorded: vm_replay.RunReplay, out: Te
         target.mkdir(parents=True, exist_ok=True)
         (target / REPLAY_REPORT).write_text(vm_replay.render_report(recorded), encoding="utf-8")
     _print(out, {
+        **(extra or {}),
         "run": recorded.run_id, "verdict": recorded.verdict, "reasons": list(recorded.reasons),
         "sessions": len(recorded.sessions), "build_digests": list(recorded.build_digests),
         "refused": dict(sorted(recorded.refused.items())), "not_replayed": list(recorded.not_replayed),
     })
+
+
+def _finish_all(args: argparse.Namespace, recorded: vm_replay.RunReplay, out: TextIO) -> int:
+    _report(args, recorded, out)
     return EXIT_OK if recorded.verdict == vm_replay.PASS else EXIT_REFUSED
 
 
@@ -460,7 +470,10 @@ def main(
 ) -> int:
     out = out or sys.stdout
     try:
-        args = _parser().parse_args(argv)
+        parser = _parser()
+        args = parser.parse_args(argv)
+        if args.command == REPLAY_COMMAND and args.out_dir is not None and not args.all_sessions:
+            parser.error("--out-dir is only valid with --all")  # not silently ignored: usage error, exit 2
     except SystemExit as exc:
         return EXIT_USAGE if exc.code else EXIT_OK
     args.forbidden_source = forbidden_source  # the runtime's own preflight reads the literals through the same seam
