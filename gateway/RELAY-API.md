@@ -303,6 +303,7 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli revoke
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-state
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-audit --after-seq 0
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-key
+uv run --project backend --no-sync python -m brokers.breeze_gateway.cli orders-build
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli tunnel
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday step --step S-3 --probe-dir DIR
 uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-intraday compare --saved DIR --pilot-store ROOT --procedure-version N
@@ -323,6 +324,9 @@ uv run --project backend --no-sync python -m brokers.breeze_gateway.cli probe-in
   Read only, no audit fallback. An older VM answers 404 and the command exits 1 with `NOT_FOUND ... reason route_unavailable`.
 - `tunnel` prints `RELAY_URL=http://127.0.0.1:<port>` for manual inspection and waits
   for Ctrl-C. The relay token is not printed, so only health answers without it.
+- `orders-build` prints `commit <40 hex>` and `digest <64 hex>`: the build the VM runs (`GET /v1/orders/build`, 64-05 Task 2b).
+  `--files` adds one `file <path> <64 hex>` line per `orders/` file. Read only, no audit or health fallback. An older VM answers 404
+  and the command exits 1 with `NOT_FOUND ... reason route_unavailable`; a deploy without the commit stamp exits 1 with `ORDERS_UNAVAILABLE ... reason build_unstamped`.
 - Exit codes: 0 ok, 1 relay error (`<CODE> (request <id>)`), 2 usage or no terminal,
   3 config error, 4 tunnel error, 5 saved evidence refused (`probe-intraday compare`). A
   `probe-intraday step` with an INCONCLUSIVE slot (upstream error on every try) also exits 1.
