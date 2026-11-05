@@ -379,7 +379,6 @@ def _replay_command(
     args: argparse.Namespace, forbidden_source: Optional[Callable[[argparse.Namespace], Sequence[str]]], out: TextIO
 ) -> int:
     literals = _forbidden_literals(args, forbidden_source)  # no registered source: refused before anything is read
-    limits = _replay_limits(args.private_dir)
     records = read_records(args.root, args.run_id)  # read-only: the store is opened only once a replay will write
     if policy.state_from_records(records).aborted:  # appends would raise EvidenceAborted: print the stored verdict, write nothing
         _report(args, vm_replay.recorded_run_verdict(records), out, {"aborted": "run_aborted"})
@@ -393,6 +392,9 @@ def _replay_command(
         return EXIT_REFUSED
     store = EvidenceStore.open(args.root, run_id=args.run_id, session_id=session_id, forbidden=literals)
     sink = EvidenceReplaySink(store)
+    # Stored FAILs are finished from the evidence alone, before the private config can refuse (Terra #646 r4).
+    vm_replay.complete_stored(store.records(), decide_days if args.all_sessions else (session_id,), sink)
+    limits = _replay_limits(args.private_dir)
     manifest_hashes = dict(store.manifest.hashes)
     vm_source = Path(args.vm_source)
     if not args.all_sessions:

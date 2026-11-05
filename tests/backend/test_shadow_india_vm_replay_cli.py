@@ -413,6 +413,27 @@ def test_an_interrupted_fail_is_finished_even_when_the_changed_config_refuses_th
     assert [(p.event, p.scope) for p in state.open_pauses] == [(vm_replay.DIVERGENCE, "all")]
 
 
+@pytest.mark.parametrize("all_sessions", [False, True])
+@pytest.mark.parametrize("config", ["missing", "invalid"])
+def test_an_interrupted_fail_is_finished_before_a_missing_or_invalid_private_config_refuses(
+    world: World, tmp_path: Path, all_sessions: bool, config: str
+):
+    """Terra #646 r3/r4 break-proof: load the private config before completing and the owed pause never lands."""
+    interrupted_divergence(world)
+    argv = ["vm-replay", "--root", str(world.sc.root), "--run-id", RUN, "--vm-source", str(world.vm)]
+    if config == "invalid":
+        broken = tmp_path / "broken"
+        broken.mkdir()
+        argv += ["--private-dir", str(broken)]
+    code, out = run_cli(argv + (["--all"] if all_sessions else ["--session", DAY1]))
+    assert code == 1 and "refused" in out
+    records = read_records(world.sc.root, RUN)
+    (finding,) = [r for r in records if r["kind"] == "vm_replay"]
+    assert [r["finding_seq"] for r in records if r["kind"] == "replay_defect"] == [finding["seq"]]
+    state = policy.state_from_records(records)
+    assert [(p.event, p.scope) for p in state.open_pauses] == [(vm_replay.DIVERGENCE, "all")]
+
+
 def test_a_divergence_the_operator_resumed_is_not_paused_again_by_a_cli_rerun(world: World):
     world.sc.intent(S1, "buy", 5000, "100.00")
     world.sc.close(S1)

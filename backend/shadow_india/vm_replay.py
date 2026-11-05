@@ -1137,6 +1137,14 @@ def _held_defect(records: Sequence[Mapping[str, Any]], session_id: str, finding_
     )
 
 
+def complete_stored(records: Sequence[Mapping[str, Any]], session_ids: Sequence[str], sink: ReplaySink) -> None:
+    """Finish what each stored FAIL of ``session_ids`` still owes. Needs only the evidence, so the CLI runs it before the
+    private config is loaded: a config that is missing or invalid never leaves a stored finding without its pause."""
+
+    for session_id in session_ids:
+        _complete_stored(records, session_id, sink)
+
+
 def _complete_stored(records: Sequence[Mapping[str, Any]], session_id: str, sink: ReplaySink) -> None:
     """Write what each stored FAIL of the session still owes (the process stopped after its record): its defects and its pause.
 
@@ -1412,6 +1420,7 @@ __all__ = [
     "BUILD_HASH_MIXED",
     "BUILD_MISMATCH",
     "BuildIdentity",
+    "complete_stored",
     "D06_LABEL",
     "DAY_MISSING",
     "DEFECT",
