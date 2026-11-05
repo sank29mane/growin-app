@@ -45,7 +45,7 @@ from gateway_vm.orders import master as master_mod  # noqa: E402
 from gateway_vm.orders import reads  # noqa: E402
 from gateway_vm.orders import sessions  # noqa: E402
 from gateway_vm.orders.limits import LimitsError  # noqa: E402
-from gateway_vm.orders.risk import apply_trades, initial_state  # noqa: E402
+from gateway_vm.orders.risk import apply_trades, detect_mismatch, initial_state  # noqa: E402
 from gateway_vm.orders import sessions  # noqa: E402
 from gateway_vm.orders.risk import apply_trades, initial_state  # noqa: E402
 from gateway_vm.orders.alerts import ALERT_FILE, AlertLogError, FileAlertPort  # noqa: E402
@@ -434,7 +434,9 @@ class FakeReads:
         return self.by_call[call]
 
 
-NO_CALENDAR = (frozenset(), frozenset())  # weekdays only: the netting tests below pick their own dates
+# Weekdays only, bar one far-away 2026 holiday: the netting tests below pick their own dates.
+# (An empty calendar covers no year, so the account port refuses it.)
+NO_CALENDAR = (frozenset({date(2026, 1, 26)}), frozenset())
 
 
 def account(today: datetime, *, holdings, trades, orders=(), calendar=NO_CALENDAR) -> reads.BreezeAccount:
@@ -537,10 +539,29 @@ def test_an_unreadable_holiday_table_stops_the_account_port_being_built(monkeypa
         reads.BreezeAccount(reads=FakeReads(), master=None, clock=Clock(WEDNESDAY))  # type: ignore[arg-type]
 
 
-def test_previous_trading_day_skips_weekends_holidays_and_counts_special_sessions():
+def test_monday_before_a_sunday_muhurat_session_still_nets_the_friday_sale_with_the_real_table():
+    # Settlement days are weekdays that are not holidays. The Sunday 2026-11-08 Muhurat
+    # session is not one, so Mon 9 Nov still looks back to Fri 6 Nov. Counting the
+    # Sunday would leave the Friday sale un-netted (demat 60 vs ledger 20) and latch
+    # account_mismatch.
+    monday = datetime(2026, 11, 9, 4, 30, tzinfo=UTC)  # 10:00 IST
+    trades = [
+        trade_row("b1", "TESTCO", "Buy", 60, "10", "01-Nov-2026"),
+        trade_row("s1", "TESTCO", "Sell", 40, "11", "06-Nov-2026"),
+    ]
+    acct = account(monday, holdings=[holding_row(ISIN_A, 60)], trades=trades, calendar=sessions.load_calendar())
+    snap = acct.snapshot()
+    assert {h.isin: h.quantity for h in snap.holdings} == {ISIN_A: 20}
+    state = initial_state(_limits())
+    apply_trades(state, snap.trades)
+    assert detect_mismatch(state, snap.holdings) is False
+
+
+def test_previous_trading_day_skips_weekends_and_holidays_and_counts_special_sessions_only_when_told():
     cal = sessions.load_calendar()
     assert sessions.previous_trading_day(date(2026, 11, 11), *cal) == date(2026, 11, 9)  # Tue 10 Nov closed
-    assert sessions.previous_trading_day(date(2026, 11, 9), *cal) == date(2026, 11, 8)  # the Sunday Muhurat session
+    assert sessions.previous_trading_day(date(2026, 11, 9), *cal) == date(2026, 11, 8)  # special sessions passed in count
+    assert sessions.previous_trading_day(date(2026, 11, 9), cal[0], ()) == date(2026, 11, 6)  # the netting call
     assert sessions.previous_trading_day(date(2026, 11, 8), *cal) == date(2026, 11, 6)  # Friday
     assert sessions.previous_trading_day(date(2026, 10, 21), *cal) == date(2026, 10, 19)  # Tue 20 Oct closed
     assert sessions.previous_trading_day(date(2026, 12, 28), *cal) == date(2026, 12, 24)  # Fri 25 Dec closed, then the weekend
@@ -549,17 +570,50 @@ def test_previous_trading_day_skips_weekends_holidays_and_counts_special_session
         sessions.previous_trading_day(datetime(2026, 11, 11), *cal)
 
 
-def test_the_table_covers_through_the_end_of_its_last_year_and_warns_in_the_last_30_days():
+def test_the_table_covers_a_year_only_if_it_lists_a_holiday_in_it_and_warns_in_the_last_30_days():
     cal = sessions.load_calendar()
-    assert sessions.covered_through(*cal) == date(2026, 12, 31)
-    assert sessions.calendar_covers(date(2026, 12, 31), *cal)
-    assert not sessions.calendar_covers(date(2027, 1, 1), *cal)
-    assert sessions.covered_through((), ()) is None and sessions.calendar_covers(date(2030, 1, 1), (), ())
+    holidays = cal[0]
+    assert limits_mod.covered_years(holidays) == frozenset({2026})
+    assert sessions.covered_through(holidays, date(2026, 11, 5)) == date(2026, 12, 31)
+    assert sessions.covered_through(holidays, date(2027, 1, 1)) is None
+    assert sessions.calendar_covers(date(2026, 12, 31), holidays)
+    assert not sessions.calendar_covers(date(2027, 1, 1), holidays)
     assert sessions.coverage_warning(date(2026, 11, 5), *cal) is None
     assert sessions.coverage_warning(date(2026, 11, 30), *cal) is None  # 31 days left
     assert "2026-12-31" in (sessions.coverage_warning(date(2026, 12, 1), *cal) or "")  # 30 days left
-    assert "ended" in (sessions.coverage_warning(date(2027, 1, 2), *cal) or "")
-    assert sessions.coverage_warning(date(2027, 1, 2), (), ()) is None
+    assert "no rows for 2027" in (sessions.coverage_warning(date(2027, 1, 2), *cal) or "")
+
+
+def test_an_empty_table_covers_nothing_and_warns():
+    assert limits_mod.covered_years(()) == frozenset()
+    assert not sessions.calendar_covers(date(2026, 11, 5), ())
+    assert sessions.covered_through((), date(2026, 11, 5)) is None
+    assert "no holidays" in (sessions.coverage_warning(date(2026, 11, 5), (), ()) or "")
+    # a special session alone is not a holiday list
+    assert "no holidays" in (sessions.coverage_warning(date(2026, 11, 5), (), (date(2026, 11, 8),)) or "")
+
+
+def test_a_gap_year_is_not_covered_and_the_warning_keys_off_the_unbroken_run():
+    holidays = frozenset({date(2026, 1, 26), date(2028, 1, 26)})  # 2027 never filled in
+    assert not sessions.calendar_covers(date(2027, 3, 1), holidays)
+    assert sessions.calendar_covers(date(2028, 3, 1), holidays)
+    assert sessions.covered_through(holidays, date(2026, 12, 1)) == date(2026, 12, 31)  # 2028 does not extend 2026
+    assert "2026-12-31" in (sessions.coverage_warning(date(2026, 12, 1), holidays, ()) or "")
+    assert "no rows for 2027" in (sessions.coverage_warning(date(2027, 3, 1), holidays, ()) or "")
+    contiguous = holidays | {date(2027, 1, 26)}
+    assert sessions.covered_through(contiguous, date(2026, 12, 1)) == date(2028, 12, 31)
+    assert sessions.coverage_warning(date(2026, 12, 1), contiguous, ()) is None
+
+
+def test_snapshot_refuses_on_an_empty_table_and_in_a_gap_year():
+    for calendar, when in (
+        ((frozenset(), frozenset()), datetime(2026, 11, 11, 4, 30, tzinfo=UTC)),
+        ((frozenset({date(2026, 1, 26), date(2028, 1, 26)}), frozenset()), datetime(2027, 3, 3, 4, 30, tzinfo=UTC)),
+    ):
+        acct = account(when, holdings=[], trades=[], calendar=calendar)
+        with pytest.raises(LimitsError):
+            acct.snapshot()
+        assert acct.fake.calls == []
 
 
 def test_snapshot_asks_for_a_year_of_trades_and_todays_orders_only():

@@ -373,22 +373,32 @@ def load_calendar(path: str | Path = HOLIDAY_TABLE_PATH) -> tuple[frozenset[date
     return holidays, special
 
 
-def covered_through(holidays: Iterable[date], special_sessions: Iterable[date]) -> date | None:
-    """Last day the table speaks for: 31 December of the latest year it lists.
+def covered_years(holidays: Iterable[date]) -> frozenset[int]:
+    """Years the table speaks for: those with at least one listed holiday.
 
-    None when the table lists nothing at all (a legal but empty table says nothing
-    about coverage, so no coverage rule applies to it).
+    Every NSE year has weekday holidays, so a year with none is a year nobody filled
+    in. An empty table covers nothing, and a gap year (2026 and 2028 listed, 2027 not)
+    is not covered just because a later year is.
     """
-    years = [d.year for d in (*holidays, *special_sessions)]
-    return date(max(years), 12, 31) if years else None
+    return frozenset(day.year for day in holidays)
 
 
-def calendar_covers(day: date, holidays: Iterable[date], special_sessions: Iterable[date]) -> bool:
-    """False once ``day`` is past the last year the table lists: an unlisted holiday
+def calendar_covers(day: date, holidays: Iterable[date]) -> bool:
+    """False for a day in a year the table has no holiday rows for: an unlisted holiday
     there would read as a normal session, so the day must be refused, not guessed."""
-    through = covered_through(holidays, special_sessions)
-    return through is None or day <= through
+    return day.year in covered_years(holidays)
 
+
+def covered_through(holidays: Iterable[date], day: date) -> date | None:
+    """31 December of the last year of the unbroken run of covered years that starts at
+    ``day``'s year, or None when ``day``'s own year is not covered."""
+    years = covered_years(holidays)
+    year = day.year
+    if year not in years:
+        return None
+    while year + 1 in years:
+        year += 1
+    return date(year, 12, 31)
 
 
 def session_open(
@@ -401,8 +411,8 @@ def session_open(
 
     Closed on weekends, on every listed holiday, and on every listed special session
     (a Muhurat session has its own hours that the table does not carry, so it stays
-    closed: the safe side), and on any day past the last year the holiday table lists
-    (an unlisted holiday would look like a normal day). With no calendar passed the
+    closed: the safe side), and on any day in a year the holiday table has no holiday rows
+    for (an unlisted holiday would look like a normal day; an empty table covers no year). With no calendar passed the
     repo table is read; one that cannot be read closes every day.
     """
     if now_ist.weekday() >= 5:
@@ -418,7 +428,7 @@ def session_open(
     day = now_ist.date()
     if day in listed_holidays or day in listed_special:
         return False
-    if not calendar_covers(day, listed_holidays, listed_special):
+    if not calendar_covers(day, listed_holidays):
         return False
     return SESSION_OPEN <= now_ist.time() < ORDER_CUTOFF
 

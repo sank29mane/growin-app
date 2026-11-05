@@ -88,14 +88,17 @@ def previous_trading_day(
 def coverage_warning(
     today: date, holidays: Iterable[date], special_sessions: Iterable[date]
 ) -> str | None:
-    """A line for the operator once the table is within COVERAGE_WARN_DAYS of its end
-    (or past it), else None. No order is refused for this until the end has passed."""
-    through = covered_through(holidays, special_sessions)
+    """A line for the operator when the table does not cover ``today`` or its covered
+    run ends within COVERAGE_WARN_DAYS, else None. The warning keys off the last year
+    of the unbroken run of covered years, so a later year after a gap does not hide it.
+    ``special_sessions`` is accepted for symmetry and does not count as coverage."""
+    listed = frozenset(holidays)
+    if not listed:
+        return "holiday table lists no holidays: orders are refused until the NSE list is added"
+    through = covered_through(listed, today)
     if through is None:
-        return None
+        return f"holiday table has no rows for {today.year}: orders are refused until that year is added"
     left = (through - today).days
     if left > COVERAGE_WARN_DAYS:
         return None
-    if left < 0:
-        return f"holiday table ended {through.isoformat()}: orders are refused until the next year is added"
-    return f"holiday table ends {through.isoformat()} ({left} days): add the next NSE holiday list"
+    return f"holiday table covers through {through.isoformat()} ({left} days): add the next NSE holiday list"

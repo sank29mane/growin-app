@@ -401,9 +401,10 @@ class BreezeAccount:
     """AccountPort: fresh holdings, working orders and the trade list, from three GETs.
 
     Holdings lag fills by a settlement day, so a sale made today (or on the previous
-    trading day, by the NSE holiday table) still shows in the demat quantity. Those
-    sales are netted off the holding before the guard compares it with the ledger;
-    otherwise every sale would latch account_mismatch. Netting can only lower a holding, so it never hides a buy and
+    settlement day, by the NSE holiday table; special sessions do not count) still
+    shows in the demat quantity. Those sales are netted off the holding before the
+    guard compares it with the ledger; otherwise every sale would latch
+    account_mismatch. Netting can only lower a holding, so it never hides a buy and
     never lets a sell exceed what the ledger holds. A holding has no price in this
     response, so cost is ZERO and the cap rules read the VM ledger's cost instead.
     """
@@ -430,7 +431,7 @@ class BreezeAccount:
     def snapshot(self) -> AccountSnapshot:
         master = self._master.current()
         today = _ist_today(self._clock)
-        if not calendar_covers(today, self._holidays, self._special_sessions):
+        if not calendar_covers(today, self._holidays):
             # Past the table's last year the unsettled window cannot be placed, and a
             # wrong window latches account_mismatch. Refuse the read instead.
             raise LimitsError("holiday table does not cover today")
@@ -454,7 +455,8 @@ class BreezeAccount:
             ),
             master,
         )
-        unsettled = previous_trading_day(today, self._holidays, self._special_sessions)
+        # Settlement days only: a special session is not one, so it must not pull the window in.
+        unsettled = previous_trading_day(today, self._holidays, ())
         for trade in trades:
             if trade.side == "sell" and trade.executed_at is not None:
                 if trade.executed_at.astimezone(IST).date() >= unsettled:
