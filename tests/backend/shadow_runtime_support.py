@@ -24,7 +24,7 @@ from typing import Any, Callable, Optional
 
 import test_pilot_data_crosscheck as cc
 from brokers.breeze_gateway.client import UpstreamPayload
-from brokers.breeze_gateway.orders import OrdersClient, RelayLink
+from brokers.breeze_gateway.orders import RelayLink
 from india_limits_support import india_private_dir
 from risk_india.state import state_path_for
 from shadow_india import runtime as runtime_module
@@ -33,16 +33,11 @@ from strategy_india.params import placeholder_params
 from test_gateway_orders_routes import PRIMARY
 from test_pilot_data_session_store import build_research, seed
 from test_shadow_india_runner import AS_OF as _RUNNER_AS_OF  # noqa: F401  (documents that this file mirrors it)
-from test_shadow_india_runner import BUILD, S, Clock, Script, Vm
+from test_shadow_india_runner import S, Clock, Script, Vm
 
 UTC = timezone.utc
 
 
-def install_build(monkeypatch: Any, build: Any = BUILD) -> None:
-    """Give every ``OrdersClient`` a ``current_build()`` that answers ``build`` (the route is another PR's; the runtime
-    reads it through the client, so a fake method is the whole seam)."""
-
-    monkeypatch.setattr(OrdersClient, "current_build", lambda self: build, raising=False)
 SESSION = S  # 2026-10-22, inside the VM fixtures' October 2026
 AS_OF = cc.D5  # the data session the reference prices are read for (the 2025 seeded store)
 WINDOW_START = cc.START  # 2025-03-03
@@ -251,7 +246,9 @@ class Env:
         return state_path_for(self.ledger_path())
 
 
-def build_env(tmp: Path, seeded: dict[str, Any], metadata: Any, *, calendar_sha: Optional[str] = None) -> Env:
+def build_env(
+    tmp: Path, seeded: dict[str, Any], metadata: Any, *, calendar_sha: Optional[str] = None, stamped: bool = True
+) -> Env:
     session_store = tmp / "session"
     shutil.copytree(seeded["session"], session_store)
     dataset_copy = tmp / "datasets" / Path(seeded["dataset"]).name  # the directory name is the manifest hash
@@ -276,7 +273,7 @@ def build_env(tmp: Path, seeded: dict[str, Any], metadata: Any, *, calendar_sha:
         "simulation_root": str(sim), "window_start": WINDOW_START.isoformat(), "vm_key_id": KEY_ID,
     })
     clock = Clock()
-    vm = Vm(tmp, metadata)
+    vm = Vm(tmp, metadata, stamped=stamped)
     reads = ReadScript(clock)
     proxy = ProxyClient(vm.client, reads)
     link = RelayLink.of(proxy)

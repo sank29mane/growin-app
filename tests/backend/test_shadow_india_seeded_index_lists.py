@@ -12,12 +12,12 @@ from types import SimpleNamespace
 import duckdb
 import pytest
 
+from brokers.breeze_gateway.orders import VmBuild, build_digest
 from pilot_data.constituents import latest_index_list
 from pilot_data.core import PilotDataError
 from pilot_data.store import DB_FILE_NAME, PilotDataStore
 from pilot_data.universe import classify_smallcap
 from shadow_india.runner import OpenRunRefused, open_run
-from shadow_india.vm_replay import BuildIdentity
 
 import test_pilot_data_crosscheck as cc
 import test_pilot_data_session_store as ss
@@ -39,7 +39,7 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", refuse)
 
-BUILD = BuildIdentity("a" * 40, {"intent.py": "c" * 64})
+BUILD = VmBuild("a" * 40, {"intent.py": "c" * 64}, build_digest("a" * 40, {"intent.py": "c" * 64}))
 
 
 def inputs_for(store):

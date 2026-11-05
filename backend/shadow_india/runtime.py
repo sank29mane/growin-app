@@ -34,9 +34,15 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from brokers.breeze_gateway.client import RelayClient
 from brokers.breeze_gateway.config import ConfigError, load_gateway_config
-from brokers.breeze_gateway.errors import OrdersKeyRouteUnavailable, RelayError, TunnelError, UpstreamError
+from brokers.breeze_gateway.errors import (
+    OrdersBuildUnstamped,
+    OrdersKeyRouteUnavailable,
+    RelayError,
+    TunnelError,
+    UpstreamError,
+)
 from brokers.breeze_gateway.india_quote import QuoteUnavailable, RelayQuoteSource, parse_quote
-from brokers.breeze_gateway.orders import OrdersClient, OrdersProtocolError, RelayLink
+from brokers.breeze_gateway.orders import OrdersClient, OrdersProtocolError, RelayLink, VmBuild
 from execution.india_guard import IndiaAdmissionGuard, IndiaInstrumentMap, IndiaQuoteEvidence
 from execution.ledger import SimulationProbeRefused, probe_simulation_ledger
 from execution.models import Workspace
@@ -67,7 +73,6 @@ from .admission import (
 from .evidence import EvidenceStore, read_records
 from .portfolio import Instrument, PortfolioError, ShadowPortfolio
 from .runner import (
-    BuildSource,
     LiveTablePins,
     NoPostSubmissionEvidence,
     RunnerPorts,
@@ -371,28 +376,24 @@ def activate_relay(link: RelayLink, expected_key_id: str) -> OrdersClient:
     return orders
 
 
-def read_vm_build(orders: Any) -> BuildSource:
+def read_vm_build(orders: OrdersClient) -> VmBuild:
     """The deployed VM build, read once, read-only and before any writable open.
 
     A route that is missing, a refusal, an unstamped build or a reply that does not check out is one closed refusal:
-    ``vm_build_unavailable`` (or ``vm_build_unstamped``). The digest is checked again by the runner's one recipe.
+    ``vm_build_unavailable`` (or ``vm_build_unstamped``). The client already recomputed the digest; the runner's one
+    recipe checks it again here.
     """
 
-    reader = getattr(orders, "current_build", None)
-    if reader is None:
-        raise _refuse("vm_build_unavailable")
     try:
-        build = reader()
-    except (RelayError, OrdersProtocolError) as error:
-        if type(error).__name__ == "OrdersBuildUnstamped":
-            raise _refuse("vm_build_unstamped") from None
+        build = orders.current_build()
+    except OrdersBuildUnstamped:
+        raise _refuse("vm_build_unstamped") from None
+    except (RelayError, OrdersProtocolError):  # route unavailable, invalid body, relay or transport failure
         raise _refuse("vm_build_unavailable") from None
     try:
         checked_build(build)
     except VmBuildRefused:
         raise _refuse("vm_build_digest_mismatch") from None
-    except (AttributeError, TypeError):
-        raise _refuse("vm_build_unavailable") from None
     return build
 
 
@@ -554,7 +555,7 @@ class OpenRunRuntime:
         orders: OrdersClient,
         clock: Callable[[], datetime],
         link: Optional[RelayLink],
-        build: Optional[BuildSource] = None,
+        build: Optional[VmBuild] = None,
     ) -> None:
         self._pre = pre
         self._orders = orders
@@ -699,7 +700,7 @@ def _build_runner(
     link: RelayLink,
     clock: Callable[[], datetime],
     owner: Optional[RelayLink],
-    build: BuildSource,
+    build: VmBuild,
 ) -> ProductionRuntime:
     closers: list[Callable[[], None]] = []
     try:

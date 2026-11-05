@@ -29,7 +29,7 @@ import pytest
 import shadow_india.runner as runner_module
 from brokers.breeze_gateway.client import RelayClient
 from brokers.breeze_gateway.errors import NoSession, OrdersUnavailable, RelayError
-from brokers.breeze_gateway.orders import MintMismatch, OrdersClient
+from brokers.breeze_gateway.orders import MintMismatch, OrdersClient, VmBuild, build_digest
 from brokers.breeze_gateway.token_store import MemoryTokenStore
 from india_limits_support import india_private_dir, make_evidence, make_guard
 from relay_orders_support import RecordingHttp
@@ -39,6 +39,7 @@ from risk_india.state import LatchStore
 from execution.ledger import InvalidTransition
 from shadow_india import __main__ as cli
 from shadow_india import policy, vm_codes
+from shadow_india import runtime as runtime_module
 from shadow_india.admission import (
     SIMULATOR_DRAWDOWN_BASIS,
     AuditEntry,
@@ -48,7 +49,6 @@ from shadow_india.admission import (
     open_simulation_ledger,
 )
 from shadow_india.evidence import EvidenceStore
-from shadow_india.vm_replay import BuildIdentity
 from shadow_india.portfolio import (
     PEAK_SOURCE,
     Instrument,
@@ -85,6 +85,7 @@ from shadow_india.signals import (
     SignalResult,
     held_names_quarantined,
 )
+from test_gateway_orders_build import write_tree
 from test_gateway_orders_routes import PRIMARY, VECTORS, MetadataFake, OrderStack
 from test_shadow_india_admission import _FrozenDatetime, run
 from test_strategy_india_support import StaticEligibility
@@ -92,6 +93,7 @@ from test_strategy_india_support import limits as limits62
 from test_strategy_india_support import params as params62
 
 import execution.service as service_module
+from gateway_vm import app as relay_app
 from gateway_vm.orders import CODE_TABLE as VM_CODE_TABLE
 from gateway_vm.contract import ERRORS as RELAY_ERRORS
 
@@ -268,8 +270,19 @@ def evaluated(*ranked: str, suppressed: dict[str, str] | None = None, entries: b
 
 
 HASHES = {name: sha(name) for name in PIN_NAMES}
-# The deployed VM build every world runs on, and the nine-key hash it mints with (64-05 Task 2b).
-BUILD = BuildIdentity("a" * 40, {"intent.py": sha("intent.py"), "limits.py": sha("limits.py")})
+# The deployed VM build every world runs on, and the nine-key hash it mints with (64-05 Task 2b). ``Vm`` stamps a real
+# package tree with exactly these bytes and mounts the real ``/v1/orders/build`` route over it, so ``BUILD`` is what the
+# in-process VM answers, not a stand-in.
+BUILD_FILES = {"intent.py": b"intent.py", "limits.py": b"limits.py"}
+
+
+def make_build(commit: str, files: dict[str, str]) -> VmBuild:
+    """A ``VmBuild`` as the Mac client returns it: the digest recomputed by the one recipe."""
+
+    return VmBuild(commit, dict(files), build_digest(commit, files))
+
+
+BUILD = make_build("a" * 40, {name: hashlib.sha256(data).hexdigest() for name, data in BUILD_FILES.items()})
 MINT_LIMITS = VECTORS["limits_sha256"]
 
 
@@ -290,9 +303,17 @@ def instrument_list(*symbols: str) -> list[Instrument]:
 class Vm:
     """The in-process VM and a relay client into it, counting every request."""
 
-    def __init__(self, tmp: Path, metadata: MetadataFake) -> None:
+    def __init__(self, tmp: Path, metadata: MetadataFake, *, stamped: bool = True) -> None:
         (tmp / "vm").mkdir()
-        self.stack = OrderStack(tmp / "vm", metadata)
+        package = tmp / "deployed" / "gateway_vm"
+        write_tree(package, commit=BUILD.commit if stamped else None, files=BUILD_FILES)  # unstamped: no BUILD_COMMIT file
+        real_mount = relay_app.mount_build_route
+        with pytest.MonkeyPatch.context() as patch:  # create_app mounts the real route over the stamped tree, not the repo's
+            patch.setattr(
+                relay_app, "mount_build_route",
+                lambda app, *, session, bearer, package_dir: real_mount(app, session=session, bearer=bearer, package_dir=package),
+            )
+            self.stack = OrderStack(tmp / "vm", metadata)
         self.metadata = metadata
         token = self.stack.login()
         store = MemoryTokenStore()
@@ -399,7 +420,7 @@ def build_world(
     mint_timeout: timedelta = timedelta(seconds=10),
     fills: Any = None,
     private: Path | None = None,
-    build: BuildIdentity | None = None,
+    build: VmBuild | None = None,
     mint_limits: str | None = None,
     session: date = S,
 ) -> World:
@@ -2523,16 +2544,9 @@ def test_the_cli_without_a_buildable_runtime_keeps_an_ambiguous_exit_fill_pause_
 
 S2 = date(2026, 10, 23)
 NEXT_DAY = datetime(2026, 10, 23, 9, 45, tzinfo=IST)
-REDEPLOYED = BuildIdentity("b" * 40, dict(BUILD.orders_sha256))  # another commit
-EDITED = BuildIdentity(BUILD.commit, {**BUILD.orders_sha256, "limits.py": sha("edited")})  # same commit, one file moved
+REDEPLOYED = make_build("b" * 40, BUILD.orders_sha256)  # another commit
+EDITED = make_build(BUILD.commit, {**BUILD.orders_sha256, "limits.py": sha("edited")})  # same commit, one file moved
 OTHER_COLLAR = sha("another nine-key hash")
-
-
-class SentBuild:
-    """A build the way the relay reports it: the digest is whatever was sent, recomputed or not."""
-
-    def __init__(self, base: BuildIdentity, digest: str) -> None:
-        self.commit, self.orders_sha256, self.digest = base.commit, dict(base.orders_sha256), digest
 
 
 def session_records(world: "World", session: date) -> list[dict[str, Any]]:
@@ -2553,8 +2567,14 @@ def test_open_run_pins_the_build_and_the_mint_hash_right_after_run_start(world):
     )
 
 
+def test_the_in_process_vm_answers_the_build_the_worlds_pin(vm):
+    """The world's ``BUILD`` is what the real route and the real client return, and the runtime reads it the same way."""
+    assert vm.orders.current_build() == BUILD
+    assert runtime_module.read_vm_build(vm.orders) == BUILD
+
+
 def test_the_writer_recomputes_the_digest_and_refuses_one_that_does_not_match(tmp_path, vm):
-    lying = SentBuild(BUILD, sha("a digest that does not recompute"))
+    lying = replace(BUILD, digest=sha("a digest that does not recompute"))
     store = EvidenceStore.create(
         tmp_path / "ev", run_id=RUN, run_class="plumbing", session_id=session_id_for(S), hashes=HASHES,
         clock=Clock(),

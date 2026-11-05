@@ -26,7 +26,13 @@ import shadow_india.runner as runner_module
 import test_pilot_data_crosscheck as cc
 import test_shadow_india_release_cli as rc
 from brokers.breeze_gateway.config import ConfigError
-from brokers.breeze_gateway.errors import TunnelError, UpstreamError
+from brokers.breeze_gateway.errors import (
+    OrdersBuildInvalid,
+    OrdersBuildRouteUnavailable,
+    OrdersBuildUnstamped,
+    TunnelError,
+    UpstreamError,
+)
 from brokers.breeze_gateway.orders import OrdersClient, OrdersProtocolError
 from execution.ledger import ExecutionLedger, SimulationProbeRefused, probe_simulation_ledger
 from execution.models import Workspace
@@ -39,10 +45,11 @@ from shadow_india.evidence import LOG_NAME, TORN_DIR, EvidenceStore, read_record
 from shadow_india.portfolio import Instrument, PortfolioError
 from shadow_runtime_support import (
     AS_OF, CANBK_CODE, CANBK_ISIN, CANBK_SYMBOL, FORBIDDEN, KEY_ID, RUN, SESSION, STEADY_CODE, STEADY_ISIN,
-    STEADY_SYMBOL, WINDOW_START, build_env, build_seeded, calendar_doc, evaluated, install_build, master_zip, sha,
+    STEADY_SYMBOL, WINDOW_START, build_env, build_seeded, calendar_doc, evaluated, master_zip, sha,
     tree_state, write_json,
 )
 from test_gateway_orders_key import swap_key
+from test_shadow_india_runner import BUILD
 from test_gateway_orders_routes import OTHER
 from test_shadow_india_admission import frozen_service_clock as admission_clock  # noqa: F401  (fixture)
 from test_shadow_india_release_cli import planted, world  # noqa: F401  (fixtures for the re-run rows)
@@ -74,7 +81,6 @@ def runner_seams(monkeypatch):
 @pytest.fixture()
 def env(tmp_path, seeded, metadata, monkeypatch):  # noqa: F811
     built = build_env(tmp_path, seeded, metadata)
-    install_build(monkeypatch)
     built.script.result = evaluated("CANBK", "STEADYCO")
     monkeypatch.setattr(runner_module, "evaluate_session", built.script)
     monkeypatch.setattr(runner_module, "held_names_quarantined", built.script.held_names_quarantined)
@@ -214,7 +220,7 @@ def test_the_runtime_only_reaches_the_read_routes_and_the_mint(env, capsys):
     go(env, capsys, "decide")
     go(env, capsys, "close")
     gets = {path for method, path in env.vm.http.calls if method == "GET"}
-    assert gets <= {"/v1/orders/audit", "/v1/orders/key"}  # the VM leg; the four read routes are scripted above it
+    assert gets <= {"/v1/orders/audit", "/v1/orders/build", "/v1/orders/key"}  # the VM leg; the four read routes are scripted above it
     assert set(env.reads.paths) <= {"/v1/health", "/v1/quotes", "/v1/security-master", "/v1/bars/daily"}
     assert {(m, p) for m, p in env.vm.http.calls if m != "GET"} == {("POST", "/v1/orders/intents")}
     banned = ("authorize", "halt", "preview", "login", "session", "touch")
@@ -978,7 +984,6 @@ def test_no_runtime_config_value_appears_in_output_exceptions_or_evidence(
     canary = tmp_path / "CANARYQ7"
     canary.mkdir()
     env = build_env(canary, seeded, metadata)
-    install_build(monkeypatch)
     env.script.result = evaluated("CANBK", "STEADYCO")
     monkeypatch.setattr(runner_module, "evaluate_session", env.script)
     monkeypatch.setattr(runner_module, "held_names_quarantined", env.script.held_names_quarantined)
@@ -1130,10 +1135,6 @@ def test_every_resume_record_of_a_release_is_appended_from_the_portfolio_and_nev
 # --- 64-05 Task 2b: the deployed VM build is read in phase 2 and pinned in evidence ------------------------------------
 
 
-class OrdersBuildUnstamped(OrdersProtocolError):
-    """The relay's name for a build with no commit stamp (the route itself is another PR; the runtime keys on the name)."""
-
-
 def _raising(error):
     def read(self):
         raise error
@@ -1141,26 +1142,23 @@ def _raising(error):
     return read
 
 
-class _Sent:
-    def __init__(self, commit, files, digest):
-        self.commit, self.orders_sha256, self.digest = commit, files, digest
-
-
+# What the client raises for each way the build read can fail, built from the real error classes. The route being
+# missing, a body the client refuses, a relay failure and an unstamped deploy are Stage 1's own errors; the last row is a
+# reply whose digest does not recompute, which the client would refuse first and the runtime checks again.
 BUILD_FAILURES = [
-    ("unavailable", _raising(OrdersProtocolError("route")), "vm_build_unavailable"),
+    ("route_unavailable", _raising(OrdersBuildRouteUnavailable("NOT_FOUND", http_status=404, reason="route_unavailable")),
+     "vm_build_unavailable"),
+    ("invalid_body", _raising(OrdersBuildInvalid(reason="digest_mismatch")), "vm_build_unavailable"),
     ("relay_error", _raising(UpstreamError()), "vm_build_unavailable"),
-    ("unstamped", _raising(OrdersBuildUnstamped("unstamped")), "vm_build_unstamped"),
-    ("digest_does_not_recompute", lambda self: _Sent("a" * 40, {"intent.py": sha("i")}, sha("lie")),
-     "vm_build_digest_mismatch"),
-    ("no_such_method", None, "vm_build_unavailable"),
+    ("protocol_error", _raising(OrdersProtocolError("bad_field")), "vm_build_unavailable"),
+    ("unstamped", _raising(OrdersBuildUnstamped("ORDERS_UNAVAILABLE", http_status=503, reason="build_unstamped")),
+     "vm_build_unstamped"),
+    ("digest_does_not_recompute", lambda self: replace(BUILD, digest=sha("lie")), "vm_build_digest_mismatch"),
 ]
 
 
 def _break_build_read(monkeypatch, reader):
-    if reader is None:
-        monkeypatch.delattr(OrdersClient, "current_build", raising=False)
-    else:
-        monkeypatch.setattr(OrdersClient, "current_build", reader, raising=False)
+    monkeypatch.setattr(OrdersClient, "current_build", reader)
 
 
 @pytest.mark.parametrize(("name", "reader", "code"), BUILD_FAILURES, ids=[row[0] for row in BUILD_FAILURES])
@@ -1183,6 +1181,17 @@ def test_a_failed_build_read_refuses_decide_with_nothing_opened_or_written(env, 
     assert (exit_code, out) == (EXIT_REFUSED, {"refused": code})
     assert everything(env) == before and spies.writable_opens == 0
     assert env.vm.http.order_calls() == [] and calls <= len(env.vm.http.calls)
+
+
+def test_a_vm_with_no_commit_stamp_refuses_open_run_through_the_real_route(tmp_path, seeded, metadata, monkeypatch, capsys):  # noqa: F811
+    """End to end, no stub: the in-process VM has no ``BUILD_COMMIT``, its real route answers 503 ``build_unstamped``."""
+    unstamped = build_env(tmp_path, seeded, metadata, stamped=False)
+    unstamped.script.result = evaluated("CANBK", "STEADYCO")
+    monkeypatch.setattr(runner_module, "evaluate_session", unstamped.script)
+    before = everything(unstamped)
+    exit_code, out = go(unstamped, capsys, "open-run")
+    assert (exit_code, out) == (EXIT_REFUSED, {"refused": "vm_build_unstamped"})
+    assert everything(unstamped) == before
 
 
 def _set_collar(env, collar):

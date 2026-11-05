@@ -40,7 +40,14 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from brokers.breeze_gateway.errors import RelayError
-from brokers.breeze_gateway.orders import MintMismatch, OrdersClient, VmAuditEntry, intent_body, intent_sha256
+from brokers.breeze_gateway.orders import (
+    MintMismatch,
+    OrdersClient,
+    VmAuditEntry,
+    VmBuild,
+    intent_body,
+    intent_sha256,
+)
 from costs.core import Side
 from costs.fills import load_fill_scenarios
 from costs.schedule import load_schedule_set
@@ -138,19 +145,11 @@ class VmBuildRefused(DecideRefused):
     """No ``vm_build`` pin to compare against, or a build whose sent digest does not recompute from its commit and files."""
 
 
-class BuildSource(Protocol):
-    """What the relay's build read returns: a commit, the per-file hashes under ``orders/`` and the digest it sent."""
-
-    commit: str
-    orders_sha256: Mapping[str, str]
-    digest: str
-
-
-def checked_build(build: BuildSource) -> BuildIdentity:
+def checked_build(build: VmBuild) -> BuildIdentity:
     """The build with its digest recomputed by the one recipe. A digest that was sent and differs is refused."""
 
     identity = BuildIdentity(build.commit, dict(build.orders_sha256))
-    if getattr(build, "digest", identity.digest) != identity.digest:
+    if build.digest != identity.digest:
         raise VmBuildRefused("vm_build_digest_mismatch")
     return identity
 
@@ -566,7 +565,7 @@ class ShadowRunner:
         health: HealthPort,
         instruments: Sequence[Instrument],
         clock: Callable[[], datetime],
-        build: BuildSource,
+        build: VmBuild,
         mint_limits_sha256: str,
     ) -> None:
         self._build = checked_build(build)
@@ -1224,7 +1223,7 @@ def open_run(
     run_id: str,
     inputs: SignalInputs,
     orders: OrdersClient,
-    build: BuildSource,
+    build: VmBuild,
     mint_limits_sha256: str,
     run_class: str = "plumbing",
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -1258,7 +1257,7 @@ def open_run(
     return store
 
 
-def write_vm_build(evidence: EvidenceStore, build: BuildSource, mint_limits_sha256: str) -> Mapping[str, Any]:
+def write_vm_build(evidence: EvidenceStore, build: VmBuild, mint_limits_sha256: str) -> Mapping[str, Any]:
     """Pin the deployed VM build and the nine-key limits hash it mints with, right after ``run_start``.
 
     The digest is recomputed here from the commit and the file map, never taken from the caller, so the record the
@@ -1290,7 +1289,7 @@ def assemble(
     pins: PinsPort,
     ports: RunnerPorts,
     health: HealthPort,
-    build: BuildSource,
+    build: VmBuild,
     mint_limits_sha256: str,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     mint_timeout: timedelta = timedelta(seconds=10),
@@ -1321,7 +1320,6 @@ def assemble(
 
 
 __all__ = [
-    "BuildSource",
     "CloseReport",
     "DecideRefused",
     "DecideReport",
