@@ -12,7 +12,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
@@ -784,3 +784,119 @@ def test_unbound_india_paper_and_uk_paper_admissions_are_unchanged(tmp_path):
     for name in ("india_paper_buy", "india_paper_buy_slippage"):
         india = _GOLDEN[name]["evidence"]["india"]
         assert not {"preflight", "slippage_reference", "slippage_denied_by"} & set(india)
+
+
+# --- 64-05 Task 2b: the quote pin is written on the intent record itself -----------------------------------------------
+
+
+class _ListEvidence:
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    def append(self, kind: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        self.records.append({"kind": kind, **payload})
+        return payload
+
+
+class _TimedOutMint:
+    async def mint(self, request):
+        raise asyncio.TimeoutError
+
+
+def _prep_with(rig: Rig, evidence: _ListEvidence):
+    from shadow_india.admission import ShadowPreparation
+
+    return ShadowPreparation(
+        run_id=RUN_ID, adapter=rig.adapter, evidence=evidence, mint=_TimedOutMint(), audit=None, clock=lambda: NOW
+    )
+
+
+def _prepare_pinned(rig: Rig, evidence: _ListEvidence, readings, proposal: str = "p"):
+    return run(
+        _prep_with(rig, evidence).prepare(
+            session_id="s-1", signal_id=proposal, leg="entry", symbol=SYMBOL, side="BUY", quantity=2,
+            limit_price="100.00", samples=readings,
+        )
+    )
+
+
+def test_the_pin_is_the_sample_admission_was_given_whatever_order_the_readings_arrive_in(tmp_path, monkeypatch):
+    rig = make_rig(tmp_path, simulator=FixedFill("100.00"))
+    try:
+        seen: list[Any] = []
+        original = rig.adapter.service.prepare
+
+        def spy(intent, **kwargs):
+            seen.append(kwargs["india_quote"])
+            return original(intent, **kwargs)
+
+        monkeypatch.setattr(rig.adapter.service, "prepare", spy)
+        chronological = samples(NOW)
+        rotated = [chronological[1], chronological[2], chronological[0]]  # the newest is neither first nor last
+        evidence = _ListEvidence()
+        result = _prepare_pinned(rig, evidence, rotated)
+        assert result.status == "mint_unresolved"
+        intent = next(r for r in evidence.records if r["kind"] == "intent")
+        newest = chronological[2]
+        quote = newest.evidence.quote
+        assert seen == [newest.evidence]  # what the guard was given is the newest by fetched_at
+        assert intent["quote_raw_sha256"] == newest.raw_sha256 == sha("raw-2")
+        assert (intent["quote_ltp"], intent["quote_series"], intent["quote_session_date"]) == (
+            str(quote.ltp), quote.series, quote.session_date.isoformat(),
+        )
+        assert (intent["quote_lower_circuit"], intent["quote_upper_circuit"], intent["quote_previous_close"]) == (
+            str(quote.lower_circuit), str(quote.upper_circuit), str(quote.previous_close),
+        )
+        assert intent["tick_reference"] == str(quote.tick_reference)
+    finally:
+        rig.close()
+
+
+def test_the_pin_rides_the_same_append_as_the_intent_and_validates_against_the_schema(tmp_path):
+    from shadow_india.evidence import QUOTE_PIN_FIELDS, validate_payload
+
+    rig = make_rig(tmp_path, simulator=FixedFill("100.00"))
+    try:
+        evidence = _ListEvidence()
+        _prepare_pinned(rig, evidence, samples(NOW))
+        kinds = [r["kind"] for r in evidence.records]
+        assert kinds[0] == "intent" and "quote_pin" not in kinds  # no second record kind
+        intent = evidence.records[0]
+        assert set(QUOTE_PIN_FIELDS) <= set(intent)
+        validate_payload("intent", {k: v for k, v in intent.items() if k != "kind"})
+    finally:
+        rig.close()
+
+
+def test_a_missing_tick_reference_is_written_as_a_null_not_dropped(tmp_path):
+    rig = make_rig(tmp_path, simulator=FixedFill("100.00"))
+    try:
+        readings = samples(NOW)
+        newest = readings[-1]
+        readings[-1] = QuoteSample(
+            newest.raw_sha256, newest.fetched_at, newest.bid, newest.ask,
+            make_evidence(
+                observed_at=newest.fetched_at, bid=newest.bid, ask=newest.ask, tick_reference=None,
+                tick_reference_month=None,
+            ),
+        )
+        evidence = _ListEvidence()
+        _prepare_pinned(rig, evidence, readings)
+        intent = evidence.records[0]
+        assert "tick_reference" in intent and intent["tick_reference"] is None
+    finally:
+        rig.close()
+
+
+def test_with_no_samples_no_pin_field_is_written_and_admission_denies(tmp_path):
+    from shadow_india.admission import quote_pin_fields
+
+    assert quote_pin_fields(None) == {}
+    rig = make_rig(tmp_path, simulator=FixedFill("100.00"))
+    try:
+        evidence = _ListEvidence()
+        result = _prepare_pinned(rig, evidence, [])
+        assert result.status == "denied"
+        assert not any(k.startswith("quote_") or k == "tick_reference" for k in evidence.records[0])
+    finally:
+        rig.close()

@@ -102,13 +102,28 @@ class WitnessMismatch(EvidenceError):
 
 # --- record schemas (D-04) -------------------------------------------------------------------------
 
-# Field types: id, code, text, symbol, isin, series, date, iso, dec, sha, int, bool, codes, ints.
+# Field types: id, code, text, symbol, isin, series, date, iso, dec, sha, int, bool, codes, ints, plus the 64-05 Task 2b
+# types ``commit`` (40 lowercase hex), ``file_sha_map`` (1 to 64 ``orders/``-relative paths to sha256 hex) and
+# ``dec_or_null`` (a decimal string or JSON null: a present null is a recorded "no tick reference", not a missing key).
 _HASHES = {
     name: "sha"
     for name in (
         "strategy_sha256", "params_sha256", "dataset_sha256", "universe_sha256", "band_sha256",
         "tick_sha256", "limits_sha256", "cost_sha256", "scenario_sha256",
     )
+}
+
+# 64-05 Task 2b: the quote the admission used, pinned on the ``intent`` record itself (one append, so a crash cannot leave
+# an intent without its pin). All eight are present or none is.
+QUOTE_PIN_FIELDS: dict[str, str] = {
+    "quote_ltp": "dec",
+    "quote_lower_circuit": "dec",
+    "quote_upper_circuit": "dec",
+    "quote_previous_close": "dec",
+    "quote_series": "series",
+    "quote_session_date": "date",
+    "tick_reference": "dec_or_null",
+    "quote_raw_sha256": "sha",
 }
 
 SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
@@ -122,7 +137,7 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     "intent": (
         {"intent_id": "id", "signal_id": "id", "leg": "id", "intent_sha256": "sha", "symbol": "symbol",
          "side": "code", "quantity": "dec", "limit_price": "dec"},
-        {"isin": "isin", "series": "series", "reference_quote": "dec", "reason": "text"},
+        {"isin": "isin", "series": "series", "reference_quote": "dec", "reason": "text", **QUOTE_PIN_FIELDS},
     ),
     "admission": (
         {"intent_id": "id", "decision": "code", "reason_code": "code"},
@@ -171,7 +186,7 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     "stop_open_report": ({"as_of_date": "date", "isins": "codes", "buys_blocked": "bool"}, {}),
     "run_ended": ({"event": "code", "reason": "text"}, {}),
     "latch": ({"latch": "code", "scope": "code", "reason": "code"}, {}),
-    "pause": ({"event": "code", "scope": "code", "reason": "text"}, {}),
+    "pause": ({"event": "code", "scope": "code", "reason": "text"}, {"finding_seq": "int"}),
     "abort": ({"event": "code", "reason": "text"}, {}),
     "resume": ({"reason": "text", "cleared_pause_seqs": "ints"}, {}),
     "session_close": ({"outcome": "code"}, {"record_count": "int"}),
@@ -182,6 +197,19 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
         {"run_start_session": "date", "audit_base_seq": "int", "audit_base_sha256": "sha", "window_start": "date"}, {}
     ),
     "vm_intent": ({"intent_id": "id", "vm_intent_id": "id", "vm_intent_sha256": "sha"}, {}),
+    # 64-05 Task 2b: the VM build the Mac saw this session, and the nine-key limits hash it mints with (the replay needs
+    # both). ``digest`` is recomputed by the writer; this validator checks shape only.
+    "vm_build": (
+        {"commit": "commit", "orders_sha256": "file_sha_map", "digest": "sha", "mint_limits_sha256": "sha"}, {}
+    ),
+    # The D-23 verdict of one replayed session, and the defects that came with it. Hashes and codes only.
+    "vm_replay": (
+        {"verdict": "code", "build_commit": "commit", "build_digest": "sha", "limits_sha256": "sha",
+         "mint_limits_sha256": "sha", "intents_compared": "int", "no_intents": "bool"},
+        {"divergence_reasons": "codes", "divergent_intent_id": "id", "defects": "codes"},
+    ),
+    # ``finding_seq`` is the ``seq`` of the ``vm_replay`` record that owes this defect (and the pause above, when it is the replay's).
+    "replay_defect": ({"code": "code", "detail": "code"}, {"finding_seq": "int"}),
 }
 RECORD_KINDS = frozenset(SCHEMAS)
 # After an abort only these may still be written: a further cause, and the close that prints the witness.
@@ -201,7 +229,25 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+_COMMIT = re.compile(r"^[0-9a-f]{40}\Z")
+_ORDERS_PATH = re.compile(r"^[a-z0-9_][a-z0-9_./-]{0,95}\Z")
+FILE_MAP_MAX = 64
+
+
+def _valid_orders_path(path: str) -> bool:
+    return bool(_ORDERS_PATH.match(path)) and ".." not in path.split("/")
+
+
 def _check_type(kind: str, value: Any) -> bool:
+    if kind == "dec_or_null" and value is None:
+        return True
+    if kind == "file_sha_map":
+        return (
+            isinstance(value, dict)
+            and 1 <= len(value) <= FILE_MAP_MAX
+            and all(isinstance(k, str) and _valid_orders_path(k) for k in value)
+            and all(isinstance(v, str) and _HEX64.match(v) for v in value.values())
+        )
     if kind == "int":
         return _is_int(value)
     if kind == "bool":
@@ -236,7 +282,9 @@ def _check_type(kind: str, value: Any) -> bool:
             return datetime.fromisoformat(value).tzinfo is not None
         except ValueError:
             return False
-    if kind == "dec":
+    if kind == "commit":
+        return bool(_COMMIT.match(value))
+    if kind in ("dec", "dec_or_null"):
         try:
             return bool(_DEC.match(value)) and Decimal(value).is_finite()
         except InvalidOperation:
@@ -327,6 +375,10 @@ def validate_payload(kind: str, payload: Mapping[str, Any], *, forbidden: Sequen
             raise EvidenceRefused("missing_field")
     for name, value in body.items():
         if not _check_type(allowed[name], value):
+            raise EvidenceRefused("bad_field")
+    if kind == "intent":
+        pinned = set(QUOTE_PIN_FIELDS) & set(body)
+        if pinned and pinned != set(QUOTE_PIN_FIELDS):  # all eight or none: a present null tick stays distinct from a missing key
             raise EvidenceRefused("bad_field")
     return body
 
@@ -927,8 +979,10 @@ __all__ = [
     "EvidenceError",
     "EvidenceRefused",
     "EvidenceStore",
+    "FILE_MAP_MAX",
     "GENESIS",
     "IST",
+    "QUOTE_PIN_FIELDS",
     "RECORD_KINDS",
     "RunManifest",
     "SCHEMAS",

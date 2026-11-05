@@ -36,6 +36,8 @@ from test_shadow_india_runner import AS_OF as _RUNNER_AS_OF  # noqa: F401  (docu
 from test_shadow_india_runner import S, Clock, Script, Vm
 
 UTC = timezone.utc
+
+
 SESSION = S  # 2026-10-22, inside the VM fixtures' October 2026
 AS_OF = cc.D5  # the data session the reference prices are read for (the 2025 seeded store)
 WINDOW_START = cc.START  # 2025-03-03
@@ -244,7 +246,9 @@ class Env:
         return state_path_for(self.ledger_path())
 
 
-def build_env(tmp: Path, seeded: dict[str, Any], metadata: Any, *, calendar_sha: Optional[str] = None) -> Env:
+def build_env(
+    tmp: Path, seeded: dict[str, Any], metadata: Any, *, calendar_sha: Optional[str] = None, stamped: bool = True
+) -> Env:
     session_store = tmp / "session"
     shutil.copytree(seeded["session"], session_store)
     dataset_copy = tmp / "datasets" / Path(seeded["dataset"]).name  # the directory name is the manifest hash
@@ -269,7 +273,7 @@ def build_env(tmp: Path, seeded: dict[str, Any], metadata: Any, *, calendar_sha:
         "simulation_root": str(sim), "window_start": WINDOW_START.isoformat(), "vm_key_id": KEY_ID,
     })
     clock = Clock()
-    vm = Vm(tmp, metadata)
+    vm = Vm(tmp, metadata, stamped=stamped)
     reads = ReadScript(clock)
     proxy = ProxyClient(vm.client, reads)
     link = RelayLink.of(proxy)

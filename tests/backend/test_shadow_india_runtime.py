@@ -26,7 +26,14 @@ import shadow_india.runner as runner_module
 import test_pilot_data_crosscheck as cc
 import test_shadow_india_release_cli as rc
 from brokers.breeze_gateway.config import ConfigError
-from brokers.breeze_gateway.errors import TunnelError, UpstreamError
+from brokers.breeze_gateway.errors import (
+    OrdersBuildInvalid,
+    OrdersBuildRouteUnavailable,
+    OrdersBuildUnstamped,
+    TunnelError,
+    UpstreamError,
+)
+from brokers.breeze_gateway.orders import OrdersClient, OrdersProtocolError
 from execution.ledger import ExecutionLedger, SimulationProbeRefused, probe_simulation_ledger
 from execution.models import Workspace
 from pilot_data.store import DB_FILE_NAME, PilotDataStore
@@ -38,9 +45,11 @@ from shadow_india.evidence import LOG_NAME, TORN_DIR, EvidenceStore, read_record
 from shadow_india.portfolio import Instrument, PortfolioError
 from shadow_runtime_support import (
     AS_OF, CANBK_CODE, CANBK_ISIN, CANBK_SYMBOL, FORBIDDEN, KEY_ID, RUN, SESSION, STEADY_CODE, STEADY_ISIN,
-    STEADY_SYMBOL, WINDOW_START, build_env, build_seeded, calendar_doc, evaluated, master_zip, sha, tree_state, write_json,
+    STEADY_SYMBOL, WINDOW_START, build_env, build_seeded, calendar_doc, evaluated, master_zip, sha,
+    tree_state, write_json,
 )
 from test_gateway_orders_key import swap_key
+from test_shadow_india_runner import BUILD
 from test_gateway_orders_routes import OTHER
 from test_shadow_india_admission import frozen_service_clock as admission_clock  # noqa: F401  (fixture)
 from test_shadow_india_release_cli import planted, world  # noqa: F401  (fixtures for the re-run rows)
@@ -211,7 +220,7 @@ def test_the_runtime_only_reaches_the_read_routes_and_the_mint(env, capsys):
     go(env, capsys, "decide")
     go(env, capsys, "close")
     gets = {path for method, path in env.vm.http.calls if method == "GET"}
-    assert gets <= {"/v1/orders/audit", "/v1/orders/key"}  # the VM leg; the four read routes are scripted above it
+    assert gets <= {"/v1/orders/audit", "/v1/orders/build", "/v1/orders/key"}  # the VM leg; the four read routes are scripted above it
     assert set(env.reads.paths) <= {"/v1/health", "/v1/quotes", "/v1/security-master", "/v1/bars/daily"}
     assert {(m, p) for m, p in env.vm.http.calls if m != "GET"} == {("POST", "/v1/orders/intents")}
     banned = ("authorize", "halt", "preview", "login", "session", "touch")
@@ -1121,3 +1130,137 @@ def test_every_resume_record_of_a_release_is_appended_from_the_portfolio_and_nev
     code, out = rc.action(world)
     assert code == 0 and out["released"] == "corporate_action"
     assert callers and set(callers) <= {"portfolio.py", "policy.py"} and "__main__.py" not in callers
+
+
+# --- 64-05 Task 2b: the deployed VM build is read in phase 2 and pinned in evidence ------------------------------------
+
+
+def _raising(error):
+    def read(self):
+        raise error
+
+    return read
+
+
+# What the client raises for each way the build read can fail, built from the real error classes. The route being
+# missing, a body the client refuses, a relay failure and an unstamped deploy are Stage 1's own errors; the last row is a
+# reply whose digest does not recompute, which the client would refuse first and the runtime checks again.
+BUILD_FAILURES = [
+    ("route_unavailable", _raising(OrdersBuildRouteUnavailable("NOT_FOUND", http_status=404, reason="route_unavailable")),
+     "vm_build_unavailable"),
+    ("invalid_body", _raising(OrdersBuildInvalid(reason="digest_mismatch")), "vm_build_unavailable"),
+    ("relay_error", _raising(UpstreamError()), "vm_build_unavailable"),
+    ("protocol_error", _raising(OrdersProtocolError("bad_field")), "vm_build_unavailable"),
+    ("unstamped", _raising(OrdersBuildUnstamped("ORDERS_UNAVAILABLE", http_status=503, reason="build_unstamped")),
+     "vm_build_unstamped"),
+    ("digest_does_not_recompute", lambda self: replace(BUILD, digest=sha("lie")), "vm_build_digest_mismatch"),
+]
+
+
+def _break_build_read(monkeypatch, reader):
+    monkeypatch.setattr(OrdersClient, "current_build", reader)
+
+
+@pytest.mark.parametrize(("name", "reader", "code"), BUILD_FAILURES, ids=[row[0] for row in BUILD_FAILURES])
+def test_a_failed_build_read_refuses_open_run_with_nothing_opened_or_written(env, capsys, spies, monkeypatch, name, reader, code):
+    _break_build_read(monkeypatch, reader)
+    before = everything(env)
+    exit_code, out = go(env, capsys, "open-run")
+    assert (exit_code, out) == (EXIT_REFUSED, {"refused": code})
+    assert everything(env) == before and spies.writable_opens == 0  # evidence, ledger and store byte-identical
+    assert not env.root.exists() or not (env.root / RUN).exists()
+
+
+@pytest.mark.parametrize(("name", "reader", "code"), BUILD_FAILURES, ids=[row[0] for row in BUILD_FAILURES])
+def test_a_failed_build_read_refuses_decide_with_nothing_opened_or_written(env, capsys, spies, monkeypatch, name, reader, code):
+    opened(env, capsys)
+    spies.clear()
+    _break_build_read(monkeypatch, reader)
+    before, calls = everything(env), len(env.vm.http.calls)
+    exit_code, out = go(env, capsys, "decide")
+    assert (exit_code, out) == (EXIT_REFUSED, {"refused": code})
+    assert everything(env) == before and spies.writable_opens == 0
+    assert env.vm.http.order_calls() == [] and calls <= len(env.vm.http.calls)
+
+
+def test_a_vm_with_no_commit_stamp_refuses_open_run_through_the_real_route(tmp_path, seeded, metadata, monkeypatch, capsys):  # noqa: F811
+    """End to end, no stub: the in-process VM has no ``BUILD_COMMIT``, its real route answers 503 ``build_unstamped``."""
+    unstamped = build_env(tmp_path, seeded, metadata, stamped=False)
+    unstamped.script.result = evaluated("CANBK", "STEADYCO")
+    monkeypatch.setattr(runner_module, "evaluate_session", unstamped.script)
+    before = everything(unstamped)
+    exit_code, out = go(unstamped, capsys, "open-run")
+    assert (exit_code, out) == (EXIT_REFUSED, {"refused": "vm_build_unstamped"})
+    assert everything(unstamped) == before
+
+
+def _set_collar(env, collar):
+    path = env.private / "india" / "execution.json"
+    body = json.loads(path.read_text())
+    path.write_text(json.dumps({**body, "fat_finger_collar": collar}))
+
+
+def _pin_of(env):
+    return [r for r in read_records(env.root, RUN) if r["kind"] == "vm_build"][0]
+
+
+def _nine_key(env):
+    from private_config.loader import load_workspace_config
+    from risk_india.state import limits_from_config
+
+    return limits_from_config(load_workspace_config(env.private, "india", require_india_execution=True)).sha256
+
+
+def test_the_open_run_pin_is_the_nine_key_hash_with_the_collar_and_not_the_file_hash(env, capsys):
+    _set_collar(env, "0.0314")  # the collar exists only in execution.json
+    opened(env, capsys)
+    manifest = EvidenceStore.open(env.root, run_id=RUN, session_id=runtime_module.session_id_for(SESSION)).manifest
+    assert _pin_of(env)["mint_limits_sha256"] == _nine_key(env)
+    assert _pin_of(env)["mint_limits_sha256"] != manifest.hashes["limits_sha256"]  # the IndiaLimits file hash has no collar
+
+
+def test_the_pin_moves_with_the_collar(env, capsys, tmp_path):
+    first = _nine_key(env)
+    _set_collar(env, "0.0314")
+    assert _nine_key(env) != first  # a pin that ignored the collar would not move
+
+
+def test_the_first_decide_on_the_same_config_compares_equal_to_the_open_run_pin(env, capsys):
+    opened(env, capsys)
+    assert _pin_of(env)["mint_limits_sha256"] == _nine_key(env)
+    code, decided = go(env, capsys, "decide")
+    assert code == 0 and decided["status"] == "done", decided  # equal: no vm_build_changed
+    assert [r for r in read_records(env.root, RUN) if r["kind"] == "pause"] == []
+
+
+def test_a_collar_edited_after_open_run_pauses_the_next_decide_before_it_writes(env, capsys):
+    opened(env, capsys)
+    _set_collar(env, "0.0415")
+    before = len(read_records(env.root, RUN))
+    code, decided = go(env, capsys, "decide")
+    assert code == 0 and (decided["status"], decided["stopped"]) == ("paused", "vm_build_changed")
+    after = read_records(env.root, RUN)[before:]
+    assert [r["kind"] for r in after] == ["pause"] and after[0]["event"] == "vm_build_changed"
+
+
+def test_open_run_builds_no_admission_guard_and_no_latch(env, capsys, monkeypatch):
+    import risk_india.state as state_module
+
+    guards, latches = [], []
+    real_from_config = runtime_module.IndiaAdmissionGuard.from_config.__func__
+
+    def guard_spy(cls, *args, **kwargs):
+        guards.append(1)
+        return real_from_config(cls, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_module.IndiaAdmissionGuard, "from_config", classmethod(guard_spy))
+    real_init = state_module.LatchStore.__init__
+
+    def latch_spy(self, *args, **kwargs):
+        latches.append(1)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(state_module.LatchStore, "__init__", latch_spy)
+    opened(env, capsys)
+    assert guards == [] and latches == []
+    assert not env.latch_path().exists()  # nothing touched the latch file

@@ -1,6 +1,8 @@
 """Operator commands for the shadow runner: ``python -m shadow_india <command>``.
 
-``status`` reads the evidence of one run and builds no runtime. ``open-run``, ``decide``, ``close`` and ``hand-flatten``
+``status`` reads the evidence of one run and builds no runtime. ``vm-replay`` (64-05 Task 2b) is the D-23 replay: it builds no
+runtime, no relay link and no HTTP client, loads the limits only from ``--private-dir`` and writes only ``vm_replay`` and
+``replay_defect`` records (and ``64-VM-REPLAY.md`` under ``--out-dir``, when given). ``open-run``, ``decide``, ``close`` and ``hand-flatten``
 build the production runtime (``runtime.production_runtime``: a read-only preflight, a relay activation with the VM key
 check, then the writable opens); ``resume``, ``release-halt`` and ``release-corporate-action`` build the release runtime
 (``runtime.release_runtime``: the same preflight with no relay and no calendar, then the portfolio only). Both are reached
@@ -28,14 +30,19 @@ import json
 import re
 import sys
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Callable, Collection, Optional, Sequence, TextIO
 
 from brokers.breeze_gateway.errors import RelayError
 
 from market_data.models import is_valid_isin
-from risk_india.state import StateUnreadable, read_state
+from pilot_data.core import canonical_sha256
+from private_config.errors import PrivateConfigError
+from private_config.loader import load_workspace_config
+from risk_india.rules import RiskConfigError
+from risk_india.state import StateUnreadable, limit_fields_from_config, read_state
 
-from . import policy, vm_codes
+from . import policy, vm_codes, vm_replay
 from . import runtime as runtime_module
 from .evidence import EvidenceCorrupt, EvidenceError, EvidenceStore, read_records, validate_payload
 from .portfolio import PortfolioAborted, PortfolioError, ShadowPortfolio
@@ -49,6 +56,7 @@ from .runtime import (
 from .runner import (
     DecideRefused,
     OpenRunRefused,
+    ReplayEnforcementSink,
     ShadowRunner,
     session_id_for,
 )
@@ -58,6 +66,8 @@ EXIT_REFUSED = 1
 EXIT_USAGE = 2
 EXIT_ABORTED = 3
 NOT_WIRED = "production_runtime_not_wired"
+REPLAY_COMMAND = "vm-replay"
+REPLAY_REPORT = "64-VM-REPLAY.md"
 RELEASE_COMMANDS = ("release-halt", "release-corporate-action")
 # An operator name written to the latch: lowercase ASCII, short. ``\Z`` so a trailing newline does not pass.
 _ACTOR = re.compile(r"[a-z][a-z0-9_.-]{0,31}\Z")
@@ -65,6 +75,14 @@ _ACTOR = re.compile(r"[a-z][a-z0-9_.-]{0,31}\Z")
 
 class RuntimeNotWired(Exception):
     pass
+
+
+class ReplayCommandRefused(Exception):
+    """``vm-replay`` refused from its arguments or the private config, before any evidence is written."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class ReleaseRefused(Exception):
@@ -120,6 +138,23 @@ def _parser() -> argparse.ArgumentParser:
                 "--pause-seq", type=int, action="append", dest="pause_seq", metavar="N",
                 help="clear only this open pause (repeatable); without it every pause `resume` may clear is cleared",
             )
+    replay = sub.add_parser(REPLAY_COMMAND, help="D-23: replay the recorded sessions through the recorded VM build")
+    replay.add_argument("--root", required=True, help="evidence root (outside the repository)")
+    replay.add_argument("--run-id", required=True)
+    which = replay.add_mutually_exclusive_group(required=True)
+    which.add_argument("--session", type=_day, help="replay this closed session, YYYY-MM-DD")
+    which.add_argument("--all", action="store_true", dest="all_sessions", help="replay every decide day of the run")
+    replay.add_argument(
+        "--vm-source", required=True,
+        help="a checkout of the recorded VM build: its gateway/vm directory (a detached worktree at the deployed commit)",
+    )
+    replay.add_argument(
+        "--private-dir", default=None,
+        help="private/ directory holding the india/ config files; the limits are read only from here",
+    )
+    replay.add_argument(
+        "--out-dir", default=None, help="only with --all: write 64-VM-REPLAY.md here (nothing is written without it)"
+    )
     return parser
 
 
@@ -299,6 +334,105 @@ def _release(
     }
 
 
+class EvidenceReplaySink(ReplayEnforcementSink):
+    """The replay's sink over the evidence store and the policy table: hashes, counts and closed codes only."""
+
+    def record_session(self, result: vm_replay.SessionReplay) -> int:
+        body: dict[str, Any] = {
+            "session_id": result.session_id, "verdict": result.verdict, "build_commit": result.build_commit,
+            "build_digest": result.build_digest, "limits_sha256": result.limits_sha256,
+            "mint_limits_sha256": result.mint_limits_sha256, "intents_compared": result.intents_compared,
+            "no_intents": result.no_intents,
+        }
+        if result.divergences:
+            body["divergence_reasons"] = [d.reason for d in result.divergences]
+            body["divergent_intent_id"] = result.divergences[0].intent_id
+        if result.defects:
+            body["defects"] = list(result.defects)
+        return int(self._store.append("vm_replay", body)["seq"])  # the finding every defect and pause of it links to
+
+
+def _replay_limits(private_dir: Any) -> vm_replay.ReplayLimits:
+    """The nine P-06 keys and the IndiaLimits file hash, from ``private_dir`` alone (no default, no environment)."""
+
+    if private_dir is None:
+        raise ReplayCommandRefused("private_dir_required")
+    try:
+        config = load_workspace_config(private_dir, "india", require_india_execution=True)
+        fields = limit_fields_from_config(config)
+    except PrivateConfigError as error:
+        raise ReplayCommandRefused(f"execution_config_refused:{error.code}") from None
+    except RiskConfigError:
+        raise ReplayCommandRefused("limits_config_refused") from None
+    return vm_replay.ReplayLimits(fields=fields, file_sha256=canonical_sha256(config.limits.model_dump(mode="json")))
+
+
+def _replay_command(
+    args: argparse.Namespace, forbidden_source: Optional[Callable[[argparse.Namespace], Sequence[str]]], out: TextIO
+) -> int:
+    literals = _forbidden_literals(args, forbidden_source)  # no registered source: refused before anything is read
+    records = read_records(args.root, args.run_id)  # read-only: the store is opened only once a replay will write
+    if policy.state_from_records(records).aborted:  # appends would raise EvidenceAborted: print the stored verdict, write nothing
+        _report(args, vm_replay.recorded_run_verdict(records), out, {"aborted": "run_aborted"})
+        return EXIT_ABORTED
+    decide_days = vm_replay.replay_sessions(records)
+    if args.all_sessions and not decide_days:  # nothing to replay and nothing to write: the verdict is replay_day_missing
+        return _finish_all(args, vm_replay.recorded_run_verdict(records), out)
+    session_id = decide_days[-1] if args.all_sessions else session_id_for(args.session)
+    if session_id not in decide_days:  # refused before the store is opened: the open-run day and operator days are not replayed
+        _print(out, {"refused": vm_replay.NOT_DECIDE_DAY})
+        return EXIT_REFUSED
+    store = EvidenceStore.open(args.root, run_id=args.run_id, session_id=session_id, forbidden=literals)
+    sink = EvidenceReplaySink(store)
+    # Stored FAILs are finished from the evidence alone, before the private config can refuse (Terra #646 r4).
+    vm_replay.complete_stored(store.records(), decide_days if args.all_sessions else (session_id,), sink)
+    limits = _replay_limits(args.private_dir)
+    manifest_hashes = dict(store.manifest.hashes)
+    vm_source = Path(args.vm_source)
+    if not args.all_sessions:
+        try:
+            result = vm_replay.replay_session(
+                store.records(), run_id=args.run_id, session_id=session_id, limits=limits,
+                manifest_hashes=manifest_hashes, vm_source=vm_source, sink=sink,
+            )
+        except vm_replay.ReplayRefused as exc:
+            _print(out, {"refused": exc.code})
+            return EXIT_REFUSED
+        _print(out, {
+            "session": result.session_id, "verdict": result.verdict, "build_commit": result.build_commit,
+            "build_digest": result.build_digest, "limits_sha256": result.limits_sha256,
+            "mint_limits_sha256": result.mint_limits_sha256, "intents_compared": result.intents_compared,
+            "divergences": [{"intent_id": d.intent_id, "reason": d.reason} for d in result.divergences],
+            "defects": list(result.defects), "already_recorded": result.already_recorded,
+        })
+        return EXIT_OK if result.verdict == vm_replay.PASS else EXIT_REFUSED
+    run = vm_replay.replay_run(
+        store.records(), run_id=args.run_id, limits=limits, manifest_hashes=manifest_hashes, vm_source=vm_source,
+        sink=sink,
+    )
+    return _finish_all(args, vm_replay.recorded_run_verdict(store.records(), run.refused), out)
+
+
+def _report(args: argparse.Namespace, recorded: vm_replay.RunReplay, out: TextIO, extra: Optional[dict[str, Any]] = None) -> None:
+    """Print the recorded D-23 verdict and, only with ``--out-dir``, write the report file."""
+
+    if args.out_dir is not None:
+        target = Path(args.out_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / REPLAY_REPORT).write_text(vm_replay.render_report(recorded), encoding="utf-8")
+    _print(out, {
+        **(extra or {}),
+        "run": recorded.run_id, "verdict": recorded.verdict, "reasons": list(recorded.reasons),
+        "sessions": len(recorded.sessions), "build_digests": list(recorded.build_digests),
+        "refused": dict(sorted(recorded.refused.items())), "not_replayed": list(recorded.not_replayed),
+    })
+
+
+def _finish_all(args: argparse.Namespace, recorded: vm_replay.RunReplay, out: TextIO) -> int:
+    _report(args, recorded, out)
+    return EXIT_OK if recorded.verdict == vm_replay.PASS else EXIT_REFUSED
+
+
 def _shutdown(runtime: Any) -> None:
     """Release what a runtime holds (the ledger writer, the stores, the link). Not ``close``: a runner's own ``close`` is
     the session close."""
@@ -330,7 +464,10 @@ def main(
 ) -> int:
     out = out or sys.stdout
     try:
-        args = _parser().parse_args(argv)
+        parser = _parser()
+        args = parser.parse_args(argv)
+        if args.command == REPLAY_COMMAND and args.out_dir is not None and not args.all_sessions:
+            parser.error("--out-dir is only valid with --all")  # not silently ignored: usage error, exit 2
     except SystemExit as exc:
         return EXIT_USAGE if exc.code else EXIT_OK
     args.forbidden_source = forbidden_source  # the runtime's own preflight reads the literals through the same seam
@@ -339,6 +476,8 @@ def main(
         if args.command == "resume":
             _print(out, _resume_command(args, runtime_factory, forbidden_source))
             return EXIT_OK
+        if args.command == REPLAY_COMMAND:
+            return _replay_command(args, forbidden_source, out)
         if args.command == "status":
             store = EvidenceStore.open(
                 args.root, run_id=args.run_id, session_id=session_id_for(args.session),
@@ -392,7 +531,7 @@ def main(
     except PortfolioError as exc:
         _print(out, {"refused": exc.code})
         return EXIT_REFUSED
-    except (DecideRefused, OpenRunRefused, ReleaseRefused, policy.PolicyError) as exc:
+    except (DecideRefused, OpenRunRefused, ReleaseRefused, ReplayCommandRefused, policy.PolicyError) as exc:
         _print(out, {"refused": exc.code})
         return EXIT_ABORTED if exc.code == "run_aborted" else EXIT_REFUSED
     except policy.RunAborted:

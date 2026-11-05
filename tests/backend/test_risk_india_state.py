@@ -29,6 +29,7 @@ from risk_india.state import (
     StateUnwritable,
     decode_state,
     encode_state,
+    limit_fields_from_config,
     limits_from_config,
     read_state,
     serialize_state,
@@ -478,3 +479,62 @@ def test_the_serialised_state_has_no_float_and_a_stable_byte_form(tmp_path, limi
     assert serialize_state(state) == serialize_state(decode_state(encode_state(state)))
     # Decimals are strings: the only JSON numbers in the file are whole-share integers.
     assert b'"peak":"1000.00"' in serialize_state(state)
+
+
+# --- 64-05 Task 2b: one nine-key builder, and the collar is part of the hash -----------------------------------------
+
+
+def _config_with_collar(tmp_path, collar):
+    root = tmp_path / f"collar-{collar}"
+    root.mkdir(exist_ok=True)
+    private = ils.india_private_dir(root, collar=collar)
+    return load_workspace_config(private, "india", require_india_execution=True)
+
+
+def _guard_for(tmp_path, config, name):
+    from types import SimpleNamespace
+
+    from execution.india_guard import IndiaAdmissionGuard
+
+    ledger = SimpleNamespace(path=tmp_path / f"{name}.sqlite3", has_fills=lambda: False)
+    return IndiaAdmissionGuard.from_config(config, ledger)
+
+
+def test_the_collar_moves_both_the_guards_hash_and_the_builders_and_they_agree(tmp_path):
+    from risk_india.rules import Limits
+
+    first = _config_with_collar(tmp_path, "0.02")
+    second = _config_with_collar(tmp_path, "0.0314")  # only execution.json's collar differs
+    assert first.limits.model_dump() == second.limits.model_dump()
+    guard_hashes, builder_hashes = [], []
+    for name, config in (("a", first), ("b", second)):
+        guard_hashes.append(_guard_for(tmp_path, config, name).limits_sha256)
+        builder_hashes.append(Limits.from_fields(limit_fields_from_config(config)).sha256)
+        assert guard_hashes[-1] == builder_hashes[-1]  # the guard and the builder agree for each config
+    assert guard_hashes[0] != guard_hashes[1] and builder_hashes[0] != builder_hashes[1]  # and each moves
+
+
+def test_the_builder_returns_exactly_the_nine_keys_and_limits_from_config_uses_it(tmp_path):
+    from risk_india.rules import Limits
+
+    config = _config_with_collar(tmp_path, "0.0314")
+    fields = limit_fields_from_config(config)
+    assert set(fields) == {
+        "schema_version", "workspace", "currency", "capital_cap", "per_position_cap", "drawdown_halt",
+        "drawdown_flatten", "position_stop", "fat_finger_collar",
+    }
+    assert fields["fat_finger_collar"] == "0.0314" and fields["workspace"] == "india" and fields["currency"] == "INR"
+    assert limits_from_config(config) == Limits.from_fields(fields)
+
+
+@pytest.mark.parametrize("missing", ["limits", "india_execution"])
+def test_the_builder_refuses_a_config_without_limits_or_execution(tmp_path, missing):
+    from types import SimpleNamespace
+
+    from risk_india.rules import RiskConfigError
+
+    config = _config_with_collar(tmp_path, "0.02")
+    partial = SimpleNamespace(limits=config.limits, india_execution=config.india_execution)
+    setattr(partial, missing, None)
+    with pytest.raises(RiskConfigError):
+        limit_fields_from_config(partial)

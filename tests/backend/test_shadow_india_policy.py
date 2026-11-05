@@ -86,6 +86,7 @@ P06_PAUSE_ALL = [
 ]
 ENTRIES_PAUSE = ["divergence_breach", "drawdown_halt"]
 RUN_END = ["drawdown_flatten_15"]
+REPLAY_PAUSE_ALL = ["vm_build_changed", "replay_divergence"]  # 64-05 Task 2b
 
 
 @pytest.mark.parametrize("event", D07_ABORT + P06_ABORT)
@@ -116,9 +117,21 @@ def test_the_minus_15_flatten_is_a_terminal_run_end_for_entries(event):
 def test_the_table_is_exactly_the_events_above_and_every_row_is_a_pause_an_abort_or_a_run_end():
     listed = set(
         D07_ABORT + P06_ABORT + D07_PAUSE_ISIN + D07_PAUSE_ALL + P06_PAUSE_ALL + ENTRIES_PAUSE + RUN_END
+        + REPLAY_PAUSE_ALL
     )
     assert set(POLICY) == listed
     assert {rule.action for rule in POLICY.values()} == {PAUSE, ABORT, policy.RUN_ENDED}
+
+
+@pytest.mark.parametrize("event", REPLAY_PAUSE_ALL)
+def test_the_build_and_replay_events_are_pauses_for_the_whole_run(event, tmp_path):
+    assert rule_for(event) == policy.Rule(PAUSE, policy.SCOPE_ALL)
+    store = make_store(tmp_path)
+    raise_event(store, event, "build_digest_differs_from_run_pin")
+    state = policy.run_state(store)
+    assert [(p.event, p.scope) for p in state.open_pauses] == [(event, policy.SCOPE_ALL)] and not state.aborted
+    cleared = policy.resume(store, "operator reviewed it")  # an ordinary pause: resume clears it, with a reason
+    assert cleared["cleared_pause_seqs"] and policy.run_state(store).open_pauses == ()
 
 
 def test_an_unclassified_event_raises_and_writes_nothing(tmp_path):

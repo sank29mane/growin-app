@@ -152,6 +152,11 @@ POLICY: Mapping[str, Rule] = {
     "contract_mismatch": _pause(SCOPE_ALL),
     "hash_mismatch": _pause(SCOPE_ALL),
     "divergence_breach": _pause(SCOPE_ENTRIES),
+    # 64-05 Task 2b: the VM build or the Mac's mint limits changed mid-run (a redeploy, a collar edit), or the D-23 replay
+    # found the VM and the Mac disagreeing on an intent. Both stop every step until `resume` with a reason. Clearing
+    # `replay_divergence` never changes the D-23 verdict: that reads the stored replay records, not the pause state.
+    "vm_build_changed": _pause(SCOPE_ALL),
+    "replay_divergence": _pause(SCOPE_ALL),
     # D-08: the -8% trailing drawdown halts buys (sells stay). `resume` refuses it; Task 2 adds the latch-backed release.
     DRAWDOWN_HALT: _pause(SCOPE_ENTRIES),
     # D-08: the -15% flatten ends the run. Terminal for buys; sells, booking, expiry and marks run until flat.
@@ -268,8 +273,14 @@ def run_state(store: EvidenceStore) -> RunState:
     return state_from_records(store.records())
 
 
-def raise_event(store: EvidenceStore, event: str, reason: str, *, isin: str | None = None) -> Mapping[str, Any]:
-    """Record the pause, abort or run end the table assigns to ``event`` and return the stored record."""
+def raise_event(
+    store: EvidenceStore, event: str, reason: str, *, isin: str | None = None, finding_seq: int | None = None
+) -> Mapping[str, Any]:
+    """Record the pause, abort or run end the table assigns to ``event`` and return the stored record.
+
+    ``finding_seq`` links a pause to the record that owes it (the replay's ``vm_replay`` finding), so "this finding
+    already paused the run" is readable from the evidence even after the pause was resumed. Only a pause carries it.
+    """
 
     rule = rule_for(event)
     if rule.action == ABORT:
@@ -282,7 +293,10 @@ def raise_event(store: EvidenceStore, event: str, reason: str, *, isin: str | No
         scope = f"{SCOPE_ISIN}:{isin}"
     else:
         scope = rule.scope
-    return store.append(PAUSE, {"event": event, "scope": scope, "reason": reason})
+    body: dict[str, Any] = {"event": event, "scope": scope, "reason": reason}
+    if finding_seq is not None:
+        body["finding_seq"] = finding_seq
+    return store.append(PAUSE, body)
 
 
 def ambiguous_exit_refusal(pause: OpenPause, ambiguous_isins: Collection[str] | None) -> str | None:

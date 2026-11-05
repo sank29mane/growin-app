@@ -11,9 +11,10 @@ Row names follow the 64-05 break-proof table: replay build hash, divergence, day
 from __future__ import annotations
 
 import ast
+import dataclasses
 import importlib.machinery
 import importlib.util
-import json
+import inspect
 import py_compile
 import shutil
 import socket
@@ -21,28 +22,34 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import pytest
 
 import shadow_india.vm_replay as vm_replay
-from shadow_india import vm_codes
+from shadow_india import policy, vm_codes
+from shadow_india.__main__ import EvidenceReplaySink
 from shadow_india.admission import deterministic_proposal_id
-from shadow_india.evidence import SCHEMAS, EvidenceStore, read_records
+from shadow_india.evidence import QUOTE_PIN_FIELDS, SCHEMAS, EvidenceStore, read_records
 from shadow_india.portfolio import exit_intent_id, exit_obligation_id
-from shadow_india.runner import LEG_ENTRY, LEG_EXIT, LEG_SWING
+from shadow_india.runner import LEG_ENTRY, LEG_EXIT, LEG_SWING, session_id_for
 from shadow_india.vm_replay import (
     BuildIdentity,
     MacVerdict,
+    ReplayLimits,
     ReplayRefused,
+    build_from_evidence,
     compare,
     load_recorded_build,
+    not_replayed_sessions,
     orders_tree_sha256,
-    parse_pins,
+    pins_from_evidence,
     read_git_commit,
+    recorded_run_verdict,
     render_report,
     replay_run,
     replay_session,
+    replay_sessions,
     run_verdict,
 )
 from test_shadow_india_purity import violations
@@ -55,9 +62,14 @@ IST = timezone(timedelta(hours=5, minutes=30))
 COMMIT = "c" * 40
 OTHER_COMMIT = "d" * 40
 RUN = "run-replay"
-S1, S2, S3 = "s-2026-10-27", "s-2026-10-28", "s-2026-10-29"
-DAYS = {S1: (2026, 10, 27), S2: (2026, 10, 28), S3: (2026, 10, 29)}  # Tuesday to Thursday
+S1, S2, S3 = (session_id_for(date(2026, 10, day)) for day in (27, 28, 29))  # the ids the runner and the CLI mint
+S0 = session_id_for(date(2026, 10, 26))
+DAYS = {S0: (2026, 10, 26), S1: (2026, 10, 27), S2: (2026, 10, 28), S3: (2026, 10, 29)}  # Tuesday to Thursday
 HASHES = {"strategy_sha256": "a" * 64, "params_sha256": "b" * 64}
+FILE_SHA = "5" * 64  # the IndiaLimits file hash: synthetic, in the manifest and on every signal
+MANIFEST_HASHES = {**HASHES, "limits_sha256": FILE_SHA}
+RAW_SHA = "9" * 64
+DELETE = object()
 
 # Fixture limits. Tests carry their own values (growin-execution-and-risk); these are not the pilot's.
 LIMITS = {
@@ -170,7 +182,7 @@ def limits_sha(vm: Path) -> str:
         built.close()
 
 
-# --- evidence and pins -----------------------------------------------------------------------------------------------
+# --- evidence ------------------------------------------------------------------------------------------------------
 
 
 class Clock:
@@ -186,18 +198,23 @@ def money(value: Decimal) -> str:
 
 
 class Scenario:
-    """Writes one run of evidence through the real store and the matching pins document."""
+    """Writes one run of evidence through the real store, as the runner and the admission writer would.
 
-    def __init__(self, tmp_path: Path, vm: Path, limits_sha: str) -> None:
+    Every session opens with a ``vm_build`` record (the build and the nine-key mint hash). Every ``intent`` record carries
+    the eight quote-pin fields in the same append. ``replay`` writes the ``session_close`` the replay requires.
+    """
+
+    def __init__(self, tmp_path: Path, vm: Path, mint_sha: str, file_sha: str = FILE_SHA) -> None:
         self.root = tmp_path / "evidence"
         self.vm = vm
-        self.limits_sha = limits_sha
-        self.limits = dict(LIMITS)
+        self.mint_sha = mint_sha  # the nine-key P-06 hash the Mac minted with
+        self.file_sha = file_sha  # the IndiaLimits file hash: the manifest's and the signals'
+        self.manifest = {**HASHES, "limits_sha256": file_sha}
+        self.limits = ReplayLimits(fields=dict(LIMITS), file_sha256=file_sha)
         self.identity = identity_of(vm)
         self.clock = Clock()
         self.stores: dict[str, EvidenceStore] = {}
-        self.pins: dict[str, dict[str, dict[str, Any]]] = {}
-        self.extra: dict[str, dict[str, Any]] = {}
+        self.closed: set[str] = set()
         self._booking = 0
         self._intent = 0
         self.use(S1)
@@ -207,13 +224,23 @@ class Scenario:
         self.clock.now = datetime(year, month, day, 9, 35, 0, tzinfo=IST)
         if session not in self.stores:
             if not self.stores:
-                self.stores[session] = EvidenceStore.create(
-                    self.root, run_id=RUN, run_class="qualifying", session_id=session, hashes=HASHES, clock=self.clock
+                store = EvidenceStore.create(
+                    self.root, run_id=RUN, run_class="qualifying", session_id=session, hashes=self.manifest, clock=self.clock
                 )
             else:
-                self.stores[session] = EvidenceStore.open(self.root, run_id=RUN, session_id=session, clock=self.clock)
-            self.pins[session] = {}
+                store = EvidenceStore.open(self.root, run_id=RUN, session_id=session, clock=self.clock)
+            self.stores[session] = store
+            store.append("vm_build", self.build_body())
         return self.stores[session]
+
+    def build_body(self) -> dict[str, Any]:
+        return {
+            "commit": self.identity.commit, "orders_sha256": dict(sorted(self.identity.orders_sha256.items())),
+            "digest": self.identity.digest, "mint_limits_sha256": self.mint_sha,
+        }
+
+    def limits_with(self, **changes: Any) -> ReplayLimits:
+        return ReplayLimits(fields={**LIMITS, **changes}, file_sha256=self.file_sha)
 
     def intent(
         self,
@@ -232,16 +259,19 @@ class Scenario:
         signal: bool | dict[str, Any] = True,
         symbol: str | None = None,
         extra: dict[str, Any] | None = None,
+        pin: dict[str, Any] | None = None,
         leg: str = LEG_ENTRY,
         signal_id: str | None = None,
     ) -> str:
         """One decision as ``AdmissionService.prepare`` records it: a ``signal`` record (the instrument and the limits
-        hash), then an ``intent`` with exactly the fields the writer emits. It carries no ``isin`` and no ``series``.
+        hash), then an ``intent`` with the fields the writer emits, the eight quote-pin fields among them.
 
-        ``signal=False`` writes no signal record, a dict overrides signal fields, ``extra`` adds intent fields.
+        ``signal=False`` writes no signal record, a dict overrides signal fields, ``extra`` adds intent fields and
+        ``pin`` overrides pin fields.
         """
 
         store = self.use(session)
+        self.closed.discard(session)
         year, month, day = DAYS[session]
         self.clock.now = datetime(year, month, day, 9, minute, 0, tzinfo=IST)
         self._intent += 1
@@ -253,15 +283,25 @@ class Scenario:
                 {
                     "signal_id": signal_id, "symbol": SYMBOL[isin], "isin": isin, "series": series, "as_of_date": "2026-10-26",
                     **{name: "f" * 64 for name in SIGNAL_HASHES},
-                    "limits_sha256": self.limits_sha,
+                    "limits_sha256": self.file_sha,
                     **(signal if isinstance(signal, dict) else {}),
                 },
             )
+        value = Decimal(price)
+        quote_ltp = Decimal(ltp) if ltp is not None else value
+        pinned = {
+            "quote_ltp": money(quote_ltp), "quote_lower_circuit": money(quote_ltp * Decimal("0.9")),
+            "quote_upper_circuit": money(quote_ltp * Decimal("1.1")), "quote_previous_close": money(quote_ltp),
+            "quote_series": series, "quote_session_date": f"{year:04d}-{month:02d}-{day:02d}",
+            "tick_reference": price if tick_reference is True else tick_reference, "quote_raw_sha256": RAW_SHA,
+            **(pin or {}),
+        }
         store.append(
             "intent",
             {
                 "intent_id": iid, "session_id": session, "signal_id": signal_id, "leg": leg, "intent_sha256": "e" * 64,
                 "symbol": symbol or SYMBOL[isin], "side": side, "quantity": str(quantity), "limit_price": price,
+                **pinned,
                 **(extra or {}),
             },
         )
@@ -271,15 +311,6 @@ class Scenario:
             store.append("denied", {"intent_id": iid, "code": mac[1]})
         elif isinstance(mac, tuple) and mac[0] == "reservation_refused":
             store.append("reservation_refused", {"intent_id": iid, "code": mac[1]})
-        value = Decimal(price)
-        quote_ltp = Decimal(ltp) if ltp is not None else value
-        self.pins[session][iid] = {
-            "quote": {
-                "ltp": money(quote_ltp), "lower_circuit": money(quote_ltp * Decimal("0.9")),
-                "upper_circuit": money(quote_ltp * Decimal("1.1")), "previous_close": money(quote_ltp), "series": series,
-            },
-            "tick_reference": price if tick_reference is True else tick_reference,
-        }
         return iid
 
     def sell(
@@ -312,6 +343,7 @@ class Scenario:
 
     def book(self, session: str, iid: str, cumulative: int, price: str, charges: str = "0") -> None:
         store = self.use(session)
+        self.closed.discard(session)
         self._booking += 1
         bid = f"book-{self._booking:04d}"
         store.append(
@@ -324,6 +356,7 @@ class Scenario:
         store.append("booking_done", {"intent_id": iid, "booking_id": bid, "ledger_event_id": self._booking})
 
     def raw(self, session: str, kind: str, payload: dict[str, Any]) -> None:
+        self.closed.discard(session)
         self.use(session).append(kind, payload)
 
     def latch(self, session: str, name: str, scope: str, reason: str) -> None:
@@ -336,31 +369,66 @@ class Scenario:
             {
                 "signal_id": f"sig-{session}", "symbol": "AAA", "isin": ISIN_A, "series": "EQ", "as_of_date": "2026-10-26",
                 **{name: "f" * 64 for name in SIGNAL_HASHES},
-                **({"limits_sha256": limits_sha256} if limits_sha256 else {}),
+                "limits_sha256": limits_sha256 or self.file_sha,
             },
         )
 
-    def records(self) -> list[dict[str, Any]]:
+    def close(self, *sessions: str) -> None:
+        """The runner's ``session_close`` for each session, once: a replay refuses a session that has none."""
+
+        for session in sessions:
+            if session not in self.closed:
+                self.use(session).append("session_close", {"outcome": "complete"})
+                self.closed.add(session)
+
+    def records(self, *close: str) -> list[dict[str, Any]]:
+        self.close(*close)
         return read_records(self.root, RUN)
 
-    def pins_for(self, session: str, **overrides: Any) -> Any:
-        doc: dict[str, Any] = {
-            "schema": vm_replay.PINS_SCHEMA,
-            "session_id": session,
-            "build": {"commit": self.identity.commit, "orders_sha256": dict(self.identity.orders_sha256)},
-            "limits_sha256": self.limits_sha,
-            "limits": self.limits,
-            "intents": self.pins.get(session, {}),
-            **self.extra.get(session, {}),
-        }
-        doc.update(overrides)
-        return parse_pins(json.dumps(doc).encode("ascii"))
-
-    def replay(self, session: str, sink: Any = None, vm: Path | None = None, **overrides: Any) -> Any:
+    def replay(
+        self,
+        session: str,
+        sink: Any = None,
+        vm: Path | None = None,
+        *,
+        limits: ReplayLimits | None = None,
+        manifest: Mapping[str, str] | None = None,
+        records: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        if records is None:
+            records = self.records(session)
         return replay_session(
-            self.records(), run_id=RUN, session_id=session, pins=self.pins_for(session, **overrides),
-            vm_source=vm or self.vm, sink=sink,
+            records, run_id=RUN, session_id=session, limits=limits or self.limits,
+            manifest_hashes=manifest or self.manifest, vm_source=vm or self.vm, sink=sink,
         )
+
+    def run(self, sink: Any = None, *, limits: ReplayLimits | None = None, records: list[dict[str, Any]] | None = None) -> Any:
+        if records is None:
+            records = self.records(*[s for s in self.stores if s in replay_sessions(read_records(self.root, RUN))])
+        return replay_run(
+            records, run_id=RUN, limits=limits or self.limits, manifest_hashes=self.manifest, vm_source=self.vm, sink=sink,
+        )
+
+
+def altered(records: list[dict[str, Any]], match: Callable[[dict[str, Any]], bool], **changes: Any) -> list[dict[str, Any]]:
+    """A copy of the records in which every record ``match`` selects has ``changes`` applied (``DELETE`` removes a key)."""
+
+    out = [dict(r) for r in records]
+    for record in out:
+        if match(record):
+            for key, value in changes.items():
+                if value is DELETE:
+                    record.pop(key, None)
+                else:
+                    record[key] = value
+    return out
+
+
+def intent_of(iid: str) -> Callable[[dict[str, Any]], bool]:
+    return lambda r: r.get("kind") == "intent" and r.get("intent_id") == iid
+
+
+FIRST_FINDING = 1000  # the seq a recording sink hands back, so a link in a test is not a real evidence seq
 
 
 class Sink:
@@ -368,15 +436,19 @@ class Sink:
         self.sessions: list[Any] = []
         self.defects: list[tuple[str, str, str]] = []
         self.pauses: list[tuple[str, str]] = []
+        self.links: list[int] = []  # the finding every defect and pause named, in write order
 
-    def record_session(self, result: Any) -> None:
+    def record_session(self, result: Any) -> int:
         self.sessions.append(result)
+        return FIRST_FINDING + len(self.sessions) - 1
 
-    def open_defect(self, code: str, session_id: str, detail: str) -> None:
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
         self.defects.append((code, session_id, detail))
+        self.links.append(finding_seq)
 
-    def pause_run(self, event: str, reason: str) -> None:
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
         self.pauses.append((event, reason))
+        self.links.append(finding_seq)
 
     def empty(self) -> bool:
         return not (self.sessions or self.defects or self.pauses)
@@ -408,7 +480,7 @@ def test_a_session_where_every_vm_verdict_agrees_passes_with_both_hashes_recorde
     assert result.divergences == () and result.defects == ()
     assert [v.vm_codes for v in result.verdicts] == [(), ()]
     assert result.build_commit == COMMIT and result.build_digest == sc.identity.digest
-    assert result.limits_sha256 == limits_sha and len(result.pins_sha256) == 64
+    assert result.limits_sha256 == FILE_SHA and result.mint_limits_sha256 == limits_sha
     assert sink.sessions == [result] and sink.defects == [] and sink.pauses == []
 
 
@@ -635,6 +707,24 @@ def test_a_kill_switch_code_in_a_replay_verdict_is_a_defect_not_a_divergence(tmp
     assert sink.defects == [(vm_replay.KILL_SWITCH_IN_VERDICT, S1, vm_replay.KILL_SWITCH_IN_VERDICT)] and sink.pauses == []
 
 
+def test_a_stored_fail_that_owes_a_session_defect_is_finished_with_that_defect_linked_to_it(tmp_path: Path, limits_sha: str):
+    """Break-proof: finish only the divergence half of a stored FAIL and the kill-switch defect is never opened."""
+    forced = make_vm(
+        tmp_path, "forced",
+        edits={"limits.py": lambda text: text.replace("    return tuple(codes)\n", '    codes.insert(0, "kill_switch")\n    return tuple(codes)\n', 1)},
+    )
+    sc = Scenario(tmp_path, forced, limits_sha)
+    sc.intent(S1, "buy", 10, "100.00")
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    assert stored(sc, "replay_defect") == []
+    again = sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    assert again.already_recorded is True and finding["defects"] == [vm_replay.KILL_SWITCH_IN_VERDICT]
+    assert [(r["code"], r["finding_seq"]) for r in stored(sc, "replay_defect")] == [(vm_replay.KILL_SWITCH_IN_VERDICT, finding["seq"])]
+    assert open_scope(sc) == []  # a session defect pauses nothing
+
+
 def test_the_replay_asks_the_vm_with_the_kill_switch_open(tmp_path: Path, limits_sha: str):
     """A fixture build that raises when it is asked with the kill switch closed (the flag the live system holds)."""
 
@@ -664,7 +754,7 @@ def test_replay_day_missing_a_session_with_evidence_and_no_replay_record_fails_t
     sc.intent(S1, "buy", 1, "100.00")
     sc.raw(S2, "non_evaluation_day", {"as_of_date": "2026-10-28", "reason": "cadence"})
     first = sc.replay(S1)
-    run = run_verdict(RUN, vm_replay.evidence_sessions(sc.records()), {S1: first})
+    run = run_verdict(RUN, vm_replay.evidence_sessions(sc.records(S2)), {S1: first})
     assert run.verdict == "FAIL" and run.missing == (S2,) and vm_replay.DAY_MISSING in run.reasons
     assert "replay_day_missing" in render_report(run)
 
@@ -673,9 +763,8 @@ def test_all_walks_every_session_and_a_passing_run_needs_every_one_to_pass_at_on
     sc.intent(S1, "buy", 1, "100.00")
     sc.raw(S2, "non_evaluation_day", {"as_of_date": "2026-10-28", "reason": "cadence"})
     sc.intent(S3, "buy", 1, "100.00", isin=ISIN_B)
-    pins = {s: sc.pins_for(s) for s in (S1, S2, S3)}
     sink = Sink()
-    run = replay_run(sc.records(), run_id=RUN, sessions=[S1, S2, S3], pins_by_session=pins, vm_source=sc.vm, sink=sink)
+    run = sc.run(sink)
     assert run.verdict == "PASS" and [s.session_id for s in run.sessions] == [S1, S2, S3]
     assert len(sink.sessions) == 3 and len(run.build_digests) == 1
 
@@ -683,17 +772,19 @@ def test_all_walks_every_session_and_a_passing_run_needs_every_one_to_pass_at_on
 def test_all_lists_a_refused_session_and_fails_the_run_without_writing_a_verdict_for_it(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
     sc.intent(S2, "buy", 1, "100.00", isin=ISIN_B)
-    pins = {S1: sc.pins_for(S1), S2: sc.pins_for(S2, limits={**LIMITS, "capital_cap": "50001"})}
+    records = sc.records(S1, S2)
+    records = altered(records, lambda r: r["kind"] == "vm_build" and r["session_id"] == S2, mint_limits_sha256="8" * 64)
     sink = Sink()
-    run = replay_run(sc.records(), run_id=RUN, sessions=[S1, S2], pins_by_session=pins, vm_source=sc.vm, sink=sink)
+    run = sc.run(sink, records=records)
     assert run.verdict == "FAIL" and run.refused == {S2: vm_replay.LIMITS_MISMATCH}
     assert [s.session_id for s in sink.sessions] == [S1]
 
 
-def test_all_does_not_skip_a_session_the_caller_forgot_to_pin(sc: Scenario):
+def test_all_does_not_skip_a_session_whose_pin_is_missing(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
-    sc.intent(S2, "buy", 1, "100.00", isin=ISIN_B)
-    run = replay_run(sc.records(), run_id=RUN, sessions=[S1], pins_by_session={S1: sc.pins_for(S1)}, vm_source=sc.vm)
+    second = sc.intent(S2, "buy", 1, "100.00", isin=ISIN_B)
+    records = altered(sc.records(S1, S2), intent_of(second), quote_ltp=DELETE)
+    run = sc.run(records=records)
     assert run.verdict == "FAIL" and run.refused == {S2: vm_replay.PINS_MISSING}
 
 
@@ -703,7 +794,7 @@ def test_the_run_verdict_needs_one_build_hash_and_a_run_with_nothing_replayed_ha
     one = sc.replay(S1)
     two = sc.replay(S2)
     assert run_verdict(RUN, [S1, S2], {S1: one, S2: two}).verdict == "PASS"
-    other = vm_replay.SessionReplay(**{**two.__dict__, "build_digest": "9" * 64})
+    other = dataclasses.replace(two, build_digest="9" * 64)
     mixed = run_verdict(RUN, [S1, S2], {S1: one, S2: other})
     assert mixed.verdict == "FAIL" and mixed.reasons == (vm_replay.BUILD_HASH_MIXED,)
     assert run_verdict(RUN, [], {}).verdict == "FAIL"
@@ -714,7 +805,8 @@ def test_a_failing_session_fails_the_run_and_the_report_lists_the_divergence_wit
     result = sc.replay(S1)
     report = render_report(run_verdict(RUN, [S1], {S1: result}))
     assert vm_replay.D06_LABEL in report and "D-23 verdict: FAIL" in report
-    assert "mac_admitted_vm_refused" in report and result.build_digest in report and result.limits_sha256 in report
+    assert "mac_admitted_vm_refused" in report and result.build_digest in report
+    assert result.limits_sha256 in report and result.mint_limits_sha256 in report
     assert "full pipeline" not in report.lower() and "—" not in report
 
 
@@ -749,8 +841,9 @@ def test_replay_build_mismatch_a_changed_orders_tree_refuses(sc: Scenario, how: 
 
 def test_replay_build_mismatch_no_recorded_identity_refuses_and_never_falls_back_to_the_working_tree(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
+    without = [r for r in sc.records(S1) if r["kind"] != "vm_build"]
     with pytest.raises(ReplayRefused) as raised:
-        sc.replay(S1, build=None)
+        sc.replay(S1, records=without)
     assert raised.value.code == vm_replay.BUILD_MISMATCH
     nowhere = sc.vm.parent / "not-a-checkout"
     with pytest.raises(ReplayRefused) as raised:
@@ -1066,13 +1159,13 @@ def test_replay_limits_mismatch_refuses_no_verdicts_written(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
     sink = Sink()
     with pytest.raises(ReplayRefused) as raised:
-        sc.replay(S1, sink, limits={**LIMITS, "capital_cap": "50001"})  # one value changed, the recorded hash is the old one
+        sc.replay(S1, sink, limits=sc.limits_with(capital_cap="50001"))  # one value changed, the recorded mint hash is the old one
     assert raised.value.code == vm_replay.LIMITS_MISMATCH and sink.empty()
 
 
 def test_replay_limits_mismatch_refuses_a_limits_document_the_build_rejects(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
-    broken = {k: v for k, v in LIMITS.items() if k != "fat_finger_collar"}
+    broken = ReplayLimits(fields={k: v for k, v in LIMITS.items() if k != "fat_finger_collar"}, file_sha256=FILE_SHA)
     with pytest.raises(ReplayRefused) as raised:
         sc.replay(S1, limits=broken)
     assert raised.value.code == vm_replay.LIMITS_MISMATCH
@@ -1086,8 +1179,8 @@ def test_replay_limits_mismatch_refuses_when_the_sessions_signals_recorded_other
     assert raised.value.code == vm_replay.LIMITS_MISMATCH
 
 
-def test_signals_that_record_the_same_limits_hash_pass(sc: Scenario, limits_sha: str):
-    sc.signal(S1, limits_sha256=limits_sha)
+def test_signals_that_record_the_same_limits_hash_pass(sc: Scenario):
+    sc.signal(S1, limits_sha256=FILE_SHA)
     sc.intent(S1, "buy", 1, "100.00")
     assert sc.replay(S1).verdict == "PASS"
 
@@ -1105,8 +1198,8 @@ def test_replay_limits_mismatch_refuses_when_an_intents_signal_of_another_sessio
     assert raised.value.code == vm_replay.LIMITS_MISMATCH
 
 
-def test_an_intents_signal_of_another_session_with_the_same_limits_hash_passes(sc: Scenario, limits_sha: str):
-    sc.raw(S1, "signal", {**signal_payload("sig-cross"), "limits_sha256": limits_sha})
+def test_an_intents_signal_of_another_session_with_the_same_limits_hash_passes(sc: Scenario):
+    sc.raw(S1, "signal", {**signal_payload("sig-cross"), "limits_sha256": FILE_SHA})
     sc.intent(S2, "buy", 1, "100.00", signal=False, extra={"signal_id": "sig-cross"})
     assert sc.replay(S2).verdict == "PASS"
 
@@ -1118,8 +1211,11 @@ ADMISSION_PY = REPO / "backend" / "shadow_india" / "admission.py"
 WRITER_INTENT_FIELDS = set(SCHEMAS["intent"][0])  # the required fields of an intent record: what the writer must emit
 
 
-def admission_intent_write() -> set[str]:
-    """The keys of the dict ``AdmissionService.prepare`` appends as the intent record, read from admission.py itself."""
+def admission_intent_write() -> tuple[set[str], set[str]]:
+    """The keys of the dict ``AdmissionService.prepare`` appends as the intent record, and the functions it splats in.
+
+    Read from admission.py itself, so the fixture cannot drift from the writer.
+    """
 
     for node in ast.walk(ast.parse(ADMISSION_PY.read_text())):
         if (
@@ -1131,16 +1227,24 @@ def admission_intent_write() -> set[str]:
             and node.args[0].id == "E_INTENT"
         ):
             assert isinstance(node.args[1], ast.Dict)
-            return {key.value for key in node.args[1].keys if isinstance(key, ast.Constant)}
+            keys = {key.value for key in node.args[1].keys if isinstance(key, ast.Constant)}
+            splats = {
+                value.func.id
+                for key, value in zip(node.args[1].keys, node.args[1].values)
+                if key is None and isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            }
+            return keys, splats
     raise AssertionError("admission.py no longer appends an intent record the way this test reads it")
 
 
 def test_the_fixture_intent_is_what_admission_py_writes():
-    """The writer emits the schema's required fields and nothing optional (so no ``isin``, no ``series``)."""
+    """The writer emits the schema's required fields plus the eight pin fields, and no ``isin`` or ``series``."""
 
-    written = admission_intent_write()
+    written, splats = admission_intent_write()
     assert written - {"session_id"} == WRITER_INTENT_FIELDS
-    assert not written & set(SCHEMAS["intent"][1])
+    assert not written & (set(SCHEMAS["intent"][1]) - set(QUOTE_PIN_FIELDS))
+    assert splats == {"quote_pin_fields"}  # the pin fields ride in the same append as the intent
+    assert set(vm_replay.PIN_FIELDS) == set(QUOTE_PIN_FIELDS)
 
 
 def signal_payload(signal_id: str, isin: str = ISIN_A, series: str = "EQ") -> dict[str, Any]:
@@ -1153,8 +1257,8 @@ def signal_payload(signal_id: str, isin: str = ISIN_A, series: str = "EQ") -> di
 def refusal_of(sc: Scenario, session: str = S1, records: list[dict[str, Any]] | None = None) -> str:
     with pytest.raises(ReplayRefused) as raised:
         replay_session(
-            records if records is not None else sc.records(), run_id=RUN, session_id=session,
-            pins=sc.pins_for(session), vm_source=sc.vm,
+            records if records is not None else sc.records(session), run_id=RUN, session_id=session,
+            limits=sc.limits, manifest_hashes=MANIFEST_HASHES, vm_source=sc.vm,
         )
     return raised.value.code
 
@@ -1164,8 +1268,8 @@ def test_a_writer_shaped_intent_with_no_isin_or_series_replays_and_passes(sc: Sc
     second = sc.intent(S1, "buy", 500, "100.00", isin=ISIN_A, mac=("deny", "capital_cap"))
     intents = [r for r in sc.records() if r["kind"] == "intent"]
     assert {r["intent_id"] for r in intents} == {first, second}
-    for record in intents:  # exactly what AdmissionService.prepare emits: no isin, no series
-        assert set(record) - ENVELOPE == WRITER_INTENT_FIELDS
+    for record in intents:  # exactly what AdmissionService.prepare emits: no isin, no series, the eight pins
+        assert set(record) - ENVELOPE == WRITER_INTENT_FIELDS | set(QUOTE_PIN_FIELDS)
     result = sc.replay(S1)
     assert result.verdict == "PASS", result
     assert result.verdicts[1].vm_codes[0] == "capital_cap"  # the first fill counted against the cap, by ISIN
@@ -1179,8 +1283,7 @@ def test_the_isin_and_series_the_vm_sees_are_the_signals(sc: Scenario):
 
 
 def test_a_signal_series_the_vm_does_not_trade_is_the_vms_to_refuse(sc: Scenario):
-    sc.intent(S1, "buy", 1, "100.00", signal={"series": "BZ"}, mac=("deny", "instrument_unsupported"))
-    sc.pins[S1][next(iter(sc.pins[S1]))]["quote"].pop("series")  # the pin may omit it: the signal's series is used
+    sc.intent(S1, "buy", 1, "100.00", series="BZ", mac=("deny", "instrument_unsupported"))
     assert sc.replay(S1).verdict == "PASS"
 
 
@@ -1227,13 +1330,12 @@ def test_an_intent_that_carries_the_same_isin_and_series_as_its_signal_is_accept
 
 def test_replay_signal_mismatch_a_pinned_series_that_differs_from_the_signals_refuses(sc: Scenario):
     iid = sc.intent(S1, "buy", 1, "100.00")
-    sc.pins[S1][iid]["quote"]["series"] = "BE"
-    assert refusal_of(sc) == vm_replay.SIGNAL_MISMATCH
+    assert refusal_of(sc, records=altered(sc.records(S1), intent_of(iid), quote_series="BE")) == vm_replay.SIGNAL_MISMATCH
 
 
 def test_one_signal_id_that_names_two_instruments_is_invalid_evidence(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
-    sc.raw(S1, "signal", {**signal_payload("sig-1", ISIN_B), "limits_sha256": sc.limits_sha})
+    sc.raw(S1, "signal", {**signal_payload("sig-1", ISIN_B), "limits_sha256": FILE_SHA})
     assert refusal_of(sc) == vm_replay.EVIDENCE_INVALID
 
 
@@ -1247,7 +1349,7 @@ def test_a_runner_shaped_sell_with_no_signal_record_replays_to_pass(sc: Scenario
     fund(sc)  # a booked buy of 100 in the first session
     iid = sc.sell(S2, kind, quantity, "60.00")
     sell = next(r for r in sc.records() if r["kind"] == "intent" and r["intent_id"] == iid)
-    assert set(sell) - ENVELOPE == WRITER_INTENT_FIELDS
+    assert set(sell) - ENVELOPE == WRITER_INTENT_FIELDS | set(QUOTE_PIN_FIELDS)
     assert not [r for r in sc.records() if r["kind"] == "signal" and r["signal_id"] == sell["signal_id"]]
     result = sc.replay(S2)
     assert result.verdict == "PASS", result
@@ -1332,8 +1434,7 @@ def test_replay_leg_unknown_a_buy_under_an_exit_or_swing_id_refuses(sc: Scenario
 def test_a_sell_needs_its_pinned_series_because_no_signal_names_it(sc: Scenario):
     fund(sc)
     iid = sc.sell(S2, "halve", 10, "60.00")
-    del sc.pins[S2][iid]["quote"]["series"]
-    assert refusal_of(sc, S2) == vm_replay.PINS_MISSING
+    assert refusal_of(sc, S2, altered(sc.records(S2), intent_of(iid), quote_series=DELETE)) == vm_replay.PINS_MISSING
 
 
 def test_a_sells_pinned_series_is_the_series_the_vm_sees(sc: Scenario):
@@ -1421,53 +1522,58 @@ MISSING_FIELDS = [
 @pytest.mark.parametrize(("kind", "field"), MISSING_FIELDS, ids=[f"{k}.{f}" for k, f in MISSING_FIELDS])
 def test_a_record_missing_a_field_the_replay_reads_is_a_typed_refusal_not_a_bare_error(sc: Scenario, kind: str, field: str):
     evidence_with_every_kind(sc)
-    code = refusal_of(sc, records=drop(sc.records(), kind, field))
+    code = refusal_of(sc, records=drop(sc.records(S1), kind, field))
     assert code == vm_replay.EVIDENCE_INVALID
 
 
 @pytest.mark.parametrize("bad", ["7", None, 1.5, True, [1]])
 def test_a_seq_that_is_not_an_integer_is_a_typed_refusal(sc: Scenario, bad: Any):
     sc.intent(S1, "buy", 1, "100.00")
-    records = [dict(r) for r in sc.records()]
+    records = [dict(r) for r in sc.records(S1)]
     records[-1]["seq"] = bad
     assert refusal_of(sc, records=records) == vm_replay.EVIDENCE_INVALID
 
 
 def test_the_replay_run_lists_a_session_with_a_malformed_record_as_refused_and_fails(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00", mac=("deny", "capital_cap"))
-    records = drop(sc.records(), "denied", "code")
-    run = replay_run(
-        records, run_id=RUN, sessions=[S1], pins_by_session={S1: sc.pins_for(S1)}, vm_source=sc.vm
-    )
+    records = drop(sc.records(S1), "denied", "code")
+    run = sc.run(records=records)
     assert run.verdict == "FAIL" and run.refused == {S1: vm_replay.EVIDENCE_INVALID}
 
 
 # --- pins -------------------------------------------------------------------------------------------------------------
 
 
-def test_a_missing_quote_pin_refuses_instead_of_guessing_a_quote(sc: Scenario):
+@pytest.mark.parametrize("field", list(vm_replay.PIN_FIELDS))
+def test_each_of_the_eight_pin_fields_is_required_on_an_intent_record(sc: Scenario, field: str):
     iid = sc.intent(S1, "buy", 1, "100.00")
-    del sc.pins[S1][iid]
+    records = altered(sc.records(S1), intent_of(iid), **{field: DELETE})
     with pytest.raises(ReplayRefused) as raised:
-        sc.replay(S1)
+        pins_from_evidence(records, S1)
     assert raised.value.code == vm_replay.PINS_MISSING
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, sink, records=records)
+    assert raised.value.code == vm_replay.PINS_MISSING and sink.empty()
 
 
-def test_a_pins_document_for_another_session_is_refused(sc: Scenario):
-    sc.intent(S1, "buy", 1, "100.00")
-    with pytest.raises(ReplayRefused) as raised:
-        sc.replay(S1, session_id=S2)
-    assert raised.value.code == vm_replay.PINS_MISSING
+def test_a_session_with_every_pin_reads_its_quote_and_tick_from_the_intent_record_alone(sc: Scenario):
+    iid = sc.intent(S1, "buy", 1, "100.00", ltp="99.50")
+    pin = pins_from_evidence(sc.records(S1), S1)[iid]
+    assert pin.quote.ltp == Decimal("99.50") and pin.quote.series == "EQ" and pin.tick_reference == Decimal("100.00")
+    assert pin.quote.session_date == date(2026, 10, 27)
+    assert "pins" not in inspect.signature(replay_session).parameters
+    assert "pins_by_session" not in inspect.signature(replay_run).parameters
 
 
 def test_a_recorded_unavailable_tick_reference_is_the_vms_to_judge(sc: Scenario):
-    sc.intent(S1, "buy", 1, "100.00", tick_reference=None, mac=("deny", "tick_reference_unavailable"))
+    iid = sc.intent(S1, "buy", 1, "100.00", tick_reference=None, mac=("deny", "tick_reference_unavailable"))
+    assert pins_from_evidence(sc.records(S1), S1)[iid].tick_reference is None  # a present null, not a missing pin
     assert sc.replay(S1).verdict == "PASS"
 
 
 def test_a_stale_quote_session_date_is_the_vms_quote_unavailable(sc: Scenario):
-    iid = sc.intent(S1, "buy", 1, "100.00", mac=("deny", "quote_unavailable"))
-    sc.pins[S1][iid]["quote"]["session_date"] = "2026-10-26"
+    sc.intent(S1, "buy", 1, "100.00", mac=("deny", "quote_unavailable"), pin={"quote_session_date": "2026-10-26"})
     assert sc.replay(S1).verdict == "PASS"
 
 
@@ -1481,40 +1587,625 @@ def test_the_decision_time_is_the_intents_recorded_ist_not_a_clock_read_now(sc: 
     assert late and sc.replay(S1).verdict == "PASS"  # 09:59 IST: open
 
 
-def _pins_doc(**changes: Any) -> bytes:
-    doc: dict[str, Any] = {
-        "schema": vm_replay.PINS_SCHEMA, "session_id": S1, "build": None, "limits_sha256": "a" * 64, "limits": dict(LIMITS), "intents": {},
-    }
-    doc.update(changes)
-    return json.dumps(doc).encode("ascii")
-
-
 @pytest.mark.parametrize(
-    "raw",
+    ("field", "bad"),
     [
-        b"not json",
-        b'{"schema": "other"}',
-        b'{"schema": "growin-vm-replay-pins/1", "session_id": "x", "limits_sha256": "a", "limits": {}, "intents": {}}',
-        b'{"schema": "growin-vm-replay-pins/1", "schema": "growin-vm-replay-pins/1"}',
-        _pins_doc(intents={"i": {"quote": {"ltp": 1.5, "lower_circuit": "1", "upper_circuit": "2", "previous_close": "1"}, "tick_reference": "1"}}),
-        _pins_doc(intents={"i": {"quote": {"ltp": "NaN", "lower_circuit": "1", "upper_circuit": "2", "previous_close": "1"}, "tick_reference": "1"}}),
-        _pins_doc(intents={"i": {"quote": {"ltp": "1", "lower_circuit": "1", "upper_circuit": "2", "previous_close": "1"}}}),
-        _pins_doc(build={"commit": "short", "orders_sha256": {"a.py": "a" * 64}}),
-        _pins_doc(mac_halt="yes"),
+        ("quote_ltp", 1.5), ("quote_ltp", "NaN"), ("quote_ltp", True), ("quote_lower_circuit", "x"),
+        ("quote_upper_circuit", None), ("quote_previous_close", [1]), ("quote_series", 5),
+        ("quote_session_date", "tuesday"), ("quote_session_date", None), ("tick_reference", 1.5), ("tick_reference", "Infinity"),
     ],
-    ids=["not_json", "schema", "short_hash", "duplicate_key", "float", "nan", "no_tick_reference", "bad_commit", "bad_flag"],
 )
-def test_parse_pins_refuses_a_malformed_document(raw: bytes):
+def test_a_pin_that_is_present_but_malformed_is_a_typed_refusal(sc: Scenario, field: str, bad: Any):
+    iid = sc.intent(S1, "buy", 1, "100.00")
+    records = altered(sc.records(S1), intent_of(iid), **{field: bad})
     with pytest.raises(ReplayRefused) as raised:
-        parse_pins(raw)
+        pins_from_evidence(records, S1)
     assert raised.value.code == vm_replay.PINS_INVALID
 
 
-def test_a_session_that_recorded_mac_halt_replays_it(sc: Scenario):
-    sc.extra[S1] = {"mac_halt": True}
-    sc.intent(S1, "buy", 1, "100.00", mac=("deny", "capital_cap"))
+def test_a_session_that_recorded_a_halt_latch_replays_it_so_an_admitted_buy_diverges(sc: Scenario):
+    sc.latch(S1, "halt", "entries", "raised_2026-10-26")
+    sc.intent(S1, "buy", 1, "100.00")  # the Mac admitted it under a halt: the VM refuses
     result = sc.replay(S1)
-    assert result.verdict == "FAIL" and result.divergences[0].vm_codes[0] == "mac_halt"
+    assert result.verdict == "FAIL" and result.divergences[0].reason == "mac_admitted_vm_refused"
+
+
+# --- the build and both limits hashes come from the evidence -------------------------------------------------------------
+
+
+def test_the_build_is_read_from_the_sessions_vm_build_record_and_from_nothing_else(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    build, mint = build_from_evidence(sc.records(S1), S1)
+    assert build == sc.identity and mint == sc.mint_sha
+    parameters = set(inspect.signature(replay_session).parameters)
+    assert not parameters & {"build", "recorded", "identity", "pins", "commit", "orders_sha256"}
+    assert parameters == {"records", "run_id", "session_id", "limits", "manifest_hashes", "vm_source", "sink"}
+
+
+def test_two_unequal_vm_build_records_in_one_session_refuse(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    other = {**sc.build_body(), "mint_limits_sha256": "7" * 64}
+    sc.raw(S1, "vm_build", other)
+    assert refusal_of(sc, S1) == vm_replay.BUILD_MISMATCH
+    sink = Sink()
+    with pytest.raises(ReplayRefused):
+        sc.replay(S1, sink)
+    assert sink.empty()
+
+
+def test_two_equal_vm_build_records_in_one_session_are_one_build(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.raw(S1, "vm_build", sc.build_body())
+    assert sc.replay(S1).verdict == "PASS"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"digest": "0" * 64},
+        {"commit": "e" * 40},  # a commit the digest was not computed from
+        {"mint_limits_sha256": "short"},
+        {"mint_limits_sha256": DELETE},
+        {"orders_sha256": {}},
+        {"orders_sha256": {"limits.py": "nothex"}},
+    ],
+    ids=["digest_not_recomputed", "commit_not_in_digest", "short_mint", "no_mint", "empty_files", "bad_file_hash"],
+)
+def test_a_vm_build_record_that_does_not_recompute_or_is_malformed_refuses(sc: Scenario, change: dict[str, Any]):
+    sc.intent(S1, "buy", 1, "100.00")
+    records = altered(sc.records(S1), lambda r: r["kind"] == "vm_build" and r["session_id"] == S1, **change)
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, records=records)
+    assert raised.value.code == vm_replay.BUILD_MISMATCH
+
+
+def test_replay_limits_mismatch_a_collar_changed_after_the_session_refuses_by_the_mint_hash(sc: Scenario):
+    """The collar is in ``execution.json`` only, so no signal or manifest hash covers it: the mint hash does."""
+
+    sc.intent(S1, "buy", 1, "100.00")
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, sink, limits=sc.limits_with(fat_finger_collar="0.07"))
+    assert raised.value.code == vm_replay.LIMITS_MISMATCH and sink.empty()
+
+
+def test_replay_limits_mismatch_a_limits_file_that_is_not_the_manifests_refuses(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    other = ReplayLimits(fields=dict(LIMITS), file_sha256="4" * 64)
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, limits=other)
+    assert raised.value.code == vm_replay.LIMITS_MISMATCH
+
+
+def test_replay_limits_mismatch_a_manifest_hash_that_is_not_the_files_refuses(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, manifest={**MANIFEST_HASHES, "limits_sha256": "4" * 64})
+    assert raised.value.code == vm_replay.LIMITS_MISMATCH
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, manifest=HASHES)  # a manifest with no limits hash at all
+    assert raised.value.code == vm_replay.LIMITS_MISMATCH
+
+
+def test_the_file_hash_and_the_mint_hash_are_two_documents_and_never_compared_with_each_other(sc: Scenario):
+    assert sc.file_sha != sc.mint_sha
+    sc.intent(S1, "buy", 1, "100.00")
+    assert sc.replay(S1).verdict == "PASS"  # equal to neither's, so a check of one against the other would refuse
+
+
+def test_a_session_of_only_exit_sells_still_checks_both_hashes(sc: Scenario):
+    fund(sc)
+    sc.sell(S2, "halve", 10, "60.00")
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S2, sink, limits=sc.limits_with(fat_finger_collar="0.07"))
+    assert raised.value.code == vm_replay.LIMITS_MISMATCH and sink.empty()
+
+
+# --- which days are replayed -----------------------------------------------------------------------------------------------
+
+
+def run_start(sc: Scenario, session: str) -> None:
+    sc.raw(session, "run_start", {"run_start_session": "2026-10-26", "audit_base_seq": 0, "audit_base_sha256": "0" * 64, "window_start": "2026-10-26"})
+
+
+def test_the_open_run_day_is_listed_not_replayed_and_does_not_fail_the_run(sc: Scenario):
+    """S0 holds ``run_start`` and ``vm_build`` and never a ``session_close``: counting it would refuse ``replay_session_open``."""
+
+    run_start(sc, S0)
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.raw(S2, "pause", {"event": "vm_build_changed", "scope": "all", "reason": "x_differs_from_run_pin"})
+    sc.raw(S2, "expiry", {"intent_id": "intent-0001", "reason": "end_of_session"})
+    records = sc.records(S1)
+    assert replay_sessions(records) == (S1,)
+    assert not_replayed_sessions(records) == (S0, S2)
+    run = sc.run(records=records)
+    assert run.verdict == "PASS" and [s.session_id for s in run.sessions] == [S1]
+    assert run.not_replayed == (S0, S2) and run.refused == {}
+    assert "not_replayed:no_decide" in render_report(run)
+
+
+def test_an_operator_only_day_is_listed_and_never_dropped(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    policy.raise_event(sc.use(S3), vm_replay.DIVERGENCE, "elsewhere:intent-9:mac_admitted_vm_refused")
+    policy.resume(sc.use(S3), "operator reviewed")  # the real resume path, on a day that decided nothing
+    records = sc.records(S1)
+    assert not_replayed_sessions(records) == (S3,)  # no record-kind allowlist: whatever else a session holds is listed
+    assert sc.run(records=records).not_replayed == (S3,)
+
+
+def test_a_session_with_only_a_vm_build_record_is_not_a_replay_day(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.use(S2)  # the open-run write of the session, nothing else
+    records = sc.records(S1)
+    assert S2 not in replay_sessions(records) and S2 in not_replayed_sessions(records)
+
+
+@pytest.mark.parametrize("kind", ["signal", "non_evaluation_day", "intent"])
+def test_each_of_signal_non_evaluation_day_and_intent_makes_a_replay_day(sc: Scenario, kind: str):
+    if kind == "signal":
+        sc.signal(S2)
+    elif kind == "non_evaluation_day":
+        sc.raw(S2, "non_evaluation_day", {"as_of_date": "2026-10-28", "reason": "cadence"})
+    else:
+        fund(sc)
+        sc.sell(S2, "halve", 10, "60.00")
+    assert S2 in replay_sessions(sc.records(S2))
+
+
+def test_an_exit_only_day_is_replayed_in_the_run(sc: Scenario):
+    fund(sc)
+    sc.sell(S2, "halve", 10, "60.00")
+    run = sc.run()
+    assert run.verdict == "PASS" and [s.session_id for s in run.sessions] == [S1, S2]
+    assert run.sessions[1].intents_compared == 1
+
+
+def test_only_a_closed_session_is_replayed(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as raised:
+        sc.replay(S1, sink, records=sc.records())  # no session_close yet
+    assert raised.value.code == vm_replay.SESSION_OPEN and sink.empty()
+    assert sc.replay(S1).verdict == "PASS"  # closed: it replays
+
+
+def test_a_run_whose_session_is_open_lists_it_refused_and_fails(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    run = sc.run(records=sc.records())
+    assert run.verdict == "FAIL" and run.refused == {S1: vm_replay.SESSION_OPEN}
+
+
+# --- what is recorded, and what a record cannot undo ---------------------------------------------------------------------
+
+
+def real_sink(sc: Scenario, session: str) -> EvidenceReplaySink:
+    return EvidenceReplaySink(sc.use(session))
+
+
+def stored(sc: Scenario, kind: str) -> list[dict[str, Any]]:
+    return [r for r in sc.records() if r["kind"] == kind]
+
+
+def test_a_divergence_pauses_the_run_and_the_record_carries_hashes_and_counts_only(sc: Scenario):
+    sc.intent(S1, "buy", 100, "600.00", tick_reference="600")  # the Mac admitted what the VM refuses
+    result = sc.replay(S1, real_sink(sc, S1))
+    assert result.verdict == "FAIL"
+    (record,) = stored(sc, "vm_replay")
+    assert record["verdict"] == "FAIL" and record["limits_sha256"] == FILE_SHA and record["mint_limits_sha256"] == sc.mint_sha
+    assert record["build_digest"] == sc.identity.digest and record["intents_compared"] == 1
+    assert record["divergence_reasons"] == ["mac_admitted_vm_refused"]
+    assert [(r["code"], r["detail"]) for r in stored(sc, "replay_defect")] == [(vm_replay.DIVERGENCE, "mac_admitted_vm_refused")]
+    state = policy.state_from_records(sc.records())
+    assert [(p.event, p.scope) for p in state.open_pauses] == [(vm_replay.DIVERGENCE, "all")]
+    assert state.blocks(policy.STEP_ADMIT, isin=ISIN_A) and state.blocks(policy.STEP_BOOK)
+
+
+def test_a_fail_record_is_sticky_a_later_pass_record_never_replaces_it(sc: Scenario):
+    sc.intent(S1, "buy", 100, "600.00", tick_reference="600")
+    sc.replay(S1, real_sink(sc, S1))
+    first = recorded_run_verdict(sc.records())
+    assert first.verdict == "FAIL" and vm_replay.DIVERGENCE in first.reasons
+    failed = stored(sc, "vm_replay")[0]
+    sc.raw(S1, "vm_replay", {k: v for k, v in failed.items() if k in SCHEMAS["vm_replay"][0]} | {"verdict": "PASS"})
+    assert recorded_run_verdict(sc.records()).verdict == "FAIL"
+    # The defect row alone would also fail the run. Without it the replay records must still decide: FAIL then PASS is FAIL.
+    without_defect = [r for r in sc.records() if r["kind"] != "replay_defect"]
+    assert [r["verdict"] for r in without_defect if r["kind"] == "vm_replay"] == ["FAIL", "PASS"]
+    sticky = recorded_run_verdict(without_defect)
+    assert sticky.verdict == "FAIL" and vm_replay.DIVERGENCE in sticky.reasons
+
+
+def test_resuming_the_divergence_pause_does_not_clear_the_d23_verdict(sc: Scenario):
+    sc.intent(S1, "buy", 100, "600.00", tick_reference="600")
+    sc.replay(S1, real_sink(sc, S1))
+    policy.resume(sc.use(S1), "operator looked at it")
+    assert not policy.state_from_records(sc.records()).open_pauses  # the pause is gone
+    assert recorded_run_verdict(sc.records()).verdict == "FAIL"  # the D-23 verdict reads replay records, not pause state
+    # Same with the defect row left out: the stored FAIL replay record alone keeps the run failed after the resume.
+    without_defect = [r for r in sc.records() if r["kind"] != "replay_defect"]
+    assert any(r["kind"] == "resume" for r in without_defect)
+    still = recorded_run_verdict(without_defect)
+    assert still.verdict == "FAIL" and vm_replay.DIVERGENCE in still.reasons
+
+
+def test_a_stored_pass_never_hides_a_refusal_of_this_pass(sc: Scenario):
+    """Break-proof: drop the current refusals when a stored result exists and the run reads PASS, exit 0, refused {}."""
+    sc.intent(S1, "buy", 1, "100.00")
+    first = sc.run(real_sink(sc, S1))
+    assert first.verdict == "PASS"
+    records = sc.records()
+    assert recorded_run_verdict(records, first.refused).verdict == "PASS"
+    changed = dataclasses.replace(sc.limits, file_sha256="e" * 64)  # the private config moved since the stored PASS
+    again = sc.run(records=records, limits=changed)
+    assert again.refused == {S1: vm_replay.LIMITS_MISMATCH}
+    stored_verdict = recorded_run_verdict(records, again.refused)
+    assert stored_verdict.verdict == "FAIL" and stored_verdict.refused == {S1: vm_replay.LIMITS_MISMATCH}
+    assert vm_replay.SESSION_REFUSED in stored_verdict.reasons
+    assert len(stored(sc, "vm_replay")) == 1  # the refusal wrote nothing and the stored PASS is untouched
+
+
+class Interrupted(Exception):
+    """The process stopped between two writes."""
+
+
+class Cut:
+    """A sink that delegates until the named write, where the process dies before that write lands."""
+
+    def __init__(self, real: EvidenceReplaySink, *, at: str) -> None:
+        self.real, self.at = real, at
+
+    def record_session(self, result: Any) -> int:
+        return self.real.record_session(result)
+
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
+        if self.at == "open_defect":
+            raise Interrupted
+        self.real.open_defect(code, session_id, detail, finding_seq)
+
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
+        if self.at == "pause_run":
+            raise Interrupted
+        self.real.pause_run(event, reason, finding_seq)
+
+
+def divergent_session(sc: Scenario) -> None:
+    sc.intent(S1, "buy", 100, "600.00", tick_reference="600")  # the Mac admitted what the VM refuses
+
+
+def open_scope(sc: Scenario) -> list[tuple[str, str]]:
+    return [(p.event, p.scope) for p in policy.state_from_records(sc.records()).open_pauses]
+
+
+@pytest.mark.parametrize("cut_at", ["open_defect", "pause_run"])
+def test_an_interruption_after_the_record_is_finished_by_the_rerun(sc: Scenario, cut_at: str):
+    """Break-proof: return early on a stored FAIL and the run stays FAIL with no defect, no pause and admission open."""
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at=cut_at))
+    assert len(stored(sc, "vm_replay")) == 1 and open_scope(sc) == []  # the record landed, the pause did not
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL" and again.already_recorded is True
+    assert [(r["code"], r["detail"]) for r in stored(sc, "replay_defect")] == [(vm_replay.DIVERGENCE, "mac_admitted_vm_refused")]
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    state = policy.state_from_records(sc.records())
+    assert state.blocks(policy.STEP_ADMIT, isin=ISIN_A) and state.blocks(policy.STEP_BOOK)
+    before = len(sc.records())
+    sc.replay(S1, real_sink(sc, S1))
+    assert len(sc.records()) == before and len(stored(sc, "vm_replay")) == 1  # a further re-run writes nothing
+
+
+def unrelated_pause(sc: Scenario, reason: str = "other-day:intent-9:mac_admitted_vm_refused") -> int:
+    """A divergence pause that belongs to another finding (no link to any record of this session), raised the real way."""
+
+    return int(policy.raise_event(sc.use(S1), vm_replay.DIVERGENCE, reason)["seq"])
+
+
+def clear(sc: Scenario, *pause_seqs: int, why: str = "operator cleared it") -> None:
+    policy.resume(sc.use(S1), why, pause_seqs=list(pause_seqs))  # the real resume: it refuses an empty or unknown request
+
+
+def linked(sc: Scenario, kind: str) -> list[Any]:
+    return [r.get("finding_seq") for r in stored(sc, kind) if r.get("finding_seq") is not None]
+
+
+@pytest.mark.parametrize("cut_at", ["open_defect", "pause_run"])
+@pytest.mark.parametrize("cleared_before_the_record", [True, False])
+def test_an_unrelated_resume_never_suppresses_the_pause_this_finding_still_owes(sc: Scenario, cut_at: str, cleared_before_the_record: bool):
+    """Break-proof: exempt the pause once any later ``resume`` exists and the run stays unpaused, admission open."""
+    divergent_session(sc)
+    other = unrelated_pause(sc)
+    if cleared_before_the_record:
+        clear(sc, other)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at=cut_at))
+    if not cleared_before_the_record:
+        clear(sc, other)  # the operator clears a different pause after this finding's record landed
+    assert open_scope(sc) == []
+    again = sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    assert again.verdict == "FAIL" and again.already_recorded is True
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    assert linked(sc, "pause") == [finding["seq"]] and linked(sc, "replay_defect") == [finding["seq"]]
+    state = policy.state_from_records(sc.records())
+    assert state.blocks(policy.STEP_ADMIT, isin=ISIN_A) and state.blocks(policy.STEP_BOOK)
+
+
+def test_a_pause_the_operator_resumed_is_not_raised_again_by_a_rerun(sc: Scenario):
+    """Break-proof: count only open pauses as held and every rerun after a resume re-pauses the run."""
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (pause,) = [r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]
+    clear(sc, pause["seq"], why="operator looked at it")
+    assert open_scope(sc) == []
+    before = len(sc.records())
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL" and again.already_recorded is True
+    assert open_scope(sc) == [] and len(sc.records()) == before  # the decision stands, nothing was written
+    assert recorded_run_verdict(sc.records()).verdict == "FAIL"
+
+
+def test_a_rerun_after_an_interruption_and_the_operators_resume_of_its_own_pause_does_not_repause(sc: Scenario):
+    """The operator resumed the pause that did land; the defect that did not is still completed, the pause is not."""
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (pause,) = [r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]
+    defect = [r for r in sc.records() if r["kind"] == "replay_defect"]
+    clear(sc, pause["seq"])
+    stripped = [r for r in sc.records() if r["kind"] != "replay_defect"]  # the defect write never landed
+    assert len(stripped) == len(sc.records()) - len(defect)
+    sink = Sink()
+    sc.replay(S1, sink, records=stripped)
+    assert sink.defects == [(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused")] and sink.pauses == []
+
+
+def test_every_rerun_after_the_first_completion_writes_nothing(sc: Scenario):
+    """Break-proof: key the held check on anything the first write does not carry and each rerun writes again."""
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    sc.replay(S1, real_sink(sc, S1))
+    settled = len(sc.records())
+    for _ in range(3):
+        again = sc.replay(S1, real_sink(sc, S1))
+        assert again.already_recorded is True and len(sc.records()) == settled
+    assert len(stored(sc, "vm_replay")) == 1 and len(stored(sc, "replay_defect")) == 1
+    assert len([r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]) == 1
+
+
+def planted_fail(sc: Scenario, session: str, base: dict[str, Any], **changes: Any) -> None:
+    """A second FAIL record of the session, as an earlier pass that stopped right after the record would have left it."""
+
+    keep = {k: v for k, v in base.items() if k in SCHEMAS["vm_replay"][0] or k in SCHEMAS["vm_replay"][1]}
+    sc.raw(session, "vm_replay", {**keep, **changes})
+
+
+def test_two_findings_with_the_same_defect_each_keep_their_own_defect_and_pause(sc: Scenario):
+    """Break-proof: key a defect by (code, detail) or a pause by its reason and the second finding is skipped."""
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (first,) = stored(sc, "vm_replay")
+    planted_fail(sc, S1, first, intents_compared=2)  # a differing pass left a second finding with the same reason
+    sc.replay(S1, real_sink(sc, S1))
+    second = stored(sc, "vm_replay")[1]
+    assert sorted(linked(sc, "replay_defect")) == sorted([first["seq"], second["seq"], first["seq"]])  # + the nondeterminism defect
+    divergence_defects = [r for r in stored(sc, "replay_defect") if r["code"] == vm_replay.DIVERGENCE]
+    assert sorted(r["finding_seq"] for r in divergence_defects) == [first["seq"], second["seq"]]
+    divergence_pauses = [r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]
+    assert sorted(r["finding_seq"] for r in divergence_pauses) == [first["seq"], second["seq"]]
+    settled = len(sc.records())
+    sc.replay(S1, real_sink(sc, S1))
+    assert len(sc.records()) == settled
+
+
+def test_a_stored_fail_is_finished_with_every_write_linked_to_its_own_record(sc: Scenario):
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    bare = [r for r in sc.records() if r["kind"] not in ("replay_defect",) and not (r["kind"] == "pause" and r["event"] == vm_replay.DIVERGENCE)]
+    sink = Sink()
+    again = sc.replay(S1, sink, records=bare)
+    assert again.already_recorded is True and sink.sessions == []
+    assert sink.defects == [(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused")] and len(sink.pauses) == 1
+    assert sink.links == [finding["seq"], finding["seq"]]
+
+
+def test_a_link_from_a_record_written_before_its_finding_does_not_hold_what_the_finding_owes(sc: Scenario):
+    """Terra #646 r3: a defect or pause can only answer a finding that already exists, so one with an earlier seq is not held."""
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    owed = [r for r in sc.records() if r["kind"] == "replay_defect" or (r["kind"] == "pause" and r["event"] == vm_replay.DIVERGENCE)]
+    bare = [r for r in sc.records() if r not in owed]
+    early = [{**r, "seq": finding["seq"] - 1} for r in owed]  # same link, written before the finding it names
+    sink = Sink()
+    sc.replay(S1, sink, records=sorted(bare + early, key=lambda r: r["seq"]))
+    assert sink.defects == [(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused")] and len(sink.pauses) == 1
+    assert sink.links == [finding["seq"], finding["seq"]]
+
+
+def test_a_fresh_fail_is_recorded_first_and_its_defect_and_pause_link_to_it(sc: Scenario):
+    divergent_session(sc)
+    sink = Sink()
+    sc.replay(S1, sink)
+    assert len(sink.sessions) == 1 and sink.links == [FIRST_FINDING, FIRST_FINDING]
+    sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    pause = next(r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE)
+    defect = stored(sc, "replay_defect")[0]
+    assert finding["seq"] < defect["seq"] < pause["seq"]  # the finding exists before anything it owes
+
+
+def test_a_stored_fail_is_finished_before_a_changed_config_can_refuse_the_replay(sc: Scenario):
+    """Break-proof: validate first and the refusal returns before the missing defect and pause are ever written."""
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    assert open_scope(sc) == [] and stored(sc, "replay_defect") == []
+    changed = dataclasses.replace(sc.limits, file_sha256="e" * 64)  # the private config moved since the record landed
+    with pytest.raises(ReplayRefused) as caught:
+        sc.replay(S1, real_sink(sc, S1), limits=changed)
+    assert caught.value.code == vm_replay.LIMITS_MISMATCH  # the refusal is still reported
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")] and len(stored(sc, "replay_defect")) == 1
+    settled = len(sc.records())
+    with pytest.raises(ReplayRefused):
+        sc.replay(S1, real_sink(sc, S1), limits=changed)
+    assert len(sc.records()) == settled
+
+
+def test_the_run_reads_fail_for_both_the_stored_finding_and_the_refusal(sc: Scenario):
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="pause_run"))
+    changed = dataclasses.replace(sc.limits, file_sha256="e" * 64)
+    run = sc.run(real_sink(sc, S1), limits=changed)
+    assert run.refused == {S1: vm_replay.LIMITS_MISMATCH} and run.verdict == "FAIL"
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    stored_run = recorded_run_verdict(sc.records(), run.refused)
+    assert stored_run.verdict == "FAIL" and {vm_replay.SESSION_REFUSED, vm_replay.DIVERGENCE} <= set(stored_run.reasons)
+
+
+def test_replay_session_refuses_a_day_that_is_not_a_decide_day_and_records_nothing(sc: Scenario):
+    """Break-proof: without the check the open-run day replays as PASS with no intents and a record is written."""
+    run_start(sc, S0)
+    sc.intent(S1, "buy", 1, "100.00")
+    sink = Sink()
+    with pytest.raises(ReplayRefused) as caught:
+        sc.replay(S0, sink, records=sc.records(S0, S1))
+    assert caught.value.code == vm_replay.NOT_DECIDE_DAY and sink.empty()
+
+
+def planted_pass(sc: Scenario, session: str) -> None:
+    sc.raw(session, "vm_replay", {
+        "verdict": "PASS", "build_commit": sc.identity.commit, "build_digest": sc.identity.digest, "limits_sha256": FILE_SHA,
+        "mint_limits_sha256": sc.mint_sha, "intents_compared": 0, "no_intents": True,
+    })
+
+
+def test_a_stored_record_for_a_non_decide_day_never_makes_an_empty_run_pass(sc: Scenario):
+    run_start(sc, S0)
+    sc.close(S0)
+    planted_pass(sc, S0)
+    run = recorded_run_verdict(sc.records())
+    assert run.verdict == "FAIL" and vm_replay.STRAY_RECORD in run.reasons and vm_replay.DAY_MISSING in run.reasons
+    assert run.sessions == ()
+
+
+def stored_pass(sc: Scenario) -> None:
+    sc.raw(S1, "vm_replay", {
+        "verdict": "PASS", "build_commit": sc.identity.commit, "build_digest": sc.identity.digest, "limits_sha256": FILE_SHA,
+        "mint_limits_sha256": sc.mint_sha, "intents_compared": 1, "no_intents": False,
+    })  # an earlier pass said PASS
+
+
+def test_a_nondeterministic_rerun_that_now_diverges_is_a_new_finding_with_its_own_defect_and_pause(sc: Scenario):
+    """Break-proof: write no finding record for it and its defect and pause link to nothing a later resume cannot cover."""
+    divergent_session(sc)
+    sc.close(S1)
+    stored_pass(sc)  # this pass finds the VM refusing what the Mac admitted
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL" and vm_replay.NONDETERMINISTIC in again.defects
+    passed, finding = stored(sc, "vm_replay")
+    assert (passed["verdict"], finding["verdict"]) == ("PASS", "FAIL") and finding["seq"] > passed["seq"]
+    owed = {(r["code"], r["detail"]): r["finding_seq"] for r in stored(sc, "replay_defect")}
+    assert owed == {
+        (vm_replay.DIVERGENCE, "mac_admitted_vm_refused"): finding["seq"],
+        (vm_replay.NONDETERMINISTIC, vm_replay.NONDETERMINISTIC): passed["seq"],
+    }
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")] and linked(sc, "pause") == [finding["seq"]]
+    settled = len(sc.records())
+    for _ in range(2):
+        sc.replay(S1, real_sink(sc, S1))
+        assert len(sc.records()) == settled  # a further rerun finds everything written
+
+
+def test_a_new_divergence_after_a_stored_pass_pauses_despite_an_unrelated_pause_resumed_in_between(sc: Scenario):
+    """The second repro: the stored PASS, some other pause raised and resumed, then a rerun that diverges."""
+    divergent_session(sc)
+    sc.close(S1)
+    stored_pass(sc)
+    clear(sc, unrelated_pause(sc), why="unrelated")
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL"
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")], "the fresh divergence never paused the run"
+    assert policy.state_from_records(sc.records()).blocks(policy.STEP_ADMIT, isin=ISIN_A)
+
+
+def test_a_nondeterministic_rerun_interrupted_after_its_finding_is_finished_by_the_next(sc: Scenario):
+    divergent_session(sc)
+    sc.close(S1)
+    stored_pass(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    assert len(stored(sc, "vm_replay")) == 2 and open_scope(sc) == []
+    sc.replay(S1, real_sink(sc, S1))
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    assert {r["code"] for r in stored(sc, "replay_defect")} == {vm_replay.DIVERGENCE, vm_replay.NONDETERMINISTIC}
+    settled = len(sc.records())
+    sc.replay(S1, real_sink(sc, S1))
+    assert len(sc.records()) == settled
+
+
+def test_a_replay_defect_record_alone_fails_the_run_even_with_every_session_passing(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.replay(S1, real_sink(sc, S1))
+    assert recorded_run_verdict(sc.records()).verdict == "PASS"
+    sc.raw(S1, "replay_defect", {"code": vm_replay.KILL_SWITCH_IN_VERDICT, "detail": vm_replay.KILL_SWITCH_IN_VERDICT})
+    failed = recorded_run_verdict(sc.records())
+    assert failed.verdict == "FAIL" and vm_replay.DEFECT in failed.reasons
+
+
+def test_an_equal_rerun_appends_nothing_and_reports_already_recorded(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    first = sc.replay(S1, real_sink(sc, S1))
+    before = len(sc.records())
+    second = sc.replay(S1, real_sink(sc, S1))
+    assert first.already_recorded is False and second.already_recorded is True and second.verdict == "PASS"
+    assert len(sc.records()) == before and len(stored(sc, "vm_replay")) == 1
+
+
+def test_a_rerun_that_differs_from_the_stored_record_is_replay_nondeterministic(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.replay(S1, real_sink(sc, S1))
+    sc.raw(S1, "vm_replay", {**{k: v for k, v in stored(sc, "vm_replay")[0].items() if k in SCHEMAS["vm_replay"][0]}, "intents_compared": 9})
+    sink = Sink()
+    again = sc.replay(S1, sink)
+    assert again.verdict == "FAIL" and vm_replay.NONDETERMINISTIC in again.defects
+    assert sink.defects == [(vm_replay.NONDETERMINISTIC, S1, vm_replay.NONDETERMINISTIC)] and sink.sessions == []
+
+
+def test_a_decide_day_with_no_replay_record_fails_the_stored_verdict(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.intent(S2, "buy", 1, "100.00", isin=ISIN_B)
+    sc.replay(S1, real_sink(sc, S1))
+    run = recorded_run_verdict(sc.records(S2))
+    assert run.verdict == "FAIL" and run.missing == (S2,) and vm_replay.DAY_MISSING in run.reasons
+
+
+def test_a_run_with_no_decide_day_has_not_passed(sc: Scenario):
+    run_start(sc, S0)
+    empty = recorded_run_verdict(sc.records())
+    assert empty.verdict == "FAIL" and vm_replay.DAY_MISSING in empty.reasons
+
+
+def test_the_stored_verdict_needs_one_build_digest_across_the_run(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.intent(S2, "buy", 1, "100.00", isin=ISIN_B)
+    sc.replay(S1, real_sink(sc, S1))
+    sc.replay(S2, real_sink(sc, S2))
+    assert recorded_run_verdict(sc.records()).verdict == "PASS"
+    second = next(r for r in stored(sc, "vm_replay") if r["session_id"] == S2)
+    sc.raw(S2, "vm_replay", {**{k: v for k, v in second.items() if k in SCHEMAS["vm_replay"][0]}, "build_digest": "9" * 64})
+    mixed = recorded_run_verdict(sc.records())
+    assert mixed.verdict == "FAIL" and vm_replay.BUILD_HASH_MIXED in mixed.reasons
+
+
+def test_the_recorded_verdict_reads_replay_records_only(sc: Scenario):
+    sc.intent(S1, "buy", 1, "100.00")
+    sc.replay(S1, real_sink(sc, S1))
+    records = [r for r in sc.records() if r["kind"] not in ("pause", "resume", "latch")]
+    assert recorded_run_verdict(records).verdict == "PASS"
+    assert recorded_run_verdict([dict(r) for r in records if r["kind"] != "vm_replay"]).verdict == "FAIL"
 
 
 # --- isolation --------------------------------------------------------------------------------------------------------
@@ -1523,7 +2214,7 @@ def test_a_session_that_recorded_mac_halt_replays_it(sc: Scenario):
 def test_the_replay_makes_no_network_or_relay_call(sc: Scenario, network_sentinel: list[str]):
     fund(sc, quantity=10)
     sc.intent(S1, "buy", 1, "100.00", isin=ISIN_B)
-    run = replay_run(sc.records(), run_id=RUN, sessions=[S1], pins_by_session={S1: sc.pins_for(S1)}, vm_source=sc.vm, sink=Sink())
+    run = sc.run(Sink())
     assert run.verdict == "PASS" and network_sentinel == []
 
 

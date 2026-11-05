@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import duckdb
 import pytest
 
+from brokers.breeze_gateway.orders import VmBuild, build_digest
 from pilot_data.constituents import latest_index_list
 from pilot_data.core import PilotDataError
 from pilot_data.store import DB_FILE_NAME, PilotDataStore
@@ -38,6 +39,8 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", refuse)
 
+BUILD = VmBuild("a" * 40, {"intent.py": "c" * 64}, build_digest("a" * 40, {"intent.py": "c" * 64}))
+
 
 def inputs_for(store):
     def current_hashes():
@@ -50,7 +53,7 @@ def test_open_run_gets_past_the_index_list_precondition_on_a_seeded_store(world,
     ss.seed(world, tmp_path / "session")
     with PilotDataStore(tmp_path / "session", workspace="india", read_only=True) as seeded:
         with pytest.raises(PastTheIndexListCheck):  # raised by the line after the check
-            open_run(tmp_path / "ev", run_id="run64", inputs=inputs_for(seeded), orders=None)
+            open_run(tmp_path / "ev", run_id="run64", inputs=inputs_for(seeded), orders=None, build=BUILD, mint_limits_sha256="b" * 64)
     assert not (tmp_path / "ev").exists()
 
 
@@ -66,7 +69,7 @@ def test_open_run_refuses_on_a_store_seeded_from_a_research_store_with_no_list_f
     with PilotDataStore(tmp_path / "session", workspace="india", read_only=True) as seeded:
         assert latest_index_list(seeded, "nifty500", fetched_by=ss.WINDOW[0]) is None
         with pytest.raises(OpenRunRefused) as caught:
-            open_run(tmp_path / "ev", run_id="run64", inputs=inputs_for(seeded), orders=None)
+            open_run(tmp_path / "ev", run_id="run64", inputs=inputs_for(seeded), orders=None, build=BUILD, mint_limits_sha256="b" * 64)
     assert caught.value.code == "index_list_snapshot_not_seeded"
 
 

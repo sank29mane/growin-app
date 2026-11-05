@@ -857,6 +857,15 @@ GOOD: dict[str, dict[str, Any]] = {
         "run_start_session": "2026-10-22", "audit_base_seq": 0, "audit_base_sha256": "0" * 64, "window_start": "2026-04-01",
     },
     "vm_intent": {**INTENT, "vm_intent_id": "i" + "a" * 40, "vm_intent_sha256": sha("v")},
+    "vm_build": {
+        "commit": "a" * 40, "orders_sha256": {"intent.py": sha("intent.py")}, "digest": sha("digest"),
+        "mint_limits_sha256": sha("mint"),
+    },
+    "vm_replay": {
+        "verdict": "PASS", "build_commit": "a" * 40, "build_digest": sha("digest"), "limits_sha256": sha("file"),
+        "mint_limits_sha256": sha("mint"), "intents_compared": 2, "no_intents": False,
+    },
+    "replay_defect": {"code": "replay_divergence", "detail": "cash_insufficient"},
 }
 
 
@@ -1296,3 +1305,71 @@ def test_create_refuses_a_flag_that_is_not_a_boolean(tmp_path):
         EvidenceStore.create(tmp_path, run_id=RUN, run_class="plumbing", session_id=SESSION, hashes=HASHES,
                              holdout_dated_inputs="true")  # type: ignore[arg-type]
     assert refused.value.code == "bad_holdout_flag" and not (tmp_path / RUN).exists()
+
+
+# --- 64-05 Task 2b: the quote pin on the intent, the VM build and the replay records ----------------------------------
+
+PIN = {
+    "quote_ltp": "100.50", "quote_lower_circuit": "90.45", "quote_upper_circuit": "110.55",
+    "quote_previous_close": "100.00", "quote_series": "EQ", "quote_session_date": "2026-10-22",
+    "tick_reference": "100.50", "quote_raw_sha256": "e" * 64,
+}
+
+
+def test_an_intent_carries_all_eight_pin_fields_or_none_and_a_null_tick_is_kept(tmp_path):
+    store = make_store(tmp_path)
+    plain = store.append("intent", GOOD["intent"])
+    assert not set(PIN) & set(plain)
+    pinned = store.append("intent", {**GOOD["intent"], **PIN})
+    assert all(pinned[k] == v for k, v in PIN.items())
+    nulled = store.append("intent", {**GOOD["intent"], **{**PIN, "tick_reference": None}})
+    assert "tick_reference" in nulled and nulled["tick_reference"] is None  # a present null is not a missing key
+    before = snapshot(store.run_dir)
+    for dropped in PIN:  # seven of the eight: refused, whichever one is missing
+        with pytest.raises(EvidenceRefused) as caught:
+            store.append("intent", {**GOOD["intent"], **{k: v for k, v in PIN.items() if k != dropped}})
+        assert caught.value.code == "bad_field", dropped
+    assert snapshot(store.run_dir) == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"quote_ltp": 100.5}, {"quote_ltp": "1e3"}, {"quote_series": "eq"}, {"quote_session_date": "22-10-2026"},
+        {"quote_raw_sha256": "E" * 64}, {"tick_reference": "x"}, {"tick_reference": 1},
+    ],
+)
+def test_a_pin_field_of_the_wrong_type_is_refused(tmp_path, change):
+    store = make_store(tmp_path)
+    with pytest.raises(EvidenceRefused) as caught:
+        store.append("intent", {**GOOD["intent"], **PIN, **change})
+    assert caught.value.code in ("bad_field", "float_refused")  # a JSON float is refused before the type check
+
+
+@pytest.mark.parametrize(
+    ("kind", "change"),
+    [
+        ("vm_build", {"commit": "a" * 39}),
+        ("vm_build", {"commit": "A" * 40}),
+        ("vm_build", {"orders_sha256": {"../intent.py": sha("x")}}),
+        ("vm_build", {"orders_sha256": {"a/../b.py": sha("x")}}),
+        ("vm_build", {"orders_sha256": {"/abs.py": sha("x")}}),
+        ("vm_build", {"orders_sha256": {}}),
+        ("vm_build", {"orders_sha256": {f"f{n}.py": sha(str(n)) for n in range(65)}}),
+        ("vm_build", {"orders_sha256": {"intent.py": "z" * 64}}),
+        ("vm_build", {"orders_sha256": ["intent.py"]}),
+        ("vm_replay", {"intents_compared": 1.0}),
+        ("vm_replay", {"no_intents": "false"}),
+    ],
+)
+def test_the_new_record_kinds_are_strict(tmp_path, kind, change):
+    store = make_store(tmp_path)
+    with pytest.raises(EvidenceRefused) as caught:
+        store.append(kind, {**GOOD[kind], **change})
+    assert caught.value.code in ("bad_field", "float_refused")  # a JSON float is refused before the type check
+
+
+def test_a_file_map_of_exactly_64_entries_is_accepted(tmp_path):
+    store = make_store(tmp_path)
+    files = {f"f{n}.py": sha(str(n)) for n in range(64)}
+    assert store.append("vm_build", {**GOOD["vm_build"], "orders_sha256": files})["orders_sha256"] == files

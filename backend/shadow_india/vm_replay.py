@@ -8,15 +8,18 @@ no relay client and no HTTP client, and the test suite runs it under a network s
 
 What the replay refuses (typed ``ReplayRefused``, nothing written):
 
-- ``replay_build_mismatch``: no recorded build identity, the checkout's commit is not the recorded one, the file
+- ``replay_build_mismatch``: no recorded build identity (the session's ``vm_build`` records, which must all agree), the checkout's commit is not the recorded one, the file
   hashes under ``orders/`` differ from the recorded ones, the code cannot be loaded, or the public surface the
   replay calls (``evaluate``'s signature, the dataclass fields it builds) is not the one this file pins. The
   replay never adapts to a changed surface and never falls back to the working tree;
-- ``replay_limits_mismatch``: the limits values supplied for the session do not hash to the limits hash the
-  session recorded. No default and no working-tree limits file is ever read;
-- ``replay_pins_missing`` / ``replay_pins_invalid``: the pinned quote or tick reference of an intent is absent,
-  or the pins document is malformed. Evidence holds neither the quote circuits nor the build identity today, so
-  they arrive as a hashed pins document;
+- ``replay_limits_mismatch``: two hashes must both hold. The IndiaLimits file hash (what the manifest and every
+  signal carry) must equal the hash of the limits the caller loaded from the pinned private config, and the nine-key
+  P-06 hash the Mac minted with (recorded on the session's ``vm_build``) must equal the hash of the nine keys the
+  recorded build builds from that same config. The collar lives only in ``execution.json``, so the second check is
+  what pins it to the session. No default and no working-tree limits file is ever read;
+- ``replay_pins_missing`` / ``replay_pins_invalid``: the quote or tick reference an ``intent`` record pins (all eight
+  fields, written in the same append as the intent) is absent or malformed;
+- ``replay_session_open``: the session has no ``session_close`` yet. Only closed sessions are replayed;
 - ``replay_evidence_invalid`` / ``replay_state_ambiguous``: the evidence cannot be folded into one portfolio, or a
   record lacks a field the replay reads;
 - ``replay_signal_missing`` / ``replay_signal_mismatch``: an entry intent's ``signal`` record is absent or names
@@ -71,8 +74,6 @@ _EXIT_ID = re.compile(r"^exit-(halve|stop|flatten)-\d{8}-[A-Z]{2}[A-Z0-9]{9}[0-9
 
 D06_LABEL = "Mac simulation plus separately tested VM guards"
 
-PINS_SCHEMA = "growin-vm-replay-pins/1"
-
 # Refusal and defect codes. Stable, and none carries a value.
 BUILD_MISMATCH = "replay_build_mismatch"
 LIMITS_MISMATCH = "replay_limits_mismatch"
@@ -89,6 +90,17 @@ DIVERGENCE = "replay_divergence"
 DAY_MISSING = "replay_day_missing"
 BUILD_HASH_MIXED = "replay_build_hash_mixed"
 SESSION_REFUSED = "replay_session_refused"
+SESSION_OPEN = "replay_session_open"
+NOT_DECIDE_DAY = "replay_not_a_decide_day"
+STRAY_RECORD = "replay_record_outside_decide_days"
+NONDETERMINISTIC = "replay_nondeterministic"
+DEFECT = "replay_defect"
+NOT_REPLAYED = "not_replayed:no_decide"
+
+# Shadow never calls ``OrdersClient.halt`` and never reads an account id mismatch, so a session is replayed with both
+# flags false. A VM answer carrying either code is classified ABORT on the Mac (``vm_codes``), so such a run has ended.
+MAC_HALT = False
+ACCOUNT_MISMATCH = False
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -203,8 +215,8 @@ class QuotePin:
     lower_circuit: Decimal
     upper_circuit: Decimal
     previous_close: Decimal
-    series: str | None = None
-    session_date: date | None = None  # absent: the session date of the decision
+    series: str
+    session_date: date
 
 
 @dataclass(frozen=True)
@@ -214,34 +226,18 @@ class IntentPin:
 
 
 @dataclass(frozen=True)
-class SessionPins:
-    session_id: str
-    build: BuildIdentity | None
-    limits_sha256: str
-    limits: Mapping[str, Any]  # the nine contract keys, as recorded
-    intents: Mapping[str, IntentPin]
-    mac_halt: bool = False
-    account_mismatch: bool = False
-    sha256: str = ""  # of the pins document bytes
+class ReplayLimits:
+    """What the caller loaded from the pinned private config: the nine P-06 keys and the IndiaLimits file hash.
+
+    The values are edge: they are never part of a ``repr``, a record, a log line or the report. Only hashes are.
+    """
+
+    fields: Mapping[str, Any] = field(repr=False)
+    file_sha256: str
 
 
 def _sha256_json(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
-
-
-def _strict_loads(text: str) -> Any:
-    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for key, value in items:
-            if key in out:
-                raise ValueError("duplicate key")
-            out[key] = value
-        return out
-
-    def no_float(_: str) -> Any:
-        raise ValueError("float")
-
-    return json.loads(text, object_pairs_hook=pairs, parse_float=no_float, parse_constant=no_float)
 
 
 def _dec(value: Any, *, code: str = PINS_INVALID) -> Decimal:
@@ -278,66 +274,76 @@ def _seq(record: Mapping[str, Any]) -> int:
     return value
 
 
-def parse_pins(data: bytes) -> SessionPins:
-    """Parse one pins document strictly. A float, a duplicate key or a missing field is ``replay_pins_invalid``."""
+# The eight fields an ``intent`` record pins (``evidence.QUOTE_PIN_FIELDS``, written by ``admission.quote_pin_fields``).
+PIN_FIELDS: tuple[str, ...] = (
+    "quote_ltp", "quote_lower_circuit", "quote_upper_circuit", "quote_previous_close", "quote_series",
+    "quote_session_date", "tick_reference", "quote_raw_sha256",
+)
 
-    try:
-        doc = _strict_loads(data.decode("ascii"))
-    except (ValueError, UnicodeDecodeError):
-        raise ReplayRefused(PINS_INVALID) from None
-    if not isinstance(doc, dict) or doc.get("schema") != PINS_SCHEMA:
-        raise ReplayRefused(PINS_INVALID)
-    session_id = doc.get("session_id")
-    limits_sha = doc.get("limits_sha256")
-    limits = doc.get("limits")
-    intents = doc.get("intents")
-    if not isinstance(session_id, str) or not isinstance(limits_sha, str) or not _HEX64.match(limits_sha):
-        raise ReplayRefused(PINS_INVALID)
-    if not isinstance(limits, dict) or not isinstance(intents, dict):
-        raise ReplayRefused(PINS_INVALID)
-    mac_halt, account_mismatch = doc.get("mac_halt", False), doc.get("account_mismatch", False)
-    if not isinstance(mac_halt, bool) or not isinstance(account_mismatch, bool):
-        raise ReplayRefused(PINS_INVALID)
-    build: BuildIdentity | None = None
-    raw_build = doc.get("build")
-    if raw_build is not None:
-        if not isinstance(raw_build, dict):
-            raise ReplayRefused(PINS_INVALID)
-        commit, files = raw_build.get("commit"), raw_build.get("orders_sha256")
-        if (
-            not isinstance(commit, str)
-            or not _HEX40.match(commit)
-            or not isinstance(files, dict)
-            or not files
-            or not all(isinstance(k, str) and isinstance(v, str) and _HEX64.match(v) for k, v in files.items())
-        ):
-            raise ReplayRefused(PINS_INVALID)
-        build = BuildIdentity(commit, dict(files))
-    pins: dict[str, IntentPin] = {}
-    for intent_id, body in intents.items():
-        if not isinstance(body, dict) or "quote" not in body or "tick_reference" not in body:
-            raise ReplayRefused(PINS_INVALID)
-        quote = body["quote"]
-        if not isinstance(quote, dict):
-            raise ReplayRefused(PINS_INVALID)
-        series, when = quote.get("series"), quote.get("session_date")
-        if series is not None and not isinstance(series, str):
+
+def pins_from_evidence(records: Sequence[Mapping[str, Any]], session_id: str) -> dict[str, IntentPin]:
+    """The quote and tick pin of every ``intent`` record of the session. One missing field is ``replay_pins_missing``.
+
+    ``tick_reference`` must be a KEY of the record: its value is a decimal string or null, and null replays as
+    ``tick_reference=None`` (the Mac could not supply one; the VM judges that). A missing key is a missing pin.
+    """
+
+    out: dict[str, IntentPin] = {}
+    for record in records:
+        if record.get("kind") != "intent" or record.get("session_id") != session_id:
+            continue
+        if any(name not in record for name in PIN_FIELDS):
+            raise ReplayRefused(PINS_MISSING)
+        series, when = record["quote_series"], record["quote_session_date"]
+        if not isinstance(series, str):
             raise ReplayRefused(PINS_INVALID)
         try:
-            session_date = date.fromisoformat(when) if when is not None else None
+            session_date = date.fromisoformat(when)
         except (TypeError, ValueError):
             raise ReplayRefused(PINS_INVALID) from None
-        tick = body["tick_reference"]
-        pins[intent_id] = IntentPin(
+        tick = record["tick_reference"]
+        out[str(_need(record, "intent_id"))] = IntentPin(
             QuotePin(
-                _dec(quote.get("ltp")), _dec(quote.get("lower_circuit")), _dec(quote.get("upper_circuit")),
-                _dec(quote.get("previous_close")), series, session_date,
+                _dec(record["quote_ltp"]), _dec(record["quote_lower_circuit"]), _dec(record["quote_upper_circuit"]),
+                _dec(record["quote_previous_close"]), series, session_date,
             ),
             None if tick is None else _dec(tick),
         )
-    return SessionPins(
-        session_id, build, limits_sha, dict(limits), pins, mac_halt, account_mismatch, hashlib.sha256(data).hexdigest()
-    )
+    return out
+
+
+def build_from_evidence(records: Sequence[Mapping[str, Any]], session_id: str) -> tuple[BuildIdentity, str]:
+    """The build and the nine-key mint hash the session recorded. Every ``vm_build`` of the session must be equal.
+
+    No ``vm_build`` for the session, two unequal ones, a malformed one, or a digest that does not recompute from the
+    commit and the file map is ``replay_build_mismatch``. Nothing else (no argument, no file) names a build.
+    """
+
+    found = [r for r in records if r.get("kind") == "vm_build" and r.get("session_id") == session_id]
+    if not found:
+        raise ReplayRefused(BUILD_MISMATCH)
+    shapes = {
+        (
+            r.get("commit"), json.dumps(r.get("orders_sha256"), sort_keys=True, default=str), r.get("digest"),
+            r.get("mint_limits_sha256"),
+        )
+        for r in found
+    }
+    if len(shapes) != 1:
+        raise ReplayRefused(BUILD_MISMATCH)
+    first = found[0]
+    commit, files, digest, mint = first.get("commit"), first.get("orders_sha256"), first.get("digest"), first.get("mint_limits_sha256")
+    if (
+        not isinstance(commit, str) or not _HEX40.match(commit)
+        or not isinstance(files, dict) or not files
+        or not all(isinstance(k, str) and isinstance(v, str) and _HEX64.match(v) for k, v in files.items())
+        or not isinstance(digest, str) or not isinstance(mint, str) or not _HEX64.match(mint)
+    ):
+        raise ReplayRefused(BUILD_MISMATCH)
+    build = BuildIdentity(commit, dict(files))
+    if build.digest != digest:
+        raise ReplayRefused(BUILD_MISMATCH)
+    return build, mint
 
 
 # --- the recorded build ------------------------------------------------------------------------------------------
@@ -637,32 +643,43 @@ def _entry_identity(intent: Mapping[str, Any], signals: Mapping[str, Mapping[str
     return _Identity(signal["isin"], signal["series"])
 
 
-def _checked_limits(
+def checked_limits(
     vm: _Vm,
-    pins: SessionPins,
+    nine_fields: Mapping[str, Any],
+    file_sha256: str,
+    mint_limits_sha256: str,
+    manifest_hashes: Mapping[str, str],
     records: Sequence[Mapping[str, Any]],
     session_id: str,
     signals: Mapping[str, Mapping[str, Any]],
 ) -> Any:
-    """Build the limits from the supplied values and require them to hash to what the session recorded.
+    """The recorded build's ``Limits``, after both hashes of the session held. Any failure is ``replay_limits_mismatch``.
 
-    Every signal of the session, and the signal behind every entry intent of it, must have recorded that same hash.
+    1. ``file_sha256`` (the IndiaLimits hash of the loaded ``limits.json``) equals the manifest's ``limits_sha256``, and
+       every signal of the session, and the signal behind every entry intent of it, recorded the same value.
+    2. The nine keys build under the recorded build, and their ``sha256`` equals ``mint_limits_sha256`` (what the Mac
+       minted with on this session). The collar comes from ``execution.json`` alone, so this is the only check that pins it.
+
+    The two hashes are different documents and are never compared with each other. Both checks run for every session,
+    one with only sells included.
     """
 
-    try:
-        limits = vm.limits_cls.from_fields(dict(pins.limits))
-    except Exception:  # noqa: BLE001 - a limits document the recorded build rejects cannot be the session's limits
-        raise ReplayRefused(LIMITS_MISMATCH) from None
-    if limits.sha256 != pins.limits_sha256:
+    if manifest_hashes.get("limits_sha256") != file_sha256:
         raise ReplayRefused(LIMITS_MISMATCH)
     for record in records:
         if record.get("kind") == "signal" and record.get("session_id") == session_id:
-            if record.get("limits_sha256") != pins.limits_sha256:
+            if record.get("limits_sha256") != file_sha256:
                 raise ReplayRefused(LIMITS_MISMATCH)
         elif record.get("kind") == "intent" and record.get("session_id") == session_id:
             # An exit or swing sell has no signal, so there is no per-signal hash to check: the session-level one stands.
-            if _leg_of(record) == LEG_ENTRY and _signal_of(record, signals).get("limits_sha256") != pins.limits_sha256:
+            if _leg_of(record) == LEG_ENTRY and _signal_of(record, signals).get("limits_sha256") != file_sha256:
                 raise ReplayRefused(LIMITS_MISMATCH)
+    try:
+        limits = vm.limits_cls.from_fields(dict(nine_fields))
+    except Exception:  # noqa: BLE001 - a limits document the recorded build rejects cannot be the session's limits
+        raise ReplayRefused(LIMITS_MISMATCH) from None
+    if limits.sha256 != mint_limits_sha256:
+        raise ReplayRefused(LIMITS_MISMATCH)
     return limits
 
 
@@ -771,7 +788,7 @@ class _Fold:
         if cumulative == admitted:
             self.terminal.add(intent_id)
 
-    def snapshot(self, vm: _Vm, pins: SessionPins) -> tuple[Any, Any]:
+    def snapshot(self, vm: _Vm) -> tuple[Any, Any]:
         """(AccountSnapshot, RiskFlags) as the VM takes them, at the point the fold has reached."""
 
         if self.pending:
@@ -800,8 +817,8 @@ class _Fold:
         flags = vm.flags_cls(
             halt=self.halt,
             ended=self.ended,
-            mac_halt=pins.mac_halt,
-            account_mismatch=pins.account_mismatch,
+            mac_halt=MAC_HALT,
+            account_mismatch=ACCOUNT_MISMATCH,
             stops=frozenset(self.stops),
             ledger_cost=costs,
         )
@@ -894,27 +911,29 @@ class SessionReplay:
     verdict: str  # PASS or FAIL
     build_digest: str
     build_commit: str
-    limits_sha256: str
-    pins_sha256: str
+    limits_sha256: str  # the IndiaLimits file hash (the manifest's and the signals')
+    mint_limits_sha256: str  # the nine-key P-06 hash the Mac minted with
     intents_compared: int
     no_intents: bool
     verdicts: tuple[IntentVerdict, ...] = ()
     divergences: tuple[Divergence, ...] = ()
     defects: tuple[str, ...] = ()
+    already_recorded: bool = False  # the session already holds an equal ``vm_replay`` record: nothing was appended
 
 
 class ReplaySink(Protocol):
-    """Where a session's result goes. The CLI wiring (64-05 Task B) implements it over the evidence store and policy.
+    """Where a session's result goes. ``__main__`` implements it over the evidence store and policy.
 
-    ``record_session`` writes the per-session record. ``open_defect`` opens a defect on a divergence or a replay
-    defect. ``pause_run`` pauses the run on a divergence so ``decide`` refuses until an operator reason.
+    ``record_session`` writes the per-session record and returns its ``seq``: that record is the finding. ``open_defect``
+    opens a defect and ``pause_run`` pauses the run (scope all) for a finding, and both carry that finding's ``seq`` so
+    "this finding already has its defect or pause" can be read back from the evidence, whatever resumed in between.
     """
 
-    def record_session(self, result: SessionReplay) -> None: ...
+    def record_session(self, result: SessionReplay) -> int: ...
 
-    def open_defect(self, code: str, session_id: str, detail: str) -> None: ...
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None: ...
 
-    def pause_run(self, event: str, reason: str) -> None: ...
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None: ...
 
 
 def _ist_of(record: Mapping[str, Any], vm: _Vm) -> datetime:
@@ -927,7 +946,7 @@ def _ist_of(record: Mapping[str, Any], vm: _Vm) -> datetime:
     return stamp.astimezone(vm.ist)
 
 
-def _vm_intent(vm: _Vm, record: Mapping[str, Any], pins: SessionPins, identity: _Identity) -> Any:
+def _vm_intent(vm: _Vm, record: Mapping[str, Any], limits_sha256: str, identity: _Identity) -> Any:
     side = str(_need(record, "side"))
     price = _dec(_need(record, "limit_price"), code=EVIDENCE_INVALID)
     values = {
@@ -947,31 +966,42 @@ def _vm_intent(vm: _Vm, record: Mapping[str, Any], pins: SessionPins, identity: 
         "limit_price": format(price, "f"),
         "reason": "entry" if side == "buy" else "exit",
         "batch_id": None,
-        "limits_sha256": pins.limits_sha256,
+        "limits_sha256": limits_sha256,
         "params_sha256": _UNUSED_HEX,
         "key_id": _UNUSED_HEX,
     }
     return vm.intent_cls(**values)
 
 
-def _vm_quote(vm: _Vm, record: Mapping[str, Any], pin: IntentPin, decided: datetime, identity: _Identity) -> Any:
-    if identity.series is None:  # a sell: no signal names the series, so the pinned quote must
-        if pin.quote.series is None:
-            raise ReplayRefused(PINS_MISSING)
-        series = pin.quote.series
-    elif pin.quote.series is not None and pin.quote.series != identity.series:
-        raise ReplayRefused(SIGNAL_MISMATCH)
-    else:
-        series = identity.series
+def _vm_quote(vm: _Vm, record: Mapping[str, Any], pin: IntentPin, identity: _Identity) -> Any:
+    if identity.series is not None and pin.quote.series != identity.series:
+        raise ReplayRefused(SIGNAL_MISMATCH)  # a sell has no signal, so its pinned series stands
     return vm.quote_cls(
         stock_code=str(_need(record, "symbol")),
         isin=identity.isin,
-        series=series,
+        series=pin.quote.series,
         ltp=pin.quote.ltp,
         lower_circuit=pin.quote.lower_circuit,
         upper_circuit=pin.quote.upper_circuit,
         previous_close=pin.quote.previous_close,
-        session_date=pin.quote.session_date or decided.date(),
+        session_date=pin.quote.session_date,
+    )
+
+
+def _stored_replays(records: Sequence[Mapping[str, Any]], session_id: str) -> list[Mapping[str, Any]]:
+    return [r for r in records if r.get("kind") == "vm_replay" and r.get("session_id") == session_id]
+
+
+def _same_as_stored(stored: Mapping[str, Any], result: SessionReplay) -> bool:
+    """The fields the record keeps, against a fresh result: verdict, build, both limits hashes, the count and the reasons."""
+
+    return (
+        stored.get("verdict") == result.verdict
+        and stored.get("build_digest") == result.build_digest
+        and stored.get("limits_sha256") == result.limits_sha256
+        and stored.get("mint_limits_sha256") == result.mint_limits_sha256
+        and stored.get("intents_compared") == result.intents_compared
+        and list(stored.get("divergence_reasons", [])) == [d.reason for d in result.divergences]
     )
 
 
@@ -980,19 +1010,39 @@ def replay_session(
     *,
     run_id: str,
     session_id: str,
-    pins: SessionPins,
+    limits: ReplayLimits,
+    manifest_hashes: Mapping[str, str],
     vm_source: Path,
     sink: ReplaySink | None = None,
 ) -> SessionReplay:
-    """Replay one session. Raises ``ReplayRefused`` before any verdict exists; otherwise returns and records the result."""
+    """Replay one closed session. Raises ``ReplayRefused`` before any verdict exists; otherwise returns and records the result.
 
-    if pins.session_id != session_id:
-        raise ReplayRefused(PINS_MISSING)
-    vm = load_recorded_build(vm_source, pins.build)
-    assert pins.build is not None  # load_recorded_build refuses a missing identity
+    The build, the nine-key mint hash and every quote and tick pin come from the evidence. The caller supplies only
+    what the pinned private config holds (``limits``) and the manifest's hashes.
+
+    A session that already holds a ``vm_replay`` record is not recorded again: an equal fresh result is reported
+    ``already_recorded``, and a different one opens a ``replay_nondeterministic`` defect and is a FAIL. A fresh FAIL that
+    no stored record holds is a new finding: it is recorded first, and its defect and pause follow and link to it.
+
+    Before anything is built or validated, every stored FAIL of the session is finished (``_complete_stored``): a
+    process that stopped after the record, or a private config that changed since, never leaves a finding without
+    its defect and pause. A refusal after that still propagates, so the run reads FAIL for both.
+    """
+
+    if session_id not in replay_sessions(records):  # the open-run day or an operator day is not replayed, and records nothing
+        raise ReplayRefused(NOT_DECIDE_DAY)
+    if not any(r.get("kind") == "session_close" and r.get("session_id") == session_id for r in records):
+        raise ReplayRefused(SESSION_OPEN)
+    if sink is not None:
+        _complete_stored(records, session_id, sink)  # before the build or the limits can refuse
+    build, mint_limits_sha256 = build_from_evidence(records, session_id)
+    vm = load_recorded_build(vm_source, build)
     try:
         signals = _signal_index(records)
-        limits = _checked_limits(vm, pins, records, session_id, signals)
+        checked = checked_limits(
+            vm, limits.fields, limits.file_sha256, mint_limits_sha256, manifest_hashes, records, session_id, signals
+        )
+        pins = pins_from_evidence(records, session_id)
         macs = mac_verdicts(records)
         fold = _Fold(signals)
         verdicts: list[IntentVerdict] = []
@@ -1003,7 +1053,7 @@ def replay_session(
             is_ours = record.get("kind") == "intent" and record.get("session_id") == session_id
             if is_ours and not divergences and not defects:
                 seen += 1
-                outcome = _replay_intent(vm, limits, pins, fold, record, macs)
+                outcome = _replay_intent(vm, checked, pins, fold, record, macs)
                 if isinstance(outcome, Divergence):
                     divergences.append(outcome)
                     verdicts.append(IntentVerdict(outcome.intent_id, outcome.mac_decision, outcome.mac_codes, outcome.vm_codes, False))
@@ -1016,10 +1066,10 @@ def replay_session(
             run_id=run_id,
             session_id=session_id,
             verdict=FAIL if divergences or defects else PASS,
-            build_digest=pins.build.digest,
-            build_commit=pins.build.commit,
-            limits_sha256=pins.limits_sha256,
-            pins_sha256=pins.sha256,
+            build_digest=build.digest,
+            build_commit=build.commit,
+            limits_sha256=limits.file_sha256,
+            mint_limits_sha256=mint_limits_sha256,
             intents_compared=len(verdicts),
             no_intents=seen == 0,
             verdicts=tuple(verdicts),
@@ -1028,38 +1078,127 @@ def replay_session(
         )
     finally:
         vm.close()  # the private copy of the build's files
+    stored = _stored_replays(records, session_id)
+    if not stored:
+        if sink is not None:
+            _record_finding(sink, session_id, result)
+        return result
+    if all(_same_as_stored(r, result) for r in stored):
+        return dataclasses.replace(result, already_recorded=True)
+    fresh = result
+    result = dataclasses.replace(result, verdict=FAIL, defects=result.defects + (NONDETERMINISTIC,))
     if sink is not None:
-        sink.record_session(result)
-        for divergence in divergences:
-            sink.open_defect(DIVERGENCE, session_id, divergence.reason)
-            sink.pause_run(DIVERGENCE, f"{session_id}:{divergence.intent_id}:{divergence.reason}")
-        for defect in defects:
-            sink.open_defect(defect, session_id, defect)
+        if fresh.verdict == FAIL and not any(_same_as_stored(r, fresh) for r in stored):
+            _record_finding(sink, session_id, fresh)  # a new finding of its own: no earlier resume can cover it
+        first = min(_seq(r) for r in stored)  # the nondeterminism contradicts the first verdict the session stored
+        if not _held_defect(records, session_id, first, NONDETERMINISTIC):
+            sink.open_defect(NONDETERMINISTIC, session_id, NONDETERMINISTIC, first)
     return result
+
+
+def _owed(session_id: str, reasons: Sequence[str], intent_id: str, defects: Sequence[str]) -> list[tuple[str, str, str]]:
+    """The writes a FAIL finding owes after its ``vm_replay`` record, in order: ``(kind, code_or_event, detail_or_reason)``.
+
+    A divergence opens a defect and pauses the run (scope all); a defect of the session opens its own defect. Replay
+    stops at the first divergence, so a record holds one reason and one intent id.
+    """
+
+    actions: list[tuple[str, str, str]] = []
+    for reason in reasons:
+        actions.append(("defect", DIVERGENCE, reason))
+        actions.append(("pause", DIVERGENCE, f"{session_id}:{intent_id}:{reason}"))
+    for defect in defects:
+        actions.append(("defect", defect, defect))
+    return actions
+
+
+def _record_finding(sink: ReplaySink, session_id: str, result: SessionReplay) -> None:
+    """Record ``result`` as a finding and, when it is a FAIL, write what it owes, each write linked to the new record."""
+
+    finding = sink.record_session(result)
+    intent_id = result.divergences[0].intent_id if result.divergences else "-"
+    for action in _owed(session_id, [d.reason for d in result.divergences], intent_id, result.defects):
+        _apply(sink, session_id, action, finding)
+
+
+def _apply(sink: ReplaySink, session_id: str, action: tuple[str, str, str], finding_seq: int) -> None:
+    kind, first, second = action
+    if kind == "defect":
+        sink.open_defect(first, session_id, second, finding_seq)
+    else:
+        sink.pause_run(first, second, finding_seq)
+
+
+def _held_defect(records: Sequence[Mapping[str, Any]], session_id: str, finding_seq: int, code: str) -> bool:
+    return any(
+        r.get("kind") == "replay_defect" and r.get("session_id") == session_id and r.get("finding_seq") == finding_seq
+        and r.get("code") == code and _seq(r) > finding_seq  # a link only counts from a record written after its finding
+        for r in records
+    )
+
+
+def complete_stored(records: Sequence[Mapping[str, Any]], session_ids: Sequence[str], sink: ReplaySink) -> None:
+    """Finish what each stored FAIL of ``session_ids`` still owes. Needs only the evidence, so the CLI runs it before the
+    private config is loaded: a config that is missing or invalid never leaves a stored finding without its pause."""
+
+    for session_id in session_ids:
+        _complete_stored(records, session_id, sink)
+
+
+def _complete_stored(records: Sequence[Mapping[str, Any]], session_id: str, sink: ReplaySink) -> None:
+    """Write what each stored FAIL of the session still owes (the process stopped after its record): its defects and its pause.
+
+    "Held" is read from the evidence by link: a ``replay_defect`` or ``pause`` record that carries this finding's
+    ``seq``. A pause the operator already resumed is held, so it is not raised again; no other resume matters, so an
+    unrelated one cannot excuse a pause that never landed. Each defect is keyed by finding and code. Nothing is
+    written for what is already there, so a further re-run writes nothing.
+    """
+
+    for record in sorted(_stored_replays(records, session_id), key=_seq):
+        if record.get("verdict") != FAIL:
+            continue
+        finding = _seq(record)
+        held_pauses = {
+            r.get("reason") for r in records
+            if r.get("kind") == "pause" and r.get("event") == DIVERGENCE and r.get("finding_seq") == finding and _seq(r) > finding
+        }
+        written: set[tuple[str, str]] = set()
+        owed = _owed(
+            session_id, [str(c) for c in record.get("divergence_reasons", [])], str(record.get("divergent_intent_id", "-")),
+            [str(c) for c in record.get("defects", [])],
+        )
+        for action in owed:
+            kind, first, second = action
+            if kind == "defect" and (_held_defect(records, session_id, finding, first) or (kind, first) in written):
+                continue
+            if kind == "pause" and second in held_pauses:
+                continue
+            written.add((kind, first))
+            _apply(sink, session_id, action, finding)
 
 
 def _replay_intent(
     vm: _Vm,
     limits: Any,
-    pins: SessionPins,
+    pins: Mapping[str, IntentPin],
     fold: _Fold,
     record: Mapping[str, Any],
     macs: Mapping[str, MacVerdict],
 ) -> IntentVerdict | Divergence | str:
     intent_id = str(_need(record, "intent_id"))
-    pin = pins.intents.get(intent_id)
+    pin = pins.get(intent_id)
     if pin is None:
         raise ReplayRefused(PINS_MISSING)
     decided = _ist_of(record, vm)
     identity = fold.identity(record)
-    account, flags = fold.snapshot(vm, pins)
+    account, flags = fold.snapshot(vm)
     codes = vm.evaluate(
         limits,
         flags,
         account,
-        _vm_quote(vm, record, pin, decided, identity),
+        _vm_quote(vm, record, pin, identity),
         decided,
-        _vm_intent(vm, record, pins, identity),
+        _vm_intent(vm, record, limits.sha256, identity),
         kill_enabled=REPLAY_KILL_ENABLED,
         tick_reference=pin.tick_reference,
         # No tick_table: the VM resolves its default, the data file beside the loaded build (hashed with orders/).
@@ -1085,6 +1224,7 @@ class RunReplay:
     missing: tuple[str, ...] = ()
     refused: Mapping[str, str] = field(default_factory=dict)
     reasons: tuple[str, ...] = ()
+    not_replayed: tuple[str, ...] = ()  # sessions with no decide (r3): listed, never dropped, never replayed
 
     @property
     def build_digests(self) -> tuple[str, ...]:
@@ -1095,11 +1235,36 @@ def evidence_sessions(records: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return tuple(sorted({str(r["session_id"]) for r in records if r.get("session_id")}))
 
 
+_DECIDE_KINDS = frozenset({"signal", "non_evaluation_day", "intent"})
+
+
+def replay_sessions(records: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """The decide days: sessions that hold a ``signal``, a ``non_evaluation_day`` or an ``intent`` record.
+
+    A ``vm_build`` alone never makes a replay day. The open-run record sits on the run-start session, which gets no
+    ``session_close`` when the first decide is on a later day, so counting it would refuse ``replay_session_open``.
+    """
+
+    return tuple(sorted({str(r["session_id"]) for r in records if r.get("kind") in _DECIDE_KINDS and r.get("session_id")}))
+
+
+def not_replayed_sessions(records: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """EVERY session id in the evidence outside ``replay_sessions``, whatever records it holds (no record-kind allowlist).
+
+    The open-run day holds ``run_start`` and ``vm_build``; a decide that paused before any signal can hold ``vm_build``,
+    ``pause``, ``expiry`` or booking rows; an operator day holds ``resume``. None of them is a replay day and none is dropped.
+    """
+
+    decided = set(replay_sessions(records))
+    return tuple(sorted(set(evidence_sessions(records)) - decided))
+
+
 def run_verdict(
     run_id: str,
     sessions: Sequence[str],
     results: Mapping[str, SessionReplay],
     refused: Mapping[str, str] | None = None,
+    not_replayed: Sequence[str] = (),
 ) -> RunReplay:
     """The D-23 verdict for a run: PASS only when every session has a PASS record, all at one build hash.
 
@@ -1120,42 +1285,100 @@ def run_verdict(
         reasons.append(BUILD_HASH_MIXED)
     if not ordered and not missing and not refused:
         reasons.append(DAY_MISSING)  # a run with nothing replayed has not passed
-    return RunReplay(run_id, FAIL if reasons else PASS, ordered, missing, refused, tuple(dict.fromkeys(reasons)))
+    return RunReplay(
+        run_id, FAIL if reasons else PASS, ordered, missing, refused, tuple(dict.fromkeys(reasons)), tuple(sorted(not_replayed))
+    )
 
 
 def replay_run(
     records: Sequence[Mapping[str, Any]],
     *,
     run_id: str,
-    sessions: Sequence[str],
-    pins_by_session: Mapping[str, SessionPins],
+    limits: ReplayLimits,
+    manifest_hashes: Mapping[str, str],
     vm_source: Path,
     sink: ReplaySink | None = None,
 ) -> RunReplay:
-    """``--all``: every session in ``sessions`` and every session the evidence holds. None is skipped.
+    """``--all``: every decide day of the evidence (``replay_sessions``). None is skipped.
 
-    A session that refuses is listed with its refusal code and the run FAILs; it writes no verdict.
+    A session that refuses is listed with its refusal code and the run FAILs; it writes no verdict. The sessions
+    outside the decide days are listed as ``not_replayed:no_decide``.
     """
 
-    wanted = sorted(set(sessions) | set(evidence_sessions(records)))
+    wanted = replay_sessions(records)
     results: dict[str, SessionReplay] = {}
     refused: dict[str, str] = {}
     for session_id in wanted:
-        pins = pins_by_session.get(session_id)
-        if pins is None:
-            refused[session_id] = PINS_MISSING
-            continue
         try:
             results[session_id] = replay_session(
-                records, run_id=run_id, session_id=session_id, pins=pins, vm_source=vm_source, sink=sink
+                records, run_id=run_id, session_id=session_id, limits=limits, manifest_hashes=manifest_hashes,
+                vm_source=vm_source, sink=sink,
             )
         except ReplayRefused as exc:
             refused[session_id] = exc.code
-    return run_verdict(run_id, wanted, results, refused)
+    return run_verdict(run_id, wanted, results, refused, not_replayed_sessions(records))
+
+
+def _stored_result(record: Mapping[str, Any]) -> SessionReplay:
+    reasons = [str(r) for r in record.get("divergence_reasons", [])]
+    intent_id = str(record.get("divergent_intent_id", "-"))
+    return SessionReplay(
+        run_id=str(record.get("run_id", "")),
+        session_id=str(record["session_id"]),
+        verdict=str(record["verdict"]),
+        build_digest=str(record["build_digest"]),
+        build_commit=str(record["build_commit"]),
+        limits_sha256=str(record["limits_sha256"]),
+        mint_limits_sha256=str(record["mint_limits_sha256"]),
+        intents_compared=int(record["intents_compared"]),
+        no_intents=bool(record["no_intents"]),
+        divergences=tuple(Divergence(intent_id, reason, "recorded", (), ()) for reason in reasons),
+        defects=tuple(str(c) for c in record.get("defects", [])),
+        already_recorded=True,
+    )
+
+
+def recorded_run_verdict(records: Sequence[Mapping[str, Any]], refused: Mapping[str, str] | None = None) -> RunReplay:
+    """The D-23 verdict from the STORED records only (what 64-05 Task 2 and the entry gate read).
+
+    PASS needs all of: at least one decide day; every decide day has a ``vm_replay`` record; every such record is PASS;
+    no ``replay_defect`` record exists for any session; no ``vm_replay`` record for a session that is not a decide day
+    (``replay_record_outside_decide_days``); one build digest across the run. A FAIL record is sticky: it is
+    never replaced by a later PASS record for the same session, and a ``resume`` of the pause it raised changes nothing
+    here (this reads replay records, not pause state). ``refused`` holds the refusal codes of the current pass. Every one
+    is kept, even for a session that holds a stored PASS: a later change of the private config must not be hidden by an
+    earlier record, and the run FAILs (``replay_session_refused``).
+    """
+
+    run_id = next((str(r["run_id"]) for r in records if r.get("run_id")), "")
+    wanted = replay_sessions(records)
+    stored = [r for r in records if r.get("kind") == "vm_replay"]
+    chosen: dict[str, Mapping[str, Any]] = {}
+    for record in stored:
+        session = str(record["session_id"])
+        held = chosen.get(session)
+        if held is None or (held.get("verdict") == PASS and record.get("verdict") != PASS):
+            chosen[session] = record  # a FAIL replaces a PASS and never the other way round
+    stray = sorted(session for session in chosen if session not in wanted)
+    results = {session: _stored_result(record) for session, record in chosen.items() if session in wanted}
+    open_refusals = dict(refused or {})  # a stored PASS never hides a refusal of this pass
+    run = run_verdict(run_id, wanted, results, open_refusals, not_replayed_sessions(records))
+    reasons = list(run.reasons)
+    if stray:  # a replay record for a session that is not a decide day proves nothing and must not count as a replayed day
+        reasons.append(STRAY_RECORD)
+    if any(r.get("kind") == "replay_defect" for r in records):
+        reasons.append(DEFECT)
+    if len({str(r["build_digest"]) for r in stored}) > 1:
+        reasons.append(BUILD_HASH_MIXED)
+    reasons = list(dict.fromkeys(reasons))
+    return dataclasses.replace(run, verdict=FAIL if reasons else PASS, reasons=tuple(reasons))
 
 
 def render_report(run: RunReplay) -> str:
-    """The text of ``64-VM-REPLAY.md``: build hash, limits hash, intents compared, verdict and divergences per session."""
+    """The text of ``64-VM-REPLAY.md``: build hash, both limits hashes, intents compared, verdict and divergences per session.
+
+    Hashes, commits, counts and closed codes only: no limit value, account id or key id ever reaches this text.
+    """
 
     lines = [
         "# 64 VM replay (D-23)",
@@ -1167,25 +1390,27 @@ def render_report(run: RunReplay) -> str:
         f"Reasons: {', '.join(run.reasons) if run.reasons else 'none'}",
         f"Build hashes: {', '.join(run.build_digests) if run.build_digests else 'none'}",
         "",
-        "| Session | Verdict | Build commit | Build hash | Limits hash | Intents compared | Note |",
-        "|---|---|---|---|---|---|---|",
+        "| Session | Verdict | Build commit | Build hash | Limits hash | Mint limits hash | Intents compared | Note |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for s in run.sessions:
         note = "no_intents" if s.no_intents else ", ".join(list(s.defects) + [d.reason for d in s.divergences]) or "-"
         lines.append(
-            f"| {s.session_id} | {s.verdict} | {s.build_commit} | {s.build_digest} | {s.limits_sha256} | {s.intents_compared} | {note} |"
+            f"| {s.session_id} | {s.verdict} | {s.build_commit} | {s.build_digest} | {s.limits_sha256} | "
+            f"{s.mint_limits_sha256} | {s.intents_compared} | {note} |"
         )
     for session_id in run.missing:
-        lines.append(f"| {session_id} | {FAIL} | - | - | - | 0 | {DAY_MISSING} |")
+        lines.append(f"| {session_id} | {FAIL} | - | - | - | - | 0 | {DAY_MISSING} |")
     for session_id, code in sorted(run.refused.items()):
-        lines.append(f"| {session_id} | {FAIL} | - | - | - | 0 | {code} |")
+        lines.append(f"| {session_id} | {FAIL} | - | - | - | - | 0 | {code} |")
+    for session_id in run.not_replayed:
+        lines.append(f"| {session_id} | - | - | - | - | - | 0 | {NOT_REPLAYED} |")
     divergent = [(s, d) for s in run.sessions for d in s.divergences]
     if divergent:
         lines += ["", "## Divergences", ""]
         for s, d in divergent:
-            lines.append(
-                f"- {s.session_id} {d.intent_id}: {d.reason}; Mac {d.mac_decision} {list(d.mac_codes)}; VM {list(d.vm_codes)}"
-            )
+            seen = "" if d.mac_decision == "recorded" else f"; Mac {d.mac_decision} {list(d.mac_codes)}; VM {list(d.vm_codes)}"
+            lines.append(f"- {s.session_id} {d.intent_id}: {d.reason}{seen}")
     lines += ["", "No waiver exists for a divergence, a missing day or a refused session.", ""]
     return "\n".join(lines)
 
@@ -1195,8 +1420,10 @@ __all__ = [
     "BUILD_HASH_MIXED",
     "BUILD_MISMATCH",
     "BuildIdentity",
+    "complete_stored",
     "D06_LABEL",
     "DAY_MISSING",
+    "DEFECT",
     "DENIED",
     "DIVERGENCE",
     "Divergence",
@@ -1207,26 +1434,37 @@ __all__ = [
     "LIMITS_MISMATCH",
     "MAC_TO_VM_CODE",
     "MacVerdict",
+    "NONDETERMINISTIC",
+    "NOT_REPLAYED",
     "NO_DECISION",
     "PASS",
+    "PIN_FIELDS",
     "PINS_INVALID",
     "PINS_MISSING",
     "QuotePin",
     "REPLAY_KILL_ENABLED",
+    "ReplayLimits",
     "ReplayRefused",
     "ReplaySink",
     "RunReplay",
-    "SessionPins",
+    "SESSION_OPEN",
+    "NOT_DECIDE_DAY",
+    "STRAY_RECORD",
     "SessionReplay",
+    "build_from_evidence",
+    "checked_limits",
     "compare",
     "evidence_sessions",
     "load_recorded_build",
     "mac_verdicts",
+    "not_replayed_sessions",
     "orders_tree_sha256",
-    "parse_pins",
+    "pins_from_evidence",
     "read_git_commit",
+    "recorded_run_verdict",
     "render_report",
     "replay_run",
     "replay_session",
+    "replay_sessions",
     "run_verdict",
 ]

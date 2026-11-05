@@ -40,7 +40,14 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from brokers.breeze_gateway.errors import RelayError
-from brokers.breeze_gateway.orders import MintMismatch, OrdersClient, VmAuditEntry, intent_body, intent_sha256
+from brokers.breeze_gateway.orders import (
+    MintMismatch,
+    OrdersClient,
+    VmAuditEntry,
+    VmBuild,
+    intent_body,
+    intent_sha256,
+)
 from costs.core import Side
 from costs.fills import load_fill_scenarios
 from costs.schedule import load_schedule_set
@@ -93,6 +100,7 @@ from .signals import (
     held_names_quarantined,
     previous_session,
 )
+from .vm_replay import BuildIdentity, complete_stored, replay_sessions
 
 DECIDE_OPENS = time(9, 30)
 DECIDE_CLOSES = time(10, 0)
@@ -121,6 +129,25 @@ _ABORT_EVENTS: Mapping[str, str] = {
 }
 
 
+class ReplayEnforcementSink:
+    """Writes a stored replay finding's defect and pause to the evidence store, linked to the finding by ``finding_seq``.
+
+    ``decide`` uses it to finish what an interrupted replay still owes; the CLI's replay sink adds ``record_session``.
+    """
+
+    def __init__(self, store: EvidenceStore) -> None:
+        self._store = store
+
+    def record_session(self, result: Any) -> int:
+        raise AssertionError("only vm-replay records a replay finding")
+
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
+        self._store.append("replay_defect", {"session_id": session_id, "code": code, "detail": detail, "finding_seq": finding_seq})
+
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
+        policy.raise_event(self._store, event, reason, finding_seq=finding_seq)
+
+
 class DecideRefused(Exception):
     """A refusal. ``code`` is stable and carries no value.
 
@@ -131,6 +158,19 @@ class DecideRefused(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class VmBuildRefused(DecideRefused):
+    """No ``vm_build`` pin to compare against, or a build whose sent digest does not recompute from its commit and files."""
+
+
+def checked_build(build: VmBuild) -> BuildIdentity:
+    """The build with its digest recomputed by the one recipe. A digest that was sent and differs is refused."""
+
+    identity = BuildIdentity(build.commit, dict(build.orders_sha256))
+    if build.digest != identity.digest:
+        raise VmBuildRefused("vm_build_digest_mismatch")
+    return identity
 
 
 class RunnerAbort(ShadowAbort):
@@ -544,7 +584,11 @@ class ShadowRunner:
         health: HealthPort,
         instruments: Sequence[Instrument],
         clock: Callable[[], datetime],
+        build: VmBuild,
+        mint_limits_sha256: str,
     ) -> None:
+        self._build = checked_build(build)
+        self._mint_limits_sha256 = mint_limits_sha256
         self._evidence = evidence
         self._adapter = adapter
         self._ledger: ExecutionLedger = adapter.ledger
@@ -598,6 +642,29 @@ class ShadowRunner:
                 return datetime.strptime(str(record["run_start_session"]), "%Y-%m-%d").date()
         raise DecideRefused("run_not_opened")
 
+    def _pin_build(self, report: DecideReport) -> bool:
+        """Compare the build and the mint limits hash this invocation holds with the run's first ``vm_build`` pin.
+
+        Compare before write: a redeploy or a collar change between invocations pauses the run (``vm_build_changed``)
+        and writes no ``vm_build``, signal, intent or recovery record. A run with no pin at all is refused outright.
+        When they are equal and this session has no ``vm_build`` yet, it becomes the session's first write, which is
+        what the replay reads.
+        """
+
+        records = self._evidence.records()
+        pin = next((r for r in records if r.get("kind") == "vm_build"), None)
+        if pin is None:
+            raise VmBuildRefused("vm_build_missing")
+        if pin.get("digest") != self._build.digest or pin.get("mint_limits_sha256") != self._mint_limits_sha256:
+            what = "build_digest" if pin.get("digest") != self._build.digest else "mint_limits"
+            policy.raise_event(self._evidence, "vm_build_changed", f"{what}_differs_from_run_pin")
+            report.status, report.stopped = "paused", "vm_build_changed"
+            return False
+        session_id = self._evidence.session_id
+        if not any(r.get("kind") == "vm_build" and r.get("session_id") == session_id for r in records):
+            write_vm_build(self._evidence, self._build, self._mint_limits_sha256)
+        return True
+
     # -- decide -----------------------------------------------------------------------------------------------
 
     def decide(self, session: date) -> DecideReport:
@@ -626,8 +693,14 @@ class ShadowRunner:
         policy.raise_event(self._evidence, _ABORT_EVENTS.get(code, "ledger_evidence_disagree"), f"shadow_abort {code}")
 
     async def _decide(self, session: date, report: DecideReport) -> None:
+        # A replay that stopped after its FAIL record and was never re-run still owes a defect and a pause: write them
+        # first, so the stop check below sees the pause (Terra #646 r5). Nothing is written when nothing is owed.
+        records = self._evidence.records()
+        complete_stored(records, replay_sessions(records), ReplayEnforcementSink(self._evidence))
         if self._stopped_all():
             report.status, report.stopped = "paused", "open_pause"
+            return
+        if not self._pin_build(report):
             return
         report.recovered = self._recover()
         if self._stopped_all():
@@ -1025,6 +1098,8 @@ class ShadowRunner:
         if self._stopped_all():
             report.status, report.stopped = "paused", "open_pause"
             return
+        if not self._pin_build(report):
+            return
         as_of = previous_session(self._base_inputs.calendar, session)
         self._evidence.append("latch", {"latch": "hand_flatten", "scope": "all", "reason": "operator_requested"})
         if not any(p.event == "divergence_breach" and p.scope == policy.SCOPE_ENTRIES for p in self._state().open_pauses):
@@ -1171,6 +1246,8 @@ def open_run(
     run_id: str,
     inputs: SignalInputs,
     orders: OrdersClient,
+    build: VmBuild,
+    mint_limits_sha256: str,
     run_class: str = "plumbing",
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     forbidden: Sequence[str] = (),
@@ -1184,6 +1261,7 @@ def open_run(
     for name in ("nifty500", "smallcap250"):
         if latest_index_list(inputs.store, name, fetched_by=inputs.window_start) is None:  # type: ignore[arg-type]
             raise OpenRunRefused("index_list_snapshot_not_seeded")
+    identity = checked_build(build)  # before anything is created: a digest that does not recompute writes nothing
     hashes = inputs.current_hashes()
     audit = orders.audit_all()
     base_seq, base_sha = (audit[-1].seq, audit[-1].entry_sha256) if audit else (0, GENESIS)
@@ -1198,7 +1276,27 @@ def open_run(
             "audit_base_sha256": base_sha, "window_start": inputs.window_start.isoformat(),
         },
     )
+    write_vm_build(store, identity, mint_limits_sha256)
     return store
+
+
+def write_vm_build(evidence: EvidenceStore, build: VmBuild, mint_limits_sha256: str) -> Mapping[str, Any]:
+    """Pin the deployed VM build and the nine-key limits hash it mints with, right after ``run_start``.
+
+    The digest is recomputed here from the commit and the file map, never taken from the caller, so the record the
+    replay recomputes can only disagree if the evidence file was altered. A build whose sent digest does not recompute
+    is refused (``vm_build_digest_mismatch``) with nothing appended.
+    """
+
+    identity = checked_build(build)
+    return evidence.append(
+        "vm_build",
+        {
+            "commit": identity.commit, "orders_sha256": dict(sorted(identity.orders_sha256.items())),
+            "digest": identity.digest,
+            "mint_limits_sha256": mint_limits_sha256,
+        },
+    )
 
 
 def assemble(
@@ -1214,6 +1312,8 @@ def assemble(
     pins: PinsPort,
     ports: RunnerPorts,
     health: HealthPort,
+    build: VmBuild,
+    mint_limits_sha256: str,
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     mint_timeout: timedelta = timedelta(seconds=10),
     adapter: Optional[ShadowAdmissionAdapter] = None,
@@ -1238,7 +1338,7 @@ def assemble(
     return ShadowRunner(
         evidence=evidence, adapter=adapter, portfolio=portfolio, preparation=preparation, mint=mint, reader=reader,
         identity=identity, base_inputs=base_inputs, pins=pins, ports=ports, health=health, instruments=instruments,
-        clock=clock,
+        clock=clock, build=build, mint_limits_sha256=mint_limits_sha256,
     )
 
 
@@ -1259,12 +1359,15 @@ __all__ = [
     "ShadowRunner",
     "SIMULATOR_DRAWDOWN_BASIS",
     "VmAuditReader",
+    "VmBuildRefused",
     "VmIdentity",
     "VmMint",
     "assemble",
+    "checked_build",
     "exit_obligation_id",
     "open_run",
     "session_date_of",
     "session_id_for",
     "verify_vm_chain",
+    "write_vm_build",
 ]
