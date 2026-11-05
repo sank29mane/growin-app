@@ -28,7 +28,6 @@ if str(ROOT / "gateway" / "vm") not in sys.path:
     sys.path.insert(0, str(ROOT / "gateway" / "vm"))
 
 from test_gateway_orders_key import (  # noqa: E402
-    HEX_A,
     MAC_TOKEN,
     Recorder,
     _budget_exhausted,
@@ -41,7 +40,6 @@ from test_gateway_orders_key import (  # noqa: E402
     orders_reply,
     relogin,
     request_events,
-    run_cli,
     tree_snapshot,
 )
 from test_gateway_orders_routes import (  # noqa: E402
