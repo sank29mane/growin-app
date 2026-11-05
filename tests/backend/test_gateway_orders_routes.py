@@ -1295,6 +1295,7 @@ DATA_ROUTES = [
 ORDER_TABLE = [
     ("/v1/orders/audit", frozenset({"GET"})),
     ("/v1/orders/authorize", frozenset({"POST"})),
+    ("/v1/orders/build", frozenset({"GET"})),
     ("/v1/orders/halt", frozenset({"POST"})),
     ("/v1/orders/intents", frozenset({"POST"})),
     ("/v1/orders/key", frozenset({"GET"})),

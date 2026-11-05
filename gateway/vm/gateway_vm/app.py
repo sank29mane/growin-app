@@ -19,6 +19,7 @@ import json
 import secrets
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -97,6 +98,7 @@ from .contract import (
 from .events import ROUTE_VALUES, EventLog
 from .orders import CONTRACT as ORDERS_CONTRACT
 from .orders import ORDERS_PATH_PREFIX, OrderRefusal
+from .orders.build import mount_build_route
 from .orders.routes import OrderFailure, OrderService, mount_order_routes, order_error_response
 from .session import (
     Credentials,
@@ -733,5 +735,6 @@ def create_app(
 
     if orders is not None:
         mount_order_routes(app, orders, session=session, bearer=_bearer, require_json=_require_json)
+        mount_build_route(app, session=session, bearer=_bearer, package_dir=Path(__file__).parent)
 
     return app

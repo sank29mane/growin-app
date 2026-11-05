@@ -55,9 +55,14 @@ SHA=$(git rev-parse HEAD)
 git archive --format=tar.gz -o "$TMPDIR/growin-gateway-$SHA.tgz" "$SHA" gateway/vm
 shasum -a 256 "$TMPDIR/growin-gateway-$SHA.tgz"
 tar -tzf "$TMPDIR/growin-gateway-$SHA.tgz" | grep -E 'gateway/vm/(uv.lock|pyproject.toml|deploy/growin-gateway.service)$'
+tar -xzOf "$TMPDIR/growin-gateway-$SHA.tgz" gateway/vm/gateway_vm/BUILD_COMMIT
 ```
 
-Write the hash down. The last command must list all three files. If `uv.lock` is missing the
+The last command must print `$SHA` and nothing else. `.gitattributes` makes `git archive` expand that one
+file. A line that still reads `$Format:%H$` means the stamp was not applied (a copy that did not come from
+`git archive`): stop, because the VM would then answer `build_unstamped` and no session could record its build.
+
+Write the hash down. The `grep` command (the one before the last) must list all three files. If `uv.lock` is missing the
 lock has not merged yet (plan 61-11 Task 1b waits for your "packages ok" answer): stop, do not
 build a lock by hand on the VM.
 
@@ -227,10 +232,11 @@ Before login:
 ```bash
 growin_cli health
 growin_cli orders-key    # exits 1 with NO_SESSION
+growin_cli orders-build  # exits 1 with NO_SESSION
 ```
 
 - `health` answers with state none.
-- `orders-key` exits 1 with `NO_SESSION`. `orders-state` and `orders-audit` also exit 1 with `NO_SESSION` once 64-11 is in the build; without it they answer with no login.
+- `orders-key` and `orders-build` exit 1 with `NO_SESSION`. `orders-state` and `orders-audit` also exit 1 with `NO_SESSION` once 64-11 is in the build; without it they answer with no login.
 
 Log in, then run the data checks:
 
@@ -281,6 +287,16 @@ growin_cli orders-key
 - `orders-state` shows `kill blocked`.
 - `orders-key` prints a key id. Compare it to the `key_id` in `/etc/growin-gateway/order-key.json` on the VM and say "matches: yes" or "matches: no". Never paste the id.
 - `orders-audit` shows no entry added by this smoke.
+
+Build identity (needs a login, answers even before the order files are installed):
+
+```bash
+growin_cli orders-build
+```
+
+- It prints `commit` and `digest`. The commit must equal the `$SHA` from section 2; paste the commit into the run log (not the repo) and say "matches: yes" or "matches: no". `orders-build --files` adds the sha256 of every `orders/` file; the replay recomputes them from a checkout of that commit.
+- Exit 1 with `ORDERS_UNAVAILABLE` and reason `build_unstamped` means the archive stamp is missing (section 2), or, more rarely, the deployed `orders/` tree has no files, more than 64 files, or a path (relative to `orders/`) the VM refuses: it must start with a lower-case letter, digit or `_`, use only lower-case letters, digits, `_`, `.`, `/` and `-`, be at most 96 characters, and have no `..` segment. A read error on the tree gives the same reason. Check the stamp first, then `tar -tzf` the bundle for `gateway/vm/gateway_vm/orders/`. Exit 1 with `NOT_FOUND` and reason `route_unavailable` means the VM runs a build older than this route.
+- The VM hashes `orders/` once at start, but it re-reads two data files while it runs: `orders/data/nse_trading_holidays.json` on each weekday session check before an order and on each session-end command, and `orders/data/nse_cash_tick_sizes.json` whenever it resolves a tick. Account netting and replay keep the copy of the holiday table loaded at start. So a hand edit of either file changes some live decisions but not others, while `orders-build` still reports the start-time hashes. A hand edit of a `.py` file does nothing until the next start, which then hashes the edited bytes, so the build no longer matches its commit. Never edit any file under the deployed `gateway_vm/` by hand. Change it in the repo, merge, and redeploy through sections 2 to 5.
 
 Mac value scan, now, while the session is live and before `revoke` (section 10 explains the output). Have
 that day's API_Session code ready for the optional prompt:

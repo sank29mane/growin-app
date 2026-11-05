@@ -89,6 +89,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("orders-state", help="VM order state: kill, latches, drawdown (read only)")
     sub.add_parser("orders-key", help="the key id the VM checks at mint (read only)")
+    build = sub.add_parser("orders-build", help="the build the VM runs: commit and digest (read only)")
+    build.add_argument("--files", action="store_true", help="also print the sha256 of every orders/ file")
     audit = sub.add_parser("orders-audit", help="VM order audit entries (read only)")
     audit.add_argument("--after-seq", type=int, default=0)
     login = sub.add_parser("login", help="log in through the relay")
@@ -189,6 +191,13 @@ def main(
                 say(f"alerts_logged {order_state.alerts_logged}")
             elif args.command == "orders-key":
                 say(f"key_id {OrdersClient(relay).current_key()}")
+            elif args.command == "orders-build":
+                vm_build = OrdersClient(relay).current_build()
+                say(f"commit {vm_build.commit}")
+                say(f"digest {vm_build.digest}")
+                if args.files:
+                    for path, file_sha in vm_build.orders_sha256.items():
+                        say(f"file {path} {file_sha}")
             elif args.command == "orders-audit":
                 if args.after_seq < 0:
                     raise RelayArgumentError("after_seq")
