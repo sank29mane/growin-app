@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import sys
+import threading
 from pathlib import Path
 
 import httpx
@@ -26,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "gateway" / "vm") not in sys.path:
     sys.path.insert(0, str(ROOT / "gateway" / "vm"))
 
-from test_gateway_orders_key import (  # noqa: E402,F401  (fixtures reused by name)
+from test_gateway_orders_key import (  # noqa: E402
     HEX_A,
     MAC_TOKEN,
     Recorder,
@@ -36,7 +37,6 @@ from test_gateway_orders_key import (  # noqa: E402,F401  (fixtures reused by na
     _kill_blocked,
     canned_client,
     mac_store,
-    metadata,
     orders_error,
     orders_reply,
     relogin,
@@ -45,7 +45,7 @@ from test_gateway_orders_key import (  # noqa: E402,F401  (fixtures reused by na
     tree_snapshot,
 )
 from test_gateway_orders_routes import (  # noqa: E402
-    ORDERS_HDR,
+    MetadataFake,
     OrderStack,
     assert_orders_envelope,
 )
@@ -103,6 +103,16 @@ def sha(data: bytes) -> str:
 
 
 # ---------------------------------------------------------------- fixtures
+
+
+@pytest.fixture()
+def metadata():
+    server = MetadataFake()
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    yield server
+    server.shutdown()
+    server.server_close()
 
 
 @pytest.fixture()
