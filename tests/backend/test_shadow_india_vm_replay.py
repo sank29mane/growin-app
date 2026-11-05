@@ -1803,6 +1803,94 @@ def test_resuming_the_divergence_pause_does_not_clear_the_d23_verdict(sc: Scenar
     assert still.verdict == "FAIL" and vm_replay.DIVERGENCE in still.reasons
 
 
+def test_a_stored_pass_never_hides_a_refusal_of_this_pass(sc: Scenario):
+    """Break-proof: drop the current refusals when a stored result exists and the run reads PASS, exit 0, refused {}."""
+    sc.intent(S1, "buy", 1, "100.00")
+    first = sc.run(real_sink(sc, S1))
+    assert first.verdict == "PASS"
+    records = sc.records()
+    assert recorded_run_verdict(records, first.refused).verdict == "PASS"
+    changed = dataclasses.replace(sc.limits, file_sha256="e" * 64)  # the private config moved since the stored PASS
+    again = sc.run(records=records, limits=changed)
+    assert again.refused == {S1: vm_replay.LIMITS_MISMATCH}
+    stored_verdict = recorded_run_verdict(records, again.refused)
+    assert stored_verdict.verdict == "FAIL" and stored_verdict.refused == {S1: vm_replay.LIMITS_MISMATCH}
+    assert vm_replay.SESSION_REFUSED in stored_verdict.reasons
+    assert len(stored(sc, "vm_replay")) == 1  # the refusal wrote nothing and the stored PASS is untouched
+
+
+class Interrupted(Exception):
+    """The process stopped between two writes."""
+
+
+class Cut:
+    """A sink that delegates until the named write, where the process dies before that write lands."""
+
+    def __init__(self, real: EvidenceReplaySink, *, at: str) -> None:
+        self.real, self.at = real, at
+
+    def record_session(self, result: Any) -> None:
+        self.real.record_session(result)
+
+    def open_defect(self, code: str, session_id: str, detail: str) -> None:
+        if self.at == "open_defect":
+            raise Interrupted
+        self.real.open_defect(code, session_id, detail)
+
+    def pause_run(self, event: str, reason: str) -> None:
+        if self.at == "pause_run":
+            raise Interrupted
+        self.real.pause_run(event, reason)
+
+
+def divergent_session(sc: Scenario) -> None:
+    sc.intent(S1, "buy", 100, "600.00", tick_reference="600")  # the Mac admitted what the VM refuses
+
+
+def open_scope(sc: Scenario) -> list[tuple[str, str]]:
+    return [(p.event, p.scope) for p in policy.state_from_records(sc.records()).open_pauses]
+
+
+@pytest.mark.parametrize("cut_at", ["open_defect", "pause_run"])
+def test_an_interruption_after_the_record_is_finished_by_the_rerun(sc: Scenario, cut_at: str):
+    """Break-proof: return early on a stored FAIL and the run stays FAIL with no defect, no pause and admission open."""
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at=cut_at))
+    assert len(stored(sc, "vm_replay")) == 1 and open_scope(sc) == []  # the record landed, the pause did not
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL" and again.already_recorded is True
+    assert [(r["code"], r["detail"]) for r in stored(sc, "replay_defect")] == [(vm_replay.DIVERGENCE, "mac_admitted_vm_refused")]
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    state = policy.state_from_records(sc.records())
+    assert state.blocks(policy.STEP_ADMIT, isin=ISIN_A) and state.blocks(policy.STEP_BOOK)
+    before = len(sc.records())
+    sc.replay(S1, real_sink(sc, S1))
+    assert len(sc.records()) == before and len(stored(sc, "vm_replay")) == 1  # a further re-run writes nothing
+
+
+def test_a_resume_after_the_stored_record_is_not_undone_by_the_rerun(sc: Scenario):
+    """Break-proof: re-pause without looking at resume records and the operator's decision is overwritten."""
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    sc.raw(S1, "resume", {"reason": "operator looked at it", "cleared_pause_seqs": []})
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL" and again.already_recorded is True
+    assert len(stored(sc, "replay_defect")) == 1  # the defect is still completed: the D-23 verdict reads it
+    assert open_scope(sc) == []  # and the pause is not raised again
+    assert recorded_run_verdict(sc.records()).verdict == "FAIL"
+
+
+def test_a_resume_before_the_stored_record_does_not_excuse_the_missing_pause(sc: Scenario):
+    divergent_session(sc)
+    sc.raw(S1, "resume", {"reason": "an earlier, unrelated resume", "cleared_pause_seqs": []})
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="pause_run"))
+    sc.replay(S1, real_sink(sc, S1))
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+
+
 def test_a_replay_defect_record_alone_fails_the_run_even_with_every_session_passing(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
     sc.replay(S1, real_sink(sc, S1))

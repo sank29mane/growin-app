@@ -1069,6 +1069,8 @@ def replay_session(
     stored = _stored_replays(records, session_id)
     if stored:
         if all(_same_as_stored(r, result) for r in stored):
+            if sink is not None and result.verdict == FAIL:
+                _finish_enforcement(records, session_id, result, max(_seq(r) for r in stored), sink)
             return dataclasses.replace(result, already_recorded=True)
         result = dataclasses.replace(result, verdict=FAIL, defects=result.defects + (NONDETERMINISTIC,))
         if sink is not None:
@@ -1076,12 +1078,56 @@ def replay_session(
         return result
     if sink is not None:
         sink.record_session(result)
-        for divergence in divergences:
-            sink.open_defect(DIVERGENCE, session_id, divergence.reason)
-            sink.pause_run(DIVERGENCE, f"{session_id}:{divergence.intent_id}:{divergence.reason}")
-        for defect in defects:
-            sink.open_defect(defect, session_id, defect)
+        for action in _enforcement(session_id, result):
+            _apply(sink, session_id, action)
     return result
+
+
+def _enforcement(session_id: str, result: SessionReplay) -> list[tuple[str, str, str]]:
+    """The writes a FAIL owes after its ``vm_replay`` record, in order: ``(kind, code_or_event, detail_or_reason)``.
+
+    A divergence opens a defect and pauses the run (scope all); a defect of the session opens its own defect.
+    """
+
+    actions: list[tuple[str, str, str]] = []
+    for divergence in result.divergences:
+        actions.append(("defect", DIVERGENCE, divergence.reason))
+        actions.append(("pause", DIVERGENCE, f"{session_id}:{divergence.intent_id}:{divergence.reason}"))
+    for defect in result.defects:
+        actions.append(("defect", defect, defect))
+    return actions
+
+
+def _apply(sink: ReplaySink, session_id: str, action: tuple[str, str, str]) -> None:
+    kind, first, second = action
+    if kind == "defect":
+        sink.open_defect(first, session_id, second)
+    else:
+        sink.pause_run(first, second)
+
+
+def _finish_enforcement(
+    records: Sequence[Mapping[str, Any]], session_id: str, result: SessionReplay, recorded_seq: int, sink: ReplaySink
+) -> None:
+    """A stored FAIL whose defect or pause writes never landed (the process stopped after the record): write what is missing.
+
+    Defects are always completed (the D-23 verdict reads them). A missing pause is written only when no ``resume``
+    came after the stored record: an operator who resumed after the record has already decided, and a re-run must
+    not undo that. Nothing is written for what is already there, so a further re-run writes nothing.
+    """
+
+    held_defects = {
+        (r.get("code"), r.get("detail")) for r in records if r.get("kind") == "replay_defect" and r.get("session_id") == session_id
+    }
+    held_pauses = {r.get("reason") for r in records if r.get("kind") == "pause" and r.get("event") == DIVERGENCE}
+    resumed = any(r.get("kind") == "resume" and _seq(r) > recorded_seq for r in records)
+    for action in _enforcement(session_id, result):
+        kind, first, second = action
+        if kind == "defect" and (first, second) in held_defects:
+            continue
+        if kind == "pause" and (second in held_pauses or resumed):
+            continue
+        _apply(sink, session_id, action)
 
 
 def _replay_intent(
@@ -1251,8 +1297,9 @@ def recorded_run_verdict(records: Sequence[Mapping[str, Any]], refused: Mapping[
     PASS needs all of: at least one decide day; every decide day has a ``vm_replay`` record; every such record is PASS;
     no ``replay_defect`` record exists for any session; one build digest across the run. A FAIL record is sticky: it is
     never replaced by a later PASS record for the same session, and a ``resume`` of the pause it raised changes nothing
-    here (this reads replay records, not pause state). ``refused`` only adds the refusal codes of the current pass to the
-    report; a session that refused has no record, so the run FAILs (``replay_session_refused``) either way.
+    here (this reads replay records, not pause state). ``refused`` holds the refusal codes of the current pass. Every one
+    is kept, even for a session that holds a stored PASS: a later change of the private config must not be hidden by an
+    earlier record, and the run FAILs (``replay_session_refused``).
     """
 
     run_id = next((str(r["run_id"]) for r in records if r.get("run_id")), "")
@@ -1265,7 +1312,7 @@ def recorded_run_verdict(records: Sequence[Mapping[str, Any]], refused: Mapping[
         if held is None or (held.get("verdict") == PASS and record.get("verdict") != PASS):
             chosen[session] = record  # a FAIL replaces a PASS and never the other way round
     results = {session: _stored_result(record) for session, record in chosen.items()}
-    open_refusals = {s: c for s, c in (refused or {}).items() if s not in results}
+    open_refusals = dict(refused or {})  # a stored PASS never hides a refusal of this pass
     run = run_verdict(run_id, wanted, results, open_refusals, not_replayed_sessions(records))
     reasons = list(run.reasons)
     if any(r.get("kind") == "replay_defect" for r in records):

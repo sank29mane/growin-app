@@ -287,6 +287,23 @@ def test_a_private_dir_that_holds_other_limits_refuses_by_hash_and_writes_nothin
     assert tree(world.sc.root) == before
 
 
+def test_all_after_a_pass_refuses_when_the_private_config_changed_since(world: World, tmp_path: Path):
+    """Break-proof: let a stored PASS override this pass's refusal and the second run is PASS, exit 0, refused {}."""
+    decide_day(world)
+    code, out = run_cli(world.argv(session=False))
+    assert code == 0 and out["verdict"] == "PASS" and out["refused"] == {}
+    before = tree(world.sc.root)
+    for name, kwargs in (("cap", {"cap": "12345.67"}), ("collar", {"collar": "0.0777"})):
+        moved = build_private(tmp_path, name, **kwargs)
+        code, out = run_cli(["vm-replay", "--root", str(world.sc.root), "--run-id", RUN, "--vm-source", str(world.vm),
+                             "--all", "--private-dir", str(moved)])
+        assert code == 1 and out["verdict"] == "FAIL", name
+        assert out["refused"] == {S1: vm_replay.LIMITS_MISMATCH} and vm_replay.SESSION_REFUSED in out["reasons"], name
+        assert tree(world.sc.root) == before, name  # the refusal wrote nothing
+    code, out = run_cli(world.argv(session=False))  # the config that matches still passes
+    assert code == 0 and out["verdict"] == "PASS"
+
+
 def test_no_private_dir_refuses_with_no_default(world: World, monkeypatch: pytest.MonkeyPatch):
     decide_day(world)
     monkeypatch.setenv("GROWIN_PRIVATE_DIR", str(world.private))
