@@ -91,6 +91,30 @@ def state_path_for(ledger_path: str | os.PathLike[str]) -> Path:
     return Path(ledger_path).with_name(STATE_FILE_NAME)
 
 
+def limit_fields_from_config(config: Any) -> dict[str, Any]:
+    """The nine P-06 keys of ``config``, exactly as ``limits_from_config`` hashes them.
+
+    Seven come from ``limits.json``, the collar comes from ``execution.json``. This is the one builder: the guard's
+    limits and the shadow replay both go through it, so a second nine-key dict can never drift from the first.
+    Raises ``rules.RiskConfigError`` when either file is absent.
+    """
+    limits_file = getattr(config, "limits", None)
+    execution = getattr(config, "india_execution", None)
+    if limits_file is None or execution is None:
+        raise RiskConfigError("India limits and execution config are required")
+    return {
+        "schema_version": 1,
+        "workspace": "india",
+        "currency": "INR",
+        "capital_cap": _text(limits_file.capital_cap),
+        "per_position_cap": _text(limits_file.per_position_cap),
+        "drawdown_halt": _text(limits_file.drawdown_halt),
+        "drawdown_flatten": _text(limits_file.drawdown_flatten),
+        "position_stop": _text(limits_file.position_stop),
+        "fat_finger_collar": _text(execution.fat_finger_collar),
+    }
+
+
 def limits_from_config(config: Any) -> Limits:
     """The Mac's ``Limits`` from a ``WorkspaceConfig`` loaded with ``require_india_execution``.
 
@@ -99,23 +123,7 @@ def limits_from_config(config: Any) -> Limits:
     hash of the file's values. Raises ``rules.RiskConfigError`` when either file is absent
     or a value is out of range.
     """
-    limits_file = getattr(config, "limits", None)
-    execution = getattr(config, "india_execution", None)
-    if limits_file is None or execution is None:
-        raise RiskConfigError("India limits and execution config are required")
-    return Limits.from_fields(
-        {
-            "schema_version": 1,
-            "workspace": "india",
-            "currency": "INR",
-            "capital_cap": _text(limits_file.capital_cap),
-            "per_position_cap": _text(limits_file.per_position_cap),
-            "drawdown_halt": _text(limits_file.drawdown_halt),
-            "drawdown_flatten": _text(limits_file.drawdown_flatten),
-            "position_stop": _text(limits_file.position_stop),
-            "fat_finger_collar": _text(execution.fat_finger_collar),
-        }
-    )
+    return Limits.from_fields(limit_fields_from_config(config))
 
 
 # ------------------------------------------------------------------ encoding

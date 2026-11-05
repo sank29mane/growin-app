@@ -27,6 +27,7 @@ import test_pilot_data_crosscheck as cc
 import test_shadow_india_release_cli as rc
 from brokers.breeze_gateway.config import ConfigError
 from brokers.breeze_gateway.errors import TunnelError, UpstreamError
+from brokers.breeze_gateway.orders import OrdersClient, OrdersProtocolError
 from execution.ledger import ExecutionLedger, SimulationProbeRefused, probe_simulation_ledger
 from execution.models import Workspace
 from pilot_data.store import DB_FILE_NAME, PilotDataStore
@@ -38,7 +39,8 @@ from shadow_india.evidence import LOG_NAME, TORN_DIR, EvidenceStore, read_record
 from shadow_india.portfolio import Instrument, PortfolioError
 from shadow_runtime_support import (
     AS_OF, CANBK_CODE, CANBK_ISIN, CANBK_SYMBOL, FORBIDDEN, KEY_ID, RUN, SESSION, STEADY_CODE, STEADY_ISIN,
-    STEADY_SYMBOL, WINDOW_START, build_env, build_seeded, calendar_doc, evaluated, master_zip, sha, tree_state, write_json,
+    STEADY_SYMBOL, WINDOW_START, build_env, build_seeded, calendar_doc, evaluated, install_build, master_zip, sha,
+    tree_state, write_json,
 )
 from test_gateway_orders_key import swap_key
 from test_gateway_orders_routes import OTHER
@@ -72,6 +74,7 @@ def runner_seams(monkeypatch):
 @pytest.fixture()
 def env(tmp_path, seeded, metadata, monkeypatch):  # noqa: F811
     built = build_env(tmp_path, seeded, metadata)
+    install_build(monkeypatch)
     built.script.result = evaluated("CANBK", "STEADYCO")
     monkeypatch.setattr(runner_module, "evaluate_session", built.script)
     monkeypatch.setattr(runner_module, "held_names_quarantined", built.script.held_names_quarantined)
@@ -975,6 +978,7 @@ def test_no_runtime_config_value_appears_in_output_exceptions_or_evidence(
     canary = tmp_path / "CANARYQ7"
     canary.mkdir()
     env = build_env(canary, seeded, metadata)
+    install_build(monkeypatch)
     env.script.result = evaluated("CANBK", "STEADYCO")
     monkeypatch.setattr(runner_module, "evaluate_session", env.script)
     monkeypatch.setattr(runner_module, "held_names_quarantined", env.script.held_names_quarantined)
@@ -1121,3 +1125,133 @@ def test_every_resume_record_of_a_release_is_appended_from_the_portfolio_and_nev
     code, out = rc.action(world)
     assert code == 0 and out["released"] == "corporate_action"
     assert callers and set(callers) <= {"portfolio.py", "policy.py"} and "__main__.py" not in callers
+
+
+# --- 64-05 Task 2b: the deployed VM build is read in phase 2 and pinned in evidence ------------------------------------
+
+
+class OrdersBuildUnstamped(OrdersProtocolError):
+    """The relay's name for a build with no commit stamp (the route itself is another PR; the runtime keys on the name)."""
+
+
+def _raising(error):
+    def read(self):
+        raise error
+
+    return read
+
+
+class _Sent:
+    def __init__(self, commit, files, digest):
+        self.commit, self.orders_sha256, self.digest = commit, files, digest
+
+
+BUILD_FAILURES = [
+    ("unavailable", _raising(OrdersProtocolError("route")), "vm_build_unavailable"),
+    ("relay_error", _raising(UpstreamError()), "vm_build_unavailable"),
+    ("unstamped", _raising(OrdersBuildUnstamped("unstamped")), "vm_build_unstamped"),
+    ("digest_does_not_recompute", lambda self: _Sent("a" * 40, {"intent.py": sha("i")}, sha("lie")),
+     "vm_build_digest_mismatch"),
+    ("no_such_method", None, "vm_build_unavailable"),
+]
+
+
+def _break_build_read(monkeypatch, reader):
+    if reader is None:
+        monkeypatch.delattr(OrdersClient, "current_build", raising=False)
+    else:
+        monkeypatch.setattr(OrdersClient, "current_build", reader, raising=False)
+
+
+@pytest.mark.parametrize(("name", "reader", "code"), BUILD_FAILURES, ids=[row[0] for row in BUILD_FAILURES])
+def test_a_failed_build_read_refuses_open_run_with_nothing_opened_or_written(env, capsys, spies, monkeypatch, name, reader, code):
+    _break_build_read(monkeypatch, reader)
+    before = everything(env)
+    exit_code, out = go(env, capsys, "open-run")
+    assert (exit_code, out) == (EXIT_REFUSED, {"refused": code})
+    assert everything(env) == before and spies.writable_opens == 0  # evidence, ledger and store byte-identical
+    assert not env.root.exists() or not (env.root / RUN).exists()
+
+
+@pytest.mark.parametrize(("name", "reader", "code"), BUILD_FAILURES, ids=[row[0] for row in BUILD_FAILURES])
+def test_a_failed_build_read_refuses_decide_with_nothing_opened_or_written(env, capsys, spies, monkeypatch, name, reader, code):
+    opened(env, capsys)
+    spies.clear()
+    _break_build_read(monkeypatch, reader)
+    before, calls = everything(env), len(env.vm.http.calls)
+    exit_code, out = go(env, capsys, "decide")
+    assert (exit_code, out) == (EXIT_REFUSED, {"refused": code})
+    assert everything(env) == before and spies.writable_opens == 0
+    assert env.vm.http.order_calls() == [] and calls <= len(env.vm.http.calls)
+
+
+def _set_collar(env, collar):
+    path = env.private / "india" / "execution.json"
+    body = json.loads(path.read_text())
+    path.write_text(json.dumps({**body, "fat_finger_collar": collar}))
+
+
+def _pin_of(env):
+    return [r for r in read_records(env.root, RUN) if r["kind"] == "vm_build"][0]
+
+
+def _nine_key(env):
+    from private_config.loader import load_workspace_config
+    from risk_india.state import limits_from_config
+
+    return limits_from_config(load_workspace_config(env.private, "india", require_india_execution=True)).sha256
+
+
+def test_the_open_run_pin_is_the_nine_key_hash_with_the_collar_and_not_the_file_hash(env, capsys):
+    _set_collar(env, "0.0314")  # the collar exists only in execution.json
+    opened(env, capsys)
+    manifest = EvidenceStore.open(env.root, run_id=RUN, session_id=runtime_module.session_id_for(SESSION)).manifest
+    assert _pin_of(env)["mint_limits_sha256"] == _nine_key(env)
+    assert _pin_of(env)["mint_limits_sha256"] != manifest.hashes["limits_sha256"]  # the IndiaLimits file hash has no collar
+
+
+def test_the_pin_moves_with_the_collar(env, capsys, tmp_path):
+    first = _nine_key(env)
+    _set_collar(env, "0.0314")
+    assert _nine_key(env) != first  # a pin that ignored the collar would not move
+
+
+def test_the_first_decide_on_the_same_config_compares_equal_to_the_open_run_pin(env, capsys):
+    opened(env, capsys)
+    assert _pin_of(env)["mint_limits_sha256"] == _nine_key(env)
+    code, decided = go(env, capsys, "decide")
+    assert code == 0 and decided["status"] == "done", decided  # equal: no vm_build_changed
+    assert [r for r in read_records(env.root, RUN) if r["kind"] == "pause"] == []
+
+
+def test_a_collar_edited_after_open_run_pauses_the_next_decide_before_it_writes(env, capsys):
+    opened(env, capsys)
+    _set_collar(env, "0.0415")
+    before = len(read_records(env.root, RUN))
+    code, decided = go(env, capsys, "decide")
+    assert code == 0 and (decided["status"], decided["stopped"]) == ("paused", "vm_build_changed")
+    after = read_records(env.root, RUN)[before:]
+    assert [r["kind"] for r in after] == ["pause"] and after[0]["event"] == "vm_build_changed"
+
+
+def test_open_run_builds_no_admission_guard_and_no_latch(env, capsys, monkeypatch):
+    import risk_india.state as state_module
+
+    guards, latches = [], []
+    real_from_config = runtime_module.IndiaAdmissionGuard.from_config.__func__
+
+    def guard_spy(cls, *args, **kwargs):
+        guards.append(1)
+        return real_from_config(cls, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_module.IndiaAdmissionGuard, "from_config", classmethod(guard_spy))
+    real_init = state_module.LatchStore.__init__
+
+    def latch_spy(self, *args, **kwargs):
+        latches.append(1)
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(state_module.LatchStore, "__init__", latch_spy)
+    opened(env, capsys)
+    assert guards == [] and latches == []
+    assert not env.latch_path().exists()  # nothing touched the latch file

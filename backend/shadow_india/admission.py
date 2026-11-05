@@ -222,6 +222,39 @@ class QuoteSample:
             raise ValueError("a quote sample's evidence must be the same reading as the sample")
 
 
+def decision_sample(samples: Sequence[QuoteSample]) -> Optional[QuoteSample]:
+    """The reading admission decides on: the newest by ``fetched_at``, whatever order the caller passed them in.
+
+    ``ShadowAdmissionAdapter.prepare`` and the E1 pin both read it here, so what the replay is given is exactly what the
+    guard was given. No samples gives None (admission denies that case).
+    """
+
+    return max(samples, key=lambda sample: sample.fetched_at) if samples else None
+
+
+def quote_pin_fields(sample: Optional[QuoteSample]) -> dict[str, Any]:
+    """The eight quote fields the ``intent`` record carries for the D-23 replay, from the sample admission used.
+
+    A tick reference of None is written as JSON null (the key stays), so the replay can tell "the Mac had no reference"
+    from "nothing was pinned". With no sample, no field is written.
+    """
+
+    if sample is None:
+        return {}
+    quote = sample.evidence.quote
+    reference = quote.tick_reference
+    return {
+        "quote_ltp": _text(quote.ltp),
+        "quote_lower_circuit": _text(quote.lower_circuit),
+        "quote_upper_circuit": _text(quote.upper_circuit),
+        "quote_previous_close": _text(quote.previous_close),
+        "quote_series": quote.series,
+        "quote_session_date": quote.session_date.isoformat(),
+        "tick_reference": None if reference is None else _text(reference),
+        "quote_raw_sha256": sample.raw_sha256,
+    }
+
+
 # --- construction ---------------------------------------------------------------------
 
 
@@ -360,9 +393,8 @@ class ShadowAdmissionAdapter:
         now = self._clock()
         # The newest reading by fetched_at, the same one the regime and the simulator see, so the
         # verdict never depends on the order the caller passed the samples in.
-        india_quote = (
-            max(samples, key=lambda sample: sample.fetched_at).evidence if samples else None
-        )
+        newest = decision_sample(samples)
+        india_quote = newest.evidence if newest is not None else None
         pins: dict[str, Any] = {
             # D-16: the order is admitted at its own LIMIT, labelled as the relay quote it came from.
             "price": intent.limit_price,
@@ -527,6 +559,7 @@ class ShadowPreparation:
                 "side": side,
                 "quantity": _text(intent.quantity),
                 "limit_price": _text(intent.limit_price),
+                **quote_pin_fields(decision_sample(samples)),
             },
         )
         # L1: register, admission and reservation, one admission at a time.
@@ -999,8 +1032,10 @@ __all__ = [
     "ShadowPreparation",
     "VM_CODE_KILL_SWITCH",
     "VmDecision",
+    "decision_sample",
     "deterministic_proposal_id",
     "open_simulation_ledger",
+    "quote_pin_fields",
     "simulation_binding",
     "simulation_ledger_path",
 ]

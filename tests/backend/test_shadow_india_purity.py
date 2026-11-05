@@ -524,3 +524,51 @@ def test_a_repeated_or_moved_approved_statement_is_flagged(plant):
         mutated += "\n\ndef _elsewhere(package):\n    sys.modules.pop(package, None)\n"
     assert mutated != REAL_VM_REPLAY
     assert violations(mutated, "vm_replay.py"), plant
+
+
+# --- no caller of the orders client's kill switch ---------------------------------------------------------------------
+
+
+def halt_calls(source: str) -> list[int]:
+    """Lines that call ``<anything>.halt(...)`` or fetch the attribute by name (``getattr(x, "halt")``).
+
+    The shadow package never trips the VM kill switch: a broken pre-send check pauses the Mac side, and the live kill
+    stays the operator's. ``release_halt`` (the portfolio latch release) is a different name and is not matched.
+    """
+
+    found: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "halt":
+            found.append(node.lineno)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "halt"
+        ):
+            found.append(node.lineno)
+    return found
+
+
+@pytest.mark.parametrize("path", _files(), ids=lambda p: p.name)
+def test_no_shadow_module_calls_halt_on_an_orders_client(path):
+    assert halt_calls(path.read_text()) == []
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "client.halt('reason')\n",
+        "self._orders.halt()\n",
+        "getattr(client, 'halt')('x')\n",
+        "async def f(c):\n    await c.halt('x')\n",
+    ],
+    ids=["attribute", "self_attribute", "getattr", "awaited"],
+)
+def test_a_planted_halt_call_is_caught(plant):
+    real = (PKG / "runner.py").read_text()
+    assert halt_calls(real) == []
+    assert halt_calls(real + "\n" + plant), "the plant went unnoticed"
+    assert halt_calls("portfolio.release_halt('a', 'b')\n") == []  # the latch release is not the kill switch

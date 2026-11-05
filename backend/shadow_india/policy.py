@@ -152,6 +152,11 @@ POLICY: Mapping[str, Rule] = {
     "contract_mismatch": _pause(SCOPE_ALL),
     "hash_mismatch": _pause(SCOPE_ALL),
     "divergence_breach": _pause(SCOPE_ENTRIES),
+    # 64-05 Task 2b: the VM build or the Mac's mint limits changed mid-run (a redeploy, a collar edit), or the D-23 replay
+    # found the VM and the Mac disagreeing on an intent. Both stop every step until `resume` with a reason. Clearing
+    # `replay_divergence` never changes the D-23 verdict: that reads the stored replay records, not the pause state.
+    "vm_build_changed": _pause(SCOPE_ALL),
+    "replay_divergence": _pause(SCOPE_ALL),
     # D-08: the -8% trailing drawdown halts buys (sells stay). `resume` refuses it; Task 2 adds the latch-backed release.
     DRAWDOWN_HALT: _pause(SCOPE_ENTRIES),
     # D-08: the -15% flatten ends the run. Terminal for buys; sells, booking, expiry and marks run until flat.

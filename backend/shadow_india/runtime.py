@@ -13,8 +13,9 @@ Three phases, in this order, and no later phase starts before the earlier one pa
    evidence of an existing run, and the simulation ledger on a read-only probe. No relay call, no writable open, no
    directory is made. A refusal here leaves every byte on disk as it was, a torn evidence tail included.
 2. **Relay activation** (open-run, decide, close, hand-flatten only). ``link.client()``, then ``link.orders()``, then
-   one ``orders.current_key()`` read compared byte for byte with the key id the runtime config names. It writes no Mac
-   file. The VM's own mint check stays the second line.
+   one ``orders.current_key()`` read compared byte for byte with the key id the runtime config names, then one
+   ``orders.current_build()`` read (the deployed VM build, 64-05 Task 2b). It writes no Mac file. The VM's own mint
+   check stays the second line.
 3. **Writable opens.** Every ``EvidenceStore.open`` and ``create`` here passes ``forbidden=`` from the same helper the
    CLI uses.
 
@@ -33,7 +34,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from brokers.breeze_gateway.client import RelayClient
 from brokers.breeze_gateway.config import ConfigError, load_gateway_config
-from brokers.breeze_gateway.errors import OrdersKeyRouteUnavailable, TunnelError, UpstreamError
+from brokers.breeze_gateway.errors import OrdersKeyRouteUnavailable, RelayError, TunnelError, UpstreamError
 from brokers.breeze_gateway.india_quote import QuoteUnavailable, RelayQuoteSource, parse_quote
 from brokers.breeze_gateway.orders import OrdersClient, OrdersProtocolError, RelayLink
 from execution.india_guard import IndiaAdmissionGuard, IndiaInstrumentMap, IndiaQuoteEvidence
@@ -53,7 +54,8 @@ from private_config.errors import PrivateConfigError
 from private_config.loader import load_shadow_forbidden_literals, load_shadow_runtime_config, load_workspace_config
 from private_config.schemas import ShadowRuntime
 from risk_india import rules
-from risk_india.state import StateUnreadable, read_state, state_path_for
+from risk_india.rules import RiskConfigError
+from risk_india.state import StateUnreadable, limits_from_config, read_state, state_path_for
 
 from .admission import (
     MIN_QUOTE_SAMPLES,
@@ -65,12 +67,15 @@ from .admission import (
 from .evidence import EvidenceStore, read_records
 from .portfolio import Instrument, PortfolioError, ShadowPortfolio
 from .runner import (
+    BuildSource,
     LiveTablePins,
     NoPostSubmissionEvidence,
     RunnerPorts,
     ShadowRunner,
+    VmBuildRefused,
     VmIdentity,
     assemble,
+    checked_build,
     open_run,
     session_id_for,
 )
@@ -366,6 +371,31 @@ def activate_relay(link: RelayLink, expected_key_id: str) -> OrdersClient:
     return orders
 
 
+def read_vm_build(orders: Any) -> BuildSource:
+    """The deployed VM build, read once, read-only and before any writable open.
+
+    A route that is missing, a refusal, an unstamped build or a reply that does not check out is one closed refusal:
+    ``vm_build_unavailable`` (or ``vm_build_unstamped``). The digest is checked again by the runner's one recipe.
+    """
+
+    reader = getattr(orders, "current_build", None)
+    if reader is None:
+        raise _refuse("vm_build_unavailable")
+    try:
+        build = reader()
+    except (RelayError, OrdersProtocolError) as error:
+        if type(error).__name__ == "OrdersBuildUnstamped":
+            raise _refuse("vm_build_unstamped") from None
+        raise _refuse("vm_build_unavailable") from None
+    try:
+        checked_build(build)
+    except VmBuildRefused:
+        raise _refuse("vm_build_digest_mismatch") from None
+    except (AttributeError, TypeError):
+        raise _refuse("vm_build_unavailable") from None
+    return build
+
+
 # --- ports ----------------------------------------------------------------------------------------------------------
 
 
@@ -518,21 +548,38 @@ class SessionStoreReference:
 class OpenRunRuntime:
     """What ``open-run`` needs: the run is created on ``open_run()``, then the simulation ledger."""
 
-    def __init__(self, pre: Preflight, orders: OrdersClient, clock: Callable[[], datetime], link: Optional[RelayLink]) -> None:
+    def __init__(
+        self,
+        pre: Preflight,
+        orders: OrdersClient,
+        clock: Callable[[], datetime],
+        link: Optional[RelayLink],
+        build: Optional[BuildSource] = None,
+    ) -> None:
         self._pre = pre
         self._orders = orders
         self._clock = clock
         self._link = link
+        self._build = build
 
     def open_run(self) -> dict[str, Any]:
         pre = self._pre
+        if self._build is None:
+            raise _refuse("vm_build_unavailable")
+        # The nine-key hash the VM mints with (the collar lives only in execution.json): computed straight from the
+        # config, before anything is created, and without an admission guard or a latch store (either would touch the
+        # latch file). The manifest's ``limits_sha256`` is the IndiaLimits file hash and is not this value.
+        try:
+            mint_limits_sha256 = limits_from_config(pre.exec_config).sha256
+        except RiskConfigError:
+            raise _refuse("limits_config_refused") from None
         store = PilotDataStore(pre.session_store_root, workspace="india")
         try:
             pins = LiveTablePins()
             inputs = _inputs(pre, store, pins)
             evidence = open_run(
                 pre.root, run_id=pre.run_id, inputs=inputs, orders=self._orders, clock=self._clock,
-                forbidden=pre.literals,
+                forbidden=pre.literals, build=self._build, mint_limits_sha256=mint_limits_sha256,
             )
             ledger = open_simulation_ledger(pre.sim_root, pre.run_id, pre.seed)
             ledger.close()
@@ -635,10 +682,11 @@ def production_runtime(
     try:
         pre = cached_preflight(args, relay=True, calendar=True, gateway_loader=loader)  # phase 1
         orders = activate_relay(link, pre.runtime.vm_key_id)  # phase 2
+        build = read_vm_build(orders)  # phase 2: read-only, before any writable open
         owner = link if owned else None
         if args.command == "open-run":
-            return OpenRunRuntime(pre, orders, clock, owner)
-        return _build_runner(pre, orders, link, clock, owner)  # phase 3
+            return OpenRunRuntime(pre, orders, clock, owner, build)
+        return _build_runner(pre, orders, link, clock, owner, build)  # phase 3
     except BaseException:
         if owned:
             link.close()
@@ -646,7 +694,12 @@ def production_runtime(
 
 
 def _build_runner(
-    pre: Preflight, orders: OrdersClient, link: RelayLink, clock: Callable[[], datetime], owner: Optional[RelayLink]
+    pre: Preflight,
+    orders: OrdersClient,
+    link: RelayLink,
+    clock: Callable[[], datetime],
+    owner: Optional[RelayLink],
+    build: BuildSource,
 ) -> ProductionRuntime:
     closers: list[Callable[[], None]] = []
     try:
@@ -670,7 +723,7 @@ def _build_runner(
         runner = assemble(
             evidence=evidence, ledger=ledger, india_guard=guard, latch=guard.store, instruments=pre.instruments,
             orders=orders, identity=identity, base_inputs=inputs, pins=pins, ports=ports,
-            health=_LinkHealth(link), clock=clock,
+            health=_LinkHealth(link), clock=clock, build=build, mint_limits_sha256=identity.limits_sha256,
         )
     except BaseException:
         for closer in reversed(closers):
@@ -728,6 +781,7 @@ __all__ = [
     "cached_preflight",
     "preflight",
     "production_runtime",
+    "read_vm_build",
     "release_latch_path",
     "release_runtime",
 ]

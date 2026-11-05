@@ -48,6 +48,7 @@ from shadow_india.admission import (
     open_simulation_ledger,
 )
 from shadow_india.evidence import EvidenceStore
+from shadow_india.vm_replay import BuildIdentity
 from shadow_india.portfolio import (
     PEAK_SOURCE,
     Instrument,
@@ -65,12 +66,14 @@ from shadow_india.runner import (
     OpenRunRefused,
     RunnerPorts,
     ShadowRunner,
+    VmBuildRefused,
     VmIdentity,
     assemble,
     open_run,
     session_id_for,
     vm_intent_id_for,
     verify_vm_chain,
+    write_vm_build,
 )
 from shadow_india import signals as signals_module
 from shadow_india.signals import (
@@ -265,6 +268,9 @@ def evaluated(*ranked: str, suppressed: dict[str, str] | None = None, entries: b
 
 
 HASHES = {name: sha(name) for name in PIN_NAMES}
+# The deployed VM build every world runs on, and the nine-key hash it mints with (64-05 Task 2b).
+BUILD = BuildIdentity("a" * 40, {"intent.py": sha("intent.py"), "limits.py": sha("limits.py")})
+MINT_LIMITS = VECTORS["limits_sha256"]
 
 
 class WorldInputs(SignalInputs):
@@ -331,14 +337,16 @@ class World:
     def decide(self, session: date = S):
         return self.runner.decide(session)
 
-    def rebuild(self, *, clock: Clock | None = None) -> "World":
-        """A new process over the same files: every object is rebuilt, the VM and its client stay."""
+    def rebuild(self, *, clock: Clock | None = None, **overrides: Any) -> "World":
+        """A new process over the same files: every object is rebuilt, the VM and its client stay.
+
+        ``overrides`` reach ``build_world`` (a redeployed ``build``, another ``mint_limits``, a later ``session``)."""
 
         self.ledger.close()
         return build_world(
             self.tmp, self.vm, clock=clock or self.clock, reopen=True, script=self.script, reference=self.reference,
             pins=self.pins, health=self.health, quotes=self.quotes, symbols=tuple(i.symbol for i in self.instruments),
-            private=self.private, fills=self.ports.fills,
+            private=self.private, fills=self.ports.fills, **overrides,
         )
 
 
@@ -391,6 +399,9 @@ def build_world(
     mint_timeout: timedelta = timedelta(seconds=10),
     fills: Any = None,
     private: Path | None = None,
+    build: BuildIdentity | None = None,
+    mint_limits: str | None = None,
+    session: date = S,
 ) -> World:
     clock = clock or Clock()
     script = script or Script()
@@ -413,9 +424,12 @@ def build_world(
         scenario_sha256=pins.values["scenario"],
     )
     if reopen:
-        evidence = EvidenceStore.open(root, run_id=RUN, session_id=session_id_for(S), clock=clock)
+        evidence = EvidenceStore.open(root, run_id=RUN, session_id=session_id_for(session), clock=clock)
     else:
-        evidence = open_run(root, run_id=RUN, inputs=inputs, orders=vm.orders, run_class=run_class, clock=clock)
+        evidence = open_run(
+            root, run_id=RUN, inputs=inputs, orders=vm.orders, build=build or BUILD,
+            mint_limits_sha256=mint_limits or MINT_LIMITS, run_class=run_class, clock=clock,
+        )
     ledger = open_simulation_ledger(sim, RUN, SEED)
     guard = make_guard(ledger, private, now=clock)
     ports = RunnerPorts(quotes=quotes, reference=reference, fills=fills or NoPostSubmissionEvidence())
@@ -424,7 +438,7 @@ def build_world(
     runner = assemble(
         evidence=evidence, ledger=ledger, india_guard=guard, latch=guard.store, instruments=instruments,
         orders=vm.orders, identity=identity, base_inputs=inputs, pins=pins, ports=ports, health=health, clock=clock,
-        mint_timeout=mint_timeout,
+        mint_timeout=mint_timeout, build=build or BUILD, mint_limits_sha256=mint_limits or MINT_LIMITS,
     )
     world = World(
         tmp, vm, clock, evidence, ledger, guard, guard.store, runner, script, health, quotes, reference, pins, ports,
@@ -626,7 +640,10 @@ def test_open_run_refuses_unless_both_index_lists_were_fetched_by_the_window_sta
         cost_sha256=sha("c"), scenario_sha256=sha("s"),
     )
     with pytest.raises(OpenRunRefused) as caught:
-        open_run(tmp_path / "ev", run_id=RUN, inputs=inputs, orders=vm.orders, clock=Clock())
+        open_run(
+            tmp_path / "ev", run_id=RUN, inputs=inputs, orders=vm.orders, build=BUILD, mint_limits_sha256=MINT_LIMITS,
+            clock=Clock(),
+        )
     assert caught.value.code == "index_list_snapshot_not_seeded"
     assert ("nifty500", WINDOW_START) in seen and ("smallcap250", WINDOW_START) in seen
     assert not (tmp_path / "ev").exists()  # nothing was created
@@ -641,7 +658,10 @@ def test_open_run_records_the_audit_head_the_run_starts_from(tmp_path, vm, metad
     head = vm.orders.audit_all()[-1]
     first.ledger.close()
     inputs = first.inputs
-    second = open_run(tmp_path / "ev2", run_id="run65", inputs=inputs, orders=vm.orders, clock=Clock())
+    second = open_run(
+        tmp_path / "ev2", run_id="run65", inputs=inputs, orders=vm.orders, build=BUILD, mint_limits_sha256=MINT_LIMITS,
+        clock=Clock(),
+    )
     start = [r for r in second.records() if r["kind"] == "run_start"][0]
     assert (start["audit_base_seq"], start["audit_base_sha256"]) == (head.seq, head.entry_sha256)
 
@@ -2031,6 +2051,7 @@ def test_a_restart_cannot_shift_the_cadence_anchor(world):
             instruments=world.instruments, orders=world.vm.orders,
             identity=VmIdentity(VECTORS["limits_sha256"], HASHES["params_sha256"], PRIMARY["key_id"]),
             base_inputs=shifted, pins=world.pins, ports=world.ports, health=world.health, clock=world.clock,
+            build=BUILD, mint_limits_sha256=MINT_LIMITS,
         )
     assert caught.value.code == "run_start_session_moved"
 
@@ -2494,3 +2515,185 @@ def test_the_cli_without_a_buildable_runtime_keeps_an_ambiguous_exit_fill_pause_
     code, refused = run_cli(cli_args(world, "resume", "--reason", "x", "--pause-seq", str(seq)), runtime_factory=None)
     assert (code, refused) == (1, {"refused": "runtime_config_refused:PRIVATE_DIR_MISSING"})
     assert policy.AMBIGUOUS_EXIT_FILL in open_events(world) and log_bytes(world) == before
+
+
+# =====================================================================================================================
+# 64-05 Task 2b: the deployed VM build is pinned in evidence, compared before anything is written
+# =====================================================================================================================
+
+S2 = date(2026, 10, 23)
+NEXT_DAY = datetime(2026, 10, 23, 9, 45, tzinfo=IST)
+REDEPLOYED = BuildIdentity("b" * 40, dict(BUILD.orders_sha256))  # another commit
+EDITED = BuildIdentity(BUILD.commit, {**BUILD.orders_sha256, "limits.py": sha("edited")})  # same commit, one file moved
+OTHER_COLLAR = sha("another nine-key hash")
+
+
+class SentBuild:
+    """A build the way the relay reports it: the digest is whatever was sent, recomputed or not."""
+
+    def __init__(self, base: BuildIdentity, digest: str) -> None:
+        self.commit, self.orders_sha256, self.digest = base.commit, dict(base.orders_sha256), digest
+
+
+def session_records(world: "World", session: date) -> list[dict[str, Any]]:
+    return [r for r in world.evidence.records() if r.get("session_id") == session_id_for(session)]
+
+
+def next_session_world(world: "World", **overrides: Any) -> "World":
+    world.clock.now = NEXT_DAY
+    return world.rebuild(clock=Clock(NEXT_DAY), session=S2, **overrides)
+
+
+def test_open_run_pins_the_build_and_the_mint_hash_right_after_run_start(world):
+    kinds = [r["kind"] for r in world.evidence.records()]
+    assert kinds[:2] == ["run_start", "vm_build"]
+    pin = world.records("vm_build")[0]
+    assert (pin["commit"], pin["orders_sha256"], pin["digest"], pin["mint_limits_sha256"]) == (
+        BUILD.commit, dict(sorted(BUILD.orders_sha256.items())), BUILD.digest, MINT_LIMITS,
+    )
+
+
+def test_the_writer_recomputes_the_digest_and_refuses_one_that_does_not_match(tmp_path, vm):
+    lying = SentBuild(BUILD, sha("a digest that does not recompute"))
+    store = EvidenceStore.create(
+        tmp_path / "ev", run_id=RUN, run_class="plumbing", session_id=session_id_for(S), hashes=HASHES,
+        clock=Clock(),
+    )
+    before = list(store.records())
+    with pytest.raises(VmBuildRefused) as caught:
+        write_vm_build(store, lying, MINT_LIMITS)
+    assert caught.value.code == "vm_build_digest_mismatch" and store.records() == before  # nothing appended
+    kept = write_vm_build(store, BUILD, MINT_LIMITS)
+    assert kept["digest"] == BUILD.digest
+    with pytest.raises(VmBuildRefused):  # the same refusal at open-run, before anything is created
+        open_run(
+            tmp_path / "ev2", run_id=RUN, inputs=WorldInputs(
+                store=SimpleNamespace(), strategy=None, targets=None, universe_policy=None, calendar=None,
+                tolerances=None, window_start=WINDOW_START, run_start_session=S, dataset_sha256=sha("d"),
+                tick_sha256=sha("t"), cost_sha256=sha("c"), scenario_sha256=sha("s"),
+            ),
+            orders=vm.orders, build=lying, mint_limits_sha256=MINT_LIMITS, clock=Clock(),
+        )
+    assert not (tmp_path / "ev2").exists()
+
+
+def test_a_later_session_writes_its_vm_build_before_its_first_signal_or_intent(world):
+    later = next_session_world(world)
+    try:
+        report = later.decide(S2)
+        assert report.status == "done" and report.signals == STATUS_EVALUATED
+        records = session_records(later, S2)
+        assert records[0]["kind"] == "vm_build" and records[0]["digest"] == BUILD.digest
+        kinds = [r["kind"] for r in records]
+        first_decision = next(i for i, k in enumerate(kinds) if k in ("signal", "non_evaluation_day", "intent"))
+        assert kinds.index("vm_build") < first_decision
+        assert kinds.count("vm_build") == 1
+        later.decide(S2)  # a second invocation of the same session does not write a second pin
+        assert [r["kind"] for r in session_records(later, S2)].count("vm_build") == 1
+    finally:
+        later.ledger.close()
+
+
+def test_the_open_run_session_is_not_pinned_twice_by_its_own_decide(world):
+    world.decide()
+    assert len(world.records("vm_build")) == 1  # the open-run record is the session's pin
+
+
+def test_hand_flatten_records_the_build_too(world):
+    later = next_session_world(world)
+    try:
+        later.runner.hand_flatten(S2, "operator flattens by hand")
+        records = session_records(later, S2)
+        kinds = [r["kind"] for r in records]
+        assert kinds[0] == "vm_build" and kinds.index("vm_build") < kinds.index("latch")
+    finally:
+        later.ledger.close()
+
+
+def written_for(world: "World", session: date) -> list[str]:
+    return [r["kind"] for r in session_records(world, session)]
+
+
+@pytest.mark.parametrize("changed", [REDEPLOYED, EDITED], ids=["other_commit", "same_commit_one_file"])
+def test_a_redeploy_between_sessions_pauses_and_writes_nothing_else(world, changed):
+    first_session = list(world.evidence.records())
+    later = next_session_world(world, build=changed)
+    try:
+        report = later.decide(S2)
+        assert (report.status, report.stopped) == ("paused", "vm_build_changed")
+        assert written_for(later, S2) == ["pause"]  # no vm_build, signal, intent, expiry or recovery record
+        pause = later.records("pause")[-1]
+        assert (pause["event"], pause["scope"]) == ("vm_build_changed", policy.SCOPE_ALL)
+        assert later.records("vm_build") == first_session_pins(first_session)
+        assert later.order_posts() == []
+    finally:
+        later.ledger.close()
+
+
+def first_session_pins(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in records if r["kind"] == "vm_build"]
+
+
+def test_a_collar_change_with_the_same_build_pauses_and_writes_nothing_else(world):
+    later = next_session_world(world, mint_limits=OTHER_COLLAR)
+    try:
+        report = later.decide(S2)
+        assert (report.status, report.stopped) == ("paused", "vm_build_changed")
+        assert written_for(later, S2) == ["pause"]
+    finally:
+        later.ledger.close()
+
+
+def test_hand_flatten_on_a_changed_build_pauses_before_the_latch(world):
+    later = next_session_world(world, build=REDEPLOYED)
+    try:
+        report = later.runner.hand_flatten(S2, "operator flattens by hand")
+        assert (report.status, report.stopped) == ("paused", "vm_build_changed")
+        assert written_for(later, S2) == ["pause"] and later.records("latch") == []
+    finally:
+        later.ledger.close()
+
+
+def test_rolling_back_to_the_first_build_resumes_the_run_with_a_clean_record(world):
+    changed = next_session_world(world, build=REDEPLOYED)
+    assert changed.decide(S2).stopped == "vm_build_changed"
+    policy.resume(changed.evidence, "rolled the VM back to the first build")
+    changed.ledger.close()
+    back = changed.rebuild(clock=Clock(NEXT_DAY), session=S2)
+    try:
+        report = back.decide(S2)
+        assert report.status == "done" and report.signals == STATUS_EVALUATED
+        kinds = written_for(back, S2)
+        assert kinds.count("vm_build") == 1 and kinds.index("pause") < kinds.index("vm_build") < kinds.index("intent")
+    finally:
+        back.ledger.close()
+
+
+def test_an_open_build_or_replay_pause_admits_and_mints_nothing(world):
+    for event in ("vm_build_changed", "replay_divergence"):
+        later = next_session_world(world)
+        try:
+            policy.raise_event(later.evidence, event, "operator must look")
+            report = later.decide(S2)
+            assert (report.status, report.stopped) == ("paused", "open_pause")
+            assert later.records("intent") == [] and later.order_posts() == []
+            policy.resume(later.evidence, "looked")
+        finally:
+            later.ledger.close()
+        world = later
+
+
+def test_a_run_with_no_build_pin_refuses_every_decide_and_writes_nothing(tmp_path, vm, monkeypatch):
+    monkeypatch.setattr(runner_module, "write_vm_build", lambda *a, **k: None)  # an old run: no vm_build record
+    monkeypatch.setattr(runner_module, "evaluate_session", Script())
+    built = build_world(tmp_path, vm)
+    try:
+        before = list(built.evidence.records())
+        with pytest.raises(DecideRefused) as caught:
+            built.decide()
+        assert caught.value.code == "vm_build_missing" and built.evidence.records() == before
+        with pytest.raises(DecideRefused) as flat:
+            built.runner.hand_flatten(S, "operator flattens by hand")
+        assert flat.value.code == "vm_build_missing" and built.evidence.records() == before
+    finally:
+        built.ledger.close()

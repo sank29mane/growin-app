@@ -24,7 +24,7 @@ from typing import Any, Callable, Optional
 
 import test_pilot_data_crosscheck as cc
 from brokers.breeze_gateway.client import UpstreamPayload
-from brokers.breeze_gateway.orders import RelayLink
+from brokers.breeze_gateway.orders import OrdersClient, RelayLink
 from india_limits_support import india_private_dir
 from risk_india.state import state_path_for
 from shadow_india import runtime as runtime_module
@@ -33,9 +33,16 @@ from strategy_india.params import placeholder_params
 from test_gateway_orders_routes import PRIMARY
 from test_pilot_data_session_store import build_research, seed
 from test_shadow_india_runner import AS_OF as _RUNNER_AS_OF  # noqa: F401  (documents that this file mirrors it)
-from test_shadow_india_runner import S, Clock, Script, Vm
+from test_shadow_india_runner import BUILD, S, Clock, Script, Vm
 
 UTC = timezone.utc
+
+
+def install_build(monkeypatch: Any, build: Any = BUILD) -> None:
+    """Give every ``OrdersClient`` a ``current_build()`` that answers ``build`` (the route is another PR's; the runtime
+    reads it through the client, so a fake method is the whole seam)."""
+
+    monkeypatch.setattr(OrdersClient, "current_build", lambda self: build, raising=False)
 SESSION = S  # 2026-10-22, inside the VM fixtures' October 2026
 AS_OF = cc.D5  # the data session the reference prices are read for (the 2025 seeded store)
 WINDOW_START = cc.START  # 2025-03-03
