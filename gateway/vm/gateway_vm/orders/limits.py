@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from .challenge import canonical_bytes
 from .intent import Intent
@@ -315,9 +315,120 @@ class RiskFlags:
 # ---------------------------------------------------------------- evaluator
 
 
-def session_open(now_ist: datetime) -> bool:
-    """09:15 <= t < 15:10 IST, Monday to Friday. 15:09:59 is open, 15:10:00 is not."""
+# ---------------------------------------------------------------- calendar
+# The shadow replay loads this module on its own (limits, intent, challenge), so the
+# calendar the session check needs is defined here, not in sessions.py.
+
+HOLIDAY_TABLE_PATH = Path(__file__).parent / "data" / "nse_trading_holidays.json"
+HOLIDAY_SCHEMA = "growin.gateway.nse_trading_holidays/2"
+_HOLIDAY_MAX_FILE = 65536
+
+
+def _strict_holidays(text: str) -> object:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        out: dict[str, object] = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError("duplicate key")
+            out[key] = value
+        return out
+
+    def bad(_: str) -> object:
+        raise ValueError("number")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_float=bad, parse_constant=bad)
+
+
+def _holiday_dates(listed: object, *, weekdays_only: bool) -> frozenset[date]:
+    if not isinstance(listed, list):
+        raise ValueError("not a list")
+    days: list[date] = []
+    for item in listed:
+        if not isinstance(item, str) or len(item) != 10:
+            raise ValueError("date")
+        day = date.fromisoformat(item)
+        if weekdays_only and day.weekday() >= 5:
+            raise ValueError("weekend")
+        days.append(day)
+    if len(set(days)) != len(days):
+        raise ValueError("duplicate")
+    return frozenset(days)
+
+
+def load_calendar(path: str | Path = HOLIDAY_TABLE_PATH) -> tuple[frozenset[date], frozenset[date]]:
+    """(holidays, special_sessions), or a LimitsError if the table cannot be trusted."""
+    try:
+        file = Path(path)
+        if file.stat().st_size > _HOLIDAY_MAX_FILE:
+            raise ValueError("too large")
+        raw = _strict_holidays(file.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("schema") != HOLIDAY_SCHEMA:
+            raise ValueError("schema")
+        holidays = _holiday_dates(raw["holidays"], weekdays_only=True)
+        special = _holiday_dates(raw["special_sessions"], weekdays_only=False)
+        if holidays & special:
+            raise ValueError("a date cannot be both a holiday and a special session")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise LimitsError("holiday table is unreadable") from exc
+    return holidays, special
+
+
+def covered_years(holidays: Iterable[date]) -> frozenset[int]:
+    """Years the table speaks for: those with at least one listed holiday.
+
+    Every NSE year has weekday holidays, so a year with none is a year nobody filled
+    in. An empty table covers nothing, and a gap year (2026 and 2028 listed, 2027 not)
+    is not covered just because a later year is.
+    """
+    return frozenset(day.year for day in holidays)
+
+
+def calendar_covers(day: date, holidays: Iterable[date]) -> bool:
+    """False for a day in a year the table has no holiday rows for: an unlisted holiday
+    there would read as a normal session, so the day must be refused, not guessed."""
+    return day.year in covered_years(holidays)
+
+
+def covered_through(holidays: Iterable[date], day: date) -> date | None:
+    """31 December of the last year of the unbroken run of covered years that starts at
+    ``day``'s year, or None when ``day``'s own year is not covered."""
+    years = covered_years(holidays)
+    year = day.year
+    if year not in years:
+        return None
+    while year + 1 in years:
+        year += 1
+    return date(year, 12, 31)
+
+
+def session_open(
+    now_ist: datetime,
+    *,
+    holidays: Iterable[date] | None = None,
+    special_sessions: Iterable[date] | None = None,
+) -> bool:
+    """09:15 <= t < 15:10 IST on a normal NSE session day. 15:09:59 is open, 15:10:00 is not.
+
+    Closed on weekends, on every listed holiday, and on every listed special session
+    (a Muhurat session has its own hours that the table does not carry, so it stays
+    closed: the safe side), and on any day in a year the holiday table has no holiday rows
+    for (an unlisted holiday would look like a normal day; an empty table covers no year). With no calendar passed the
+    repo table is read; one that cannot be read closes every day.
+    """
     if now_ist.weekday() >= 5:
+        return False
+    try:
+        if holidays is None or special_sessions is None:
+            table_holidays, table_special = load_calendar()
+            holidays = table_holidays if holidays is None else holidays
+            special_sessions = table_special if special_sessions is None else special_sessions
+        listed_holidays, listed_special = frozenset(holidays), frozenset(special_sessions)
+    except LimitsError:
+        return False
+    day = now_ist.date()
+    if day in listed_holidays or day in listed_special:
+        return False
+    if not calendar_covers(day, listed_holidays):
         return False
     return SESSION_OPEN <= now_ist.time() < ORDER_CUTOFF
 
@@ -383,7 +494,7 @@ def evaluate(
         codes.append("stop_open")
     if buy and flags.halt:
         codes.append("halt_latch")
-    if not session_open(now_ist):
+    if not session_open(now_ist):  # reads the packaged holiday table
         codes.append("session_closed")
 
     fresh = (

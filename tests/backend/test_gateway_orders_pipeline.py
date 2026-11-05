@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1029,7 +1029,19 @@ def test_production_accepts_a_reference_from_the_month_before_the_session(real: 
     assert real.mint(limit_price="100.01").challenge_id
 
 
-def test_production_january_session_wants_december(real: RealRig):
+def test_production_january_session_wants_december(real: RealRig, monkeypatch):
+    # About the tick reference month, not the calendar: give the table a 2027 row so
+    # 2027-01-04 is inside its coverage (the packaged table lists 2026 only).
+    from gateway_vm.orders import limits as limits_mod
+    from gateway_vm.orders import sessions
+
+    holidays, special = sessions.load_calendar()
+    def with_2027(*_a):
+        return holidays | {date(2027, 1, 26)}, special
+
+    monkeypatch.setattr(sessions, "load_calendar", with_2027)  # the guard's own copy
+    monkeypatch.setattr(limits_mod, "load_calendar", with_2027)  # session_open's
+    real.pipeline = real.build(real.store)  # the guard reads the calendar when it is built
     real.market.quotes["TESTCO"] = quote_for(session_date=date(2027, 1, 4))
     real.clock.now = datetime(2027, 1, 4, 4, 30, 0, tzinfo=timezone.utc)  # 10:00 IST, a Monday
     real.tick_reference.default = D("249.90")
@@ -1329,6 +1341,14 @@ def assert_no_challenge_left_behind(real: RealRig) -> None:
     real.clock.now = T0
     again = real.mint()
     assert again.challenge_id
+
+
+def test_mint_on_a_listed_nse_holiday_is_refused_session_closed(real: RealRig):
+    real.market.quotes["TESTCO"] = quote_for(session_date=date(2026, 11, 10))
+    real.clock.now = datetime(2026, 11, 10, 4, 30, 0, tzinfo=UTC)  # Tue 10:00 IST, in the packaged table
+    with pytest.raises(OrderRefusal) as err:
+        real.mint()
+    expect(err, 423, "ORDERS_BLOCKED", "session_closed")
 
 
 @pytest.mark.parametrize(

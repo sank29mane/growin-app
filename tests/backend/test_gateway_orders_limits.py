@@ -445,6 +445,88 @@ def test_evaluator_is_pure_over_its_inputs():
     assert run_case(case) == first == ()
 
 
+TABLE_2026 = (date(2026, 1, 26),)  # one listed 2026 holiday: enough for 2026 to count as covered
+
+
+def _ist(text: str):
+    return vm.to_ist(datetime.fromisoformat(text))
+
+
+def test_session_is_closed_on_a_listed_holiday_and_open_the_days_around_it():
+    # 2026-11-10 is in the packaged NSE table (Tuesday).
+    assert not vm.session_open(_ist("2026-11-10T10:00:00+05:30"))
+    assert vm.session_open(_ist("2026-11-09T10:00:00+05:30"))
+    assert vm.session_open(_ist("2026-11-11T10:00:00+05:30"))
+    assert not vm.session_open(_ist("2026-12-25T10:00:00+05:30"))
+
+
+def test_a_special_session_stays_closed_to_orders_on_a_weekday_too():
+    # The table has no hours for a Muhurat session, so it is closed all day (safe side).
+    assert not vm.session_open(_ist("2026-11-08T18:30:00+05:30"))  # the real Sunday Muhurat entry
+    thursday = date(2026, 11, 12)
+    assert vm.session_open(_ist("2026-11-12T10:00:00+05:30"), holidays=TABLE_2026, special_sessions=())
+    assert not vm.session_open(_ist("2026-11-12T10:00:00+05:30"), holidays=TABLE_2026, special_sessions=(thursday,))
+
+
+def test_an_unreadable_holiday_table_closes_every_day(monkeypatch):
+    def unreadable(*_a, **_k):
+        raise vm.LimitsError("holiday table is unreadable")
+
+    monkeypatch.setattr(vm, "load_calendar", unreadable)
+    assert not vm.session_open(_ist("2026-10-08T10:00:00+05:30"))
+    # An injected calendar does not need the file.
+    assert vm.session_open(_ist("2026-10-08T10:00:00+05:30"), holidays=TABLE_2026, special_sessions=())
+
+
+def test_a_day_past_the_last_year_in_the_table_is_closed_not_guessed_open():
+    assert vm.session_open(_ist("2026-12-31T10:00:00+05:30"))
+    assert not vm.session_open(_ist("2027-01-05T10:00:00+05:30"))  # the packaged table lists 2026 only
+    holidays, special = vm.load_calendar()
+    with_2027 = holidays | {date(2027, 1, 26)}
+    assert vm.session_open(_ist("2027-01-05T10:00:00+05:30"), holidays=with_2027, special_sessions=special)
+    assert not vm.session_open(_ist("2027-01-26T10:00:00+05:30"), holidays=with_2027, special_sessions=special)
+
+
+def test_an_empty_table_opens_no_day():
+    # Schema-valid but empty: no year is covered, so ordinary weekdays do not open.
+    assert not vm.session_open(_ist("2026-10-08T10:00:00+05:30"), holidays=(), special_sessions=())
+    assert vm.session_open(_ist("2026-10-08T10:00:00+05:30"), holidays=TABLE_2026, special_sessions=())
+
+
+def test_a_year_between_two_listed_years_is_closed():
+    holidays = (date(2026, 1, 26), date(2028, 1, 26))  # nothing for 2027
+    assert vm.session_open(_ist("2026-10-08T10:00:00+05:30"), holidays=holidays, special_sessions=())
+    assert not vm.session_open(_ist("2027-10-08T10:00:00+05:30"), holidays=holidays, special_sessions=())
+    assert vm.session_open(_ist("2028-10-09T10:00:00+05:30"), holidays=holidays, special_sessions=())
+
+
+def test_evaluate_answers_session_closed_on_a_holiday_for_an_otherwise_clean_buy():
+    case = dict(next(c for c in CASES if c["name"] == "buy_ok"))
+    case["now_ist"] = "2026-11-10T10:00:00+05:30"
+    case["quote"] = dict(case["quote"], session_date="2026-11-10")
+    codes = run_case(case)
+    assert "session_closed" in codes
+    case["now_ist"] = "2026-11-09T10:00:00+05:30"
+    case["quote"] = dict(case["quote"], session_date="2026-11-09")
+    assert "session_closed" not in run_case(case)
+
+
+def test_limits_module_stands_alone_for_the_shadow_replay():
+    # backend/shadow_india/vm_replay.py loads only limits, intent and challenge from a
+    # recorded build. A limits.py that imports sessions would fail to load there.
+    import ast
+
+    tree = ast.parse(Path(vm.__file__).read_text(encoding="utf-8"))
+    imported = {
+        (node.module or "") if isinstance(node, ast.ImportFrom) else alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in (node.names if isinstance(node, ast.Import) else [None])
+    }
+    assert not any(m.split(".")[-1] in {"sessions", "reads", "risk", "pipeline"} for m in imported)
+    assert vm.session_open(_ist("2026-11-09T10:00:00+05:30")) and not vm.session_open(_ist("2026-11-10T10:00:00+05:30"))
+
+
 def test_session_helpers_use_ist_not_the_host_zone():
     utc = datetime.fromisoformat("2026-10-08T03:45:00+00:00")  # 09:15 IST
     assert vm.session_open(vm.to_ist(utc))

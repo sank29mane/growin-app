@@ -31,7 +31,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from .audit import AuditBroken, AuditLog
 from .limits import (
@@ -39,10 +39,12 @@ from .limits import (
     ZERO,
     Holding,
     Limits,
+    LimitsError,
     RiskFlags,
     Trade,
     to_ist,
 )
+from .sessions import is_session_day, load_calendar
 
 SESSION_END = time(15, 30)
 
@@ -597,9 +599,17 @@ def session_end_check(
     *,
     audit: AuditLog | None = None,
     limits_sha256: str | None = None,
+    holidays: Iterable[date] | None = None,
+    special_sessions: Iterable[date] | None = None,
 ) -> SessionEndResult:
-    """At or after 15:30:00 IST on a weekday, alert once per (session, ISIN) for
+    """At or after 15:30:00 IST on a session day, alert once per (session, ISIN) for
     every stop exit still open.
+
+    A session day is a weekday that is not a listed NSE holiday, or a listed special
+    session (a Sunday Muhurat day is not skipped). The table lists dates, not hours, so
+    a special session alerts from 15:30 like any other; an early alert is the safe
+    side. A holiday table that cannot be read falls back to weekdays only: this path
+    only ever alerts more, never less.
 
     Mutates state.alerts_sent for each alert that went out; the caller persists
     it. A port that raises records `alert_failed` in the audit and is retried on
@@ -607,7 +617,17 @@ def session_end_check(
     state only, so a stale ledger can over-alert but never suppresses one.
     """
     now = to_ist(clock())
-    if now.weekday() >= 5 or now.time() < SESSION_END or not state.stops:
+    if now.time() < SESSION_END or not state.stops:
+        return SessionEndResult()
+    try:
+        if holidays is None or special_sessions is None:
+            table_holidays, table_special = load_calendar()
+            holidays = table_holidays if holidays is None else holidays
+            special_sessions = table_special if special_sessions is None else special_sessions
+        listed_holidays, listed_special = frozenset(holidays), frozenset(special_sessions)
+    except LimitsError:
+        listed_holidays, listed_special = frozenset(), frozenset()  # weekdays only
+    if not is_session_day(now.date(), listed_holidays, listed_special):
         return SessionEndResult()
     net = net_quantities(state)
     sent: list[StopExitAlert] = []
