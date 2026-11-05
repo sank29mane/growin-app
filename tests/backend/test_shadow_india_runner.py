@@ -2594,6 +2594,25 @@ def test_a_later_session_writes_its_vm_build_before_its_first_signal_or_intent(w
         later.ledger.close()
 
 
+def test_a_recovery_written_in_a_later_session_comes_after_that_sessions_vm_build(world, monkeypatch):
+    """Break-proof: run the recovery before the pin and the session's first written row is the recovery, not the build."""
+    hold = Hold(world.vm, monkeypatch, after=0)
+    world.decide()  # the first mint is in doubt and the run is paused
+    hold.release()
+    hold.after = 10**6
+    world.runner.resume("relay is back")
+    later = next_session_world(world)
+    try:
+        later.clock.now += timedelta(seconds=11)  # past the mint timeout, so the next decide has something to recover
+        report = later.decide(S2)
+        assert report.recovered, "the scenario must make the recovery write something"
+        kinds = written_for(later, S2)
+        assert kinds[0] == "vm_build" and kinds.count("vm_build") == 1
+        assert kinds.index("vm_build") < min(i for i, k in enumerate(kinds) if k in ("vm_ambiguous", "vm_intent", "vm_decision"))
+    finally:
+        later.ledger.close()
+
+
 def test_the_open_run_session_is_not_pinned_twice_by_its_own_decide(world):
     world.decide()
     assert len(world.records("vm_build")) == 1  # the open-run record is the session's pin

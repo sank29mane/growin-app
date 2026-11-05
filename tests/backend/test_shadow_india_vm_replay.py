@@ -1783,6 +1783,11 @@ def test_a_fail_record_is_sticky_a_later_pass_record_never_replaces_it(sc: Scena
     failed = stored(sc, "vm_replay")[0]
     sc.raw(S1, "vm_replay", {k: v for k, v in failed.items() if k in SCHEMAS["vm_replay"][0]} | {"verdict": "PASS"})
     assert recorded_run_verdict(sc.records()).verdict == "FAIL"
+    # The defect row alone would also fail the run. Without it the replay records must still decide: FAIL then PASS is FAIL.
+    without_defect = [r for r in sc.records() if r["kind"] != "replay_defect"]
+    assert [r["verdict"] for r in without_defect if r["kind"] == "vm_replay"] == ["FAIL", "PASS"]
+    sticky = recorded_run_verdict(without_defect)
+    assert sticky.verdict == "FAIL" and vm_replay.DIVERGENCE in sticky.reasons
 
 
 def test_resuming_the_divergence_pause_does_not_clear_the_d23_verdict(sc: Scenario):
@@ -1791,6 +1796,11 @@ def test_resuming_the_divergence_pause_does_not_clear_the_d23_verdict(sc: Scenar
     policy.resume(sc.use(S1), "operator looked at it")
     assert not policy.state_from_records(sc.records()).open_pauses  # the pause is gone
     assert recorded_run_verdict(sc.records()).verdict == "FAIL"  # the D-23 verdict reads replay records, not pause state
+    # Same with the defect row left out: the stored FAIL replay record alone keeps the run failed after the resume.
+    without_defect = [r for r in sc.records() if r["kind"] != "replay_defect"]
+    assert any(r["kind"] == "resume" for r in without_defect)
+    still = recorded_run_verdict(without_defect)
+    assert still.verdict == "FAIL" and vm_replay.DIVERGENCE in still.reasons
 
 
 def test_a_replay_defect_record_alone_fails_the_run_even_with_every_session_passing(sc: Scenario):

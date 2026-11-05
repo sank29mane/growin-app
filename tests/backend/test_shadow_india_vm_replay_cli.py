@@ -197,13 +197,19 @@ def test_an_aborted_run_exits_three_and_writes_nothing(world: World, monkeypatch
     assert tree(world.sc.root) == before
 
 
-def test_all_replays_every_decide_day_prints_the_recorded_verdict_and_writes_a_report_only_with_out_dir(world: World, tmp_path: Path):
+def test_all_replays_every_decide_day_prints_the_recorded_verdict_and_writes_a_report_only_with_out_dir(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)  # a default report location would be the working directory
     decide_day(world)
     world.sc.intent(S2, "buy", 1, "100.00", isin=ISIN_B)
     world.sc.close(S2)
     code, out = run_cli(world.argv(session=False))
     assert code == 0 and out["verdict"] == "PASS" and out["sessions"] == 2 and out["not_replayed"] == []
     assert not list(tmp_path.rglob(cli.REPLAY_REPORT))  # nothing is written without --out-dir
+    assert not list(cwd.iterdir()), "no default report location is written either"
     reports = tmp_path / "reports"
     code, out = run_cli(world.argv("--out-dir", str(reports), session=False))
     assert code == 0
