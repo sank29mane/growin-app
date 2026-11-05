@@ -100,7 +100,7 @@ from .signals import (
     held_names_quarantined,
     previous_session,
 )
-from .vm_replay import BuildIdentity
+from .vm_replay import BuildIdentity, complete_stored, replay_sessions
 
 DECIDE_OPENS = time(9, 30)
 DECIDE_CLOSES = time(10, 0)
@@ -127,6 +127,25 @@ _ABORT_EVENTS: Mapping[str, str] = {
     "audit_duplicate_entries": "vm_audit_duplicate_entries",
     "audit_entry_codes": "vm_audit_codes_unexpected",
 }
+
+
+class ReplayEnforcementSink:
+    """Writes a stored replay finding's defect and pause to the evidence store, linked to the finding by ``finding_seq``.
+
+    ``decide`` uses it to finish what an interrupted replay still owes; the CLI's replay sink adds ``record_session``.
+    """
+
+    def __init__(self, store: EvidenceStore) -> None:
+        self._store = store
+
+    def record_session(self, result: Any) -> int:
+        raise AssertionError("only vm-replay records a replay finding")
+
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
+        self._store.append("replay_defect", {"session_id": session_id, "code": code, "detail": detail, "finding_seq": finding_seq})
+
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
+        policy.raise_event(self._store, event, reason, finding_seq=finding_seq)
 
 
 class DecideRefused(Exception):
@@ -674,6 +693,10 @@ class ShadowRunner:
         policy.raise_event(self._evidence, _ABORT_EVENTS.get(code, "ledger_evidence_disagree"), f"shadow_abort {code}")
 
     async def _decide(self, session: date, report: DecideReport) -> None:
+        # A replay that stopped after its FAIL record and was never re-run still owes a defect and a pause: write them
+        # first, so the stop check below sees the pause (Terra #646 r5). Nothing is written when nothing is owed.
+        records = self._evidence.records()
+        complete_stored(records, replay_sessions(records), ReplayEnforcementSink(self._evidence))
         if self._stopped_all():
             report.status, report.stopped = "paused", "open_pause"
             return

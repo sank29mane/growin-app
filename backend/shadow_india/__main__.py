@@ -56,6 +56,7 @@ from .runtime import (
 from .runner import (
     DecideRefused,
     OpenRunRefused,
+    ReplayEnforcementSink,
     ShadowRunner,
     session_id_for,
 )
@@ -333,11 +334,8 @@ def _release(
     }
 
 
-class EvidenceReplaySink:
+class EvidenceReplaySink(ReplayEnforcementSink):
     """The replay's sink over the evidence store and the policy table: hashes, counts and closed codes only."""
-
-    def __init__(self, store: EvidenceStore) -> None:
-        self._store = store
 
     def record_session(self, result: vm_replay.SessionReplay) -> int:
         body: dict[str, Any] = {
@@ -352,12 +350,6 @@ class EvidenceReplaySink:
         if result.defects:
             body["defects"] = list(result.defects)
         return int(self._store.append("vm_replay", body)["seq"])  # the finding every defect and pause of it links to
-
-    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
-        self._store.append("replay_defect", {"session_id": session_id, "code": code, "detail": detail, "finding_seq": finding_seq})
-
-    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
-        policy.raise_event(self._store, event, reason, finding_seq=finding_seq)
 
 
 def _replay_limits(private_dir: Any) -> vm_replay.ReplayLimits:

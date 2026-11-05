@@ -2736,3 +2736,27 @@ def test_a_run_with_no_build_pin_refuses_every_decide_and_writes_nothing(tmp_pat
         assert flat.value.code == "vm_build_missing" and built.evidence.records() == before
     finally:
         built.ledger.close()
+
+
+def test_decide_writes_the_pause_an_interrupted_replay_still_owes_before_anything_else(world):
+    """Terra #646 r5 break-proof: drop the decide-time completion and a replay that stopped after its FAIL record, and was
+    never re-run, leaves the next decide free to trade past a divergence."""
+    from shadow_india import vm_replay
+
+    first = world.decide()
+    assert first.status == "done"
+    sha = "0" * 64
+    finding = world.evidence.append("vm_replay", {
+        "session_id": session_id_for(S), "verdict": vm_replay.FAIL, "build_commit": "0" * 40, "build_digest": sha,
+        "limits_sha256": sha, "mint_limits_sha256": sha, "intents_compared": 1, "no_intents": False,
+        "divergence_reasons": ["mac_admitted_vm_refused"], "divergent_intent_id": "intent-1",
+    })  # the replay stopped here: no replay_defect, no pause
+    before = len(world.evidence.records())
+    again = world.decide()
+    assert again.status == "paused" and again.stopped == "open_pause" and again.intents == []
+    written = world.evidence.records()[before:]
+    assert [r["kind"] for r in written] == ["replay_defect", "pause"]
+    assert {r["finding_seq"] for r in written} == {finding["seq"]}
+    assert open_events(world) == [vm_replay.DIVERGENCE]
+    settled = len(world.evidence.records())
+    assert world.decide().stopped == "open_pause" and len(world.evidence.records()) == settled  # nothing owed twice
