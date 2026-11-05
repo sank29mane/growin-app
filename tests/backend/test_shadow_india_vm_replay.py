@@ -707,6 +707,24 @@ def test_a_kill_switch_code_in_a_replay_verdict_is_a_defect_not_a_divergence(tmp
     assert sink.defects == [(vm_replay.KILL_SWITCH_IN_VERDICT, S1, vm_replay.KILL_SWITCH_IN_VERDICT)] and sink.pauses == []
 
 
+def test_a_stored_fail_that_owes_a_session_defect_is_finished_with_that_defect_linked_to_it(tmp_path: Path, limits_sha: str):
+    """Break-proof: finish only the divergence half of a stored FAIL and the kill-switch defect is never opened."""
+    forced = make_vm(
+        tmp_path, "forced",
+        edits={"limits.py": lambda text: text.replace("    return tuple(codes)\n", '    codes.insert(0, "kill_switch")\n    return tuple(codes)\n', 1)},
+    )
+    sc = Scenario(tmp_path, forced, limits_sha)
+    sc.intent(S1, "buy", 10, "100.00")
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    assert stored(sc, "replay_defect") == []
+    again = sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    assert again.already_recorded is True and finding["defects"] == [vm_replay.KILL_SWITCH_IN_VERDICT]
+    assert [(r["code"], r["finding_seq"]) for r in stored(sc, "replay_defect")] == [(vm_replay.KILL_SWITCH_IN_VERDICT, finding["seq"])]
+    assert open_scope(sc) == []  # a session defect pauses nothing
+
+
 def test_the_replay_asks_the_vm_with_the_kill_switch_open(tmp_path: Path, limits_sha: str):
     """A fixture build that raises when it is asked with the kill switch closed (the flag the live system holds)."""
 
