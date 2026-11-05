@@ -924,15 +924,16 @@ class SessionReplay:
 class ReplaySink(Protocol):
     """Where a session's result goes. ``__main__`` implements it over the evidence store and policy.
 
-    ``record_session`` writes the per-session record. ``open_defect`` opens a defect on a divergence or a replay
-    defect. ``pause_run`` pauses the run on a divergence so ``decide`` refuses until an operator reason.
+    ``record_session`` writes the per-session record and returns its ``seq``: that record is the finding. ``open_defect``
+    opens a defect and ``pause_run`` pauses the run (scope all) for a finding, and both carry that finding's ``seq`` so
+    "this finding already has its defect or pause" can be read back from the evidence, whatever resumed in between.
     """
 
-    def record_session(self, result: SessionReplay) -> None: ...
+    def record_session(self, result: SessionReplay) -> int: ...
 
-    def open_defect(self, code: str, session_id: str, detail: str) -> None: ...
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None: ...
 
-    def pause_run(self, event: str, reason: str) -> None: ...
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None: ...
 
 
 def _ist_of(record: Mapping[str, Any], vm: _Vm) -> datetime:
@@ -1020,13 +1021,20 @@ def replay_session(
     what the pinned private config holds (``limits``) and the manifest's hashes.
 
     A session that already holds a ``vm_replay`` record is not recorded again: an equal fresh result is reported
-    ``already_recorded``, and a different one opens a ``replay_nondeterministic`` defect and is a FAIL.
+    ``already_recorded``, and a different one opens a ``replay_nondeterministic`` defect and is a FAIL. A fresh FAIL that
+    no stored record holds is a new finding: it is recorded first, and its defect and pause follow and link to it.
+
+    Before anything is built or validated, every stored FAIL of the session is finished (``_complete_stored``): a
+    process that stopped after the record, or a private config that changed since, never leaves a finding without
+    its defect and pause. A refusal after that still propagates, so the run reads FAIL for both.
     """
 
     if session_id not in replay_sessions(records):  # the open-run day or an operator day is not replayed, and records nothing
         raise ReplayRefused(NOT_DECIDE_DAY)
     if not any(r.get("kind") == "session_close" and r.get("session_id") == session_id for r in records):
         raise ReplayRefused(SESSION_OPEN)
+    if sink is not None:
+        _complete_stored(records, session_id, sink)  # before the build or the limits can refuse
     build, mint_limits_sha256 = build_from_evidence(records, session_id)
     vm = load_recorded_build(vm_source, build)
     try:
@@ -1071,67 +1079,93 @@ def replay_session(
     finally:
         vm.close()  # the private copy of the build's files
     stored = _stored_replays(records, session_id)
-    if stored:
-        if all(_same_as_stored(r, result) for r in stored):
-            if sink is not None and result.verdict == FAIL:
-                _finish_enforcement(records, session_id, result, max(_seq(r) for r in stored), sink)
-            return dataclasses.replace(result, already_recorded=True)
-        result = dataclasses.replace(result, verdict=FAIL, defects=result.defects + (NONDETERMINISTIC,))
-        if sink is not None:  # the nondeterminism defect, and the defect and pause of any divergence this pass found
-            _finish_enforcement(records, session_id, result, max(_seq(r) for r in stored), sink)
+    if not stored:
+        if sink is not None:
+            _record_finding(sink, session_id, result)
         return result
+    if all(_same_as_stored(r, result) for r in stored):
+        return dataclasses.replace(result, already_recorded=True)
+    fresh = result
+    result = dataclasses.replace(result, verdict=FAIL, defects=result.defects + (NONDETERMINISTIC,))
     if sink is not None:
-        sink.record_session(result)
-        for action in _enforcement(session_id, result):
-            _apply(sink, session_id, action)
+        if fresh.verdict == FAIL and not any(_same_as_stored(r, fresh) for r in stored):
+            _record_finding(sink, session_id, fresh)  # a new finding of its own: no earlier resume can cover it
+        first = min(_seq(r) for r in stored)  # the nondeterminism contradicts the first verdict the session stored
+        if not _held_defect(records, session_id, first, NONDETERMINISTIC):
+            sink.open_defect(NONDETERMINISTIC, session_id, NONDETERMINISTIC, first)
     return result
 
 
-def _enforcement(session_id: str, result: SessionReplay) -> list[tuple[str, str, str]]:
-    """The writes a FAIL owes after its ``vm_replay`` record, in order: ``(kind, code_or_event, detail_or_reason)``.
+def _owed(session_id: str, reasons: Sequence[str], intent_id: str, defects: Sequence[str]) -> list[tuple[str, str, str]]:
+    """The writes a FAIL finding owes after its ``vm_replay`` record, in order: ``(kind, code_or_event, detail_or_reason)``.
 
-    A divergence opens a defect and pauses the run (scope all); a defect of the session opens its own defect.
+    A divergence opens a defect and pauses the run (scope all); a defect of the session opens its own defect. Replay
+    stops at the first divergence, so a record holds one reason and one intent id.
     """
 
     actions: list[tuple[str, str, str]] = []
-    for divergence in result.divergences:
-        actions.append(("defect", DIVERGENCE, divergence.reason))
-        actions.append(("pause", DIVERGENCE, f"{session_id}:{divergence.intent_id}:{divergence.reason}"))
-    for defect in result.defects:
+    for reason in reasons:
+        actions.append(("defect", DIVERGENCE, reason))
+        actions.append(("pause", DIVERGENCE, f"{session_id}:{intent_id}:{reason}"))
+    for defect in defects:
         actions.append(("defect", defect, defect))
     return actions
 
 
-def _apply(sink: ReplaySink, session_id: str, action: tuple[str, str, str]) -> None:
+def _record_finding(sink: ReplaySink, session_id: str, result: SessionReplay) -> None:
+    """Record ``result`` as a finding and, when it is a FAIL, write what it owes, each write linked to the new record."""
+
+    finding = sink.record_session(result)
+    intent_id = result.divergences[0].intent_id if result.divergences else "-"
+    for action in _owed(session_id, [d.reason for d in result.divergences], intent_id, result.defects):
+        _apply(sink, session_id, action, finding)
+
+
+def _apply(sink: ReplaySink, session_id: str, action: tuple[str, str, str], finding_seq: int) -> None:
     kind, first, second = action
     if kind == "defect":
-        sink.open_defect(first, session_id, second)
+        sink.open_defect(first, session_id, second, finding_seq)
     else:
-        sink.pause_run(first, second)
+        sink.pause_run(first, second, finding_seq)
 
 
-def _finish_enforcement(
-    records: Sequence[Mapping[str, Any]], session_id: str, result: SessionReplay, recorded_seq: int, sink: ReplaySink
-) -> None:
-    """A stored FAIL whose defect or pause writes never landed (the process stopped after the record): write what is missing.
+def _held_defect(records: Sequence[Mapping[str, Any]], session_id: str, finding_seq: int, code: str) -> bool:
+    return any(
+        r.get("kind") == "replay_defect" and r.get("session_id") == session_id and r.get("finding_seq") == finding_seq
+        and r.get("code") == code
+        for r in records
+    )
 
-    Defects are always completed (the D-23 verdict reads them). A missing pause is written only when no ``resume``
-    came after the stored record: an operator who resumed after the record has already decided, and a re-run must
-    not undo that. Nothing is written for what is already there, so a further re-run writes nothing.
+
+def _complete_stored(records: Sequence[Mapping[str, Any]], session_id: str, sink: ReplaySink) -> None:
+    """Write what each stored FAIL of the session still owes (the process stopped after its record): its defects and its pause.
+
+    "Held" is read from the evidence by link: a ``replay_defect`` or ``pause`` record that carries this finding's
+    ``seq``. A pause the operator already resumed is held, so it is not raised again; no other resume matters, so an
+    unrelated one cannot excuse a pause that never landed. Each defect is keyed by finding and code. Nothing is
+    written for what is already there, so a further re-run writes nothing.
     """
 
-    held_defects = {
-        (r.get("code"), r.get("detail")) for r in records if r.get("kind") == "replay_defect" and r.get("session_id") == session_id
-    }
-    held_pauses = {r.get("reason") for r in records if r.get("kind") == "pause" and r.get("event") == DIVERGENCE}
-    resumed = any(r.get("kind") == "resume" and _seq(r) > recorded_seq for r in records)
-    for action in _enforcement(session_id, result):
-        kind, first, second = action
-        if kind == "defect" and (first, second) in held_defects:
+    for record in sorted(_stored_replays(records, session_id), key=_seq):
+        if record.get("verdict") != FAIL:
             continue
-        if kind == "pause" and (second in held_pauses or resumed):
-            continue
-        _apply(sink, session_id, action)
+        finding = _seq(record)
+        held_pauses = {
+            r.get("reason") for r in records if r.get("kind") == "pause" and r.get("event") == DIVERGENCE and r.get("finding_seq") == finding
+        }
+        written: set[tuple[str, str]] = set()
+        owed = _owed(
+            session_id, [str(c) for c in record.get("divergence_reasons", [])], str(record.get("divergent_intent_id", "-")),
+            [str(c) for c in record.get("defects", [])],
+        )
+        for action in owed:
+            kind, first, second = action
+            if kind == "defect" and (_held_defect(records, session_id, finding, first) or (kind, first) in written):
+                continue
+            if kind == "pause" and second in held_pauses:
+                continue
+            written.add((kind, first))
+            _apply(sink, session_id, action, finding)
 
 
 def _replay_intent(

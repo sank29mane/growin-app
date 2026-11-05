@@ -428,20 +428,27 @@ def intent_of(iid: str) -> Callable[[dict[str, Any]], bool]:
     return lambda r: r.get("kind") == "intent" and r.get("intent_id") == iid
 
 
+FIRST_FINDING = 1000  # the seq a recording sink hands back, so a link in a test is not a real evidence seq
+
+
 class Sink:
     def __init__(self) -> None:
         self.sessions: list[Any] = []
         self.defects: list[tuple[str, str, str]] = []
         self.pauses: list[tuple[str, str]] = []
+        self.links: list[int] = []  # the finding every defect and pause named, in write order
 
-    def record_session(self, result: Any) -> None:
+    def record_session(self, result: Any) -> int:
         self.sessions.append(result)
+        return FIRST_FINDING + len(self.sessions) - 1
 
-    def open_defect(self, code: str, session_id: str, detail: str) -> None:
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
         self.defects.append((code, session_id, detail))
+        self.links.append(finding_seq)
 
-    def pause_run(self, event: str, reason: str) -> None:
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
         self.pauses.append((event, reason))
+        self.links.append(finding_seq)
 
     def empty(self) -> bool:
         return not (self.sessions or self.defects or self.pauses)
@@ -1702,7 +1709,8 @@ def test_the_open_run_day_is_listed_not_replayed_and_does_not_fail_the_run(sc: S
 
 def test_an_operator_only_day_is_listed_and_never_dropped(sc: Scenario):
     sc.intent(S1, "buy", 1, "100.00")
-    sc.raw(S3, "resume", {"reason": "operator reviewed", "cleared_pause_seqs": [1]})
+    policy.raise_event(sc.use(S3), vm_replay.DIVERGENCE, "elsewhere:intent-9:mac_admitted_vm_refused")
+    policy.resume(sc.use(S3), "operator reviewed")  # the real resume path, on a day that decided nothing
     records = sc.records(S1)
     assert not_replayed_sessions(records) == (S3,)  # no record-kind allowlist: whatever else a session holds is listed
     assert sc.run(records=records).not_replayed == (S3,)
@@ -1829,18 +1837,18 @@ class Cut:
     def __init__(self, real: EvidenceReplaySink, *, at: str) -> None:
         self.real, self.at = real, at
 
-    def record_session(self, result: Any) -> None:
-        self.real.record_session(result)
+    def record_session(self, result: Any) -> int:
+        return self.real.record_session(result)
 
-    def open_defect(self, code: str, session_id: str, detail: str) -> None:
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
         if self.at == "open_defect":
             raise Interrupted
-        self.real.open_defect(code, session_id, detail)
+        self.real.open_defect(code, session_id, detail, finding_seq)
 
-    def pause_run(self, event: str, reason: str) -> None:
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
         if self.at == "pause_run":
             raise Interrupted
-        self.real.pause_run(event, reason)
+        self.real.pause_run(event, reason, finding_seq)
 
 
 def divergent_session(sc: Scenario) -> None:
@@ -1869,26 +1877,160 @@ def test_an_interruption_after_the_record_is_finished_by_the_rerun(sc: Scenario,
     assert len(sc.records()) == before and len(stored(sc, "vm_replay")) == 1  # a further re-run writes nothing
 
 
-def test_a_resume_after_the_stored_record_is_not_undone_by_the_rerun(sc: Scenario):
-    """Break-proof: re-pause without looking at resume records and the operator's decision is overwritten."""
+def unrelated_pause(sc: Scenario, reason: str = "other-day:intent-9:mac_admitted_vm_refused") -> int:
+    """A divergence pause that belongs to another finding (no link to any record of this session), raised the real way."""
+
+    return int(policy.raise_event(sc.use(S1), vm_replay.DIVERGENCE, reason)["seq"])
+
+
+def clear(sc: Scenario, *pause_seqs: int, why: str = "operator cleared it") -> None:
+    policy.resume(sc.use(S1), why, pause_seqs=list(pause_seqs))  # the real resume: it refuses an empty or unknown request
+
+
+def linked(sc: Scenario, kind: str) -> list[Any]:
+    return [r.get("finding_seq") for r in stored(sc, kind) if r.get("finding_seq") is not None]
+
+
+@pytest.mark.parametrize("cut_at", ["open_defect", "pause_run"])
+@pytest.mark.parametrize("cleared_before_the_record", [True, False])
+def test_an_unrelated_resume_never_suppresses_the_pause_this_finding_still_owes(sc: Scenario, cut_at: str, cleared_before_the_record: bool):
+    """Break-proof: exempt the pause once any later ``resume`` exists and the run stays unpaused, admission open."""
     divergent_session(sc)
+    other = unrelated_pause(sc)
+    if cleared_before_the_record:
+        clear(sc, other)
     with pytest.raises(Interrupted):
-        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
-    sc.raw(S1, "resume", {"reason": "operator looked at it", "cleared_pause_seqs": []})
+        sc.replay(S1, Cut(real_sink(sc, S1), at=cut_at))
+    if not cleared_before_the_record:
+        clear(sc, other)  # the operator clears a different pause after this finding's record landed
+    assert open_scope(sc) == []
+    again = sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    assert again.verdict == "FAIL" and again.already_recorded is True
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    assert linked(sc, "pause") == [finding["seq"]] and linked(sc, "replay_defect") == [finding["seq"]]
+    state = policy.state_from_records(sc.records())
+    assert state.blocks(policy.STEP_ADMIT, isin=ISIN_A) and state.blocks(policy.STEP_BOOK)
+
+
+def test_a_pause_the_operator_resumed_is_not_raised_again_by_a_rerun(sc: Scenario):
+    """Break-proof: count only open pauses as held and every rerun after a resume re-pauses the run."""
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (pause,) = [r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]
+    clear(sc, pause["seq"], why="operator looked at it")
+    assert open_scope(sc) == []
+    before = len(sc.records())
     again = sc.replay(S1, real_sink(sc, S1))
     assert again.verdict == "FAIL" and again.already_recorded is True
-    assert len(stored(sc, "replay_defect")) == 1  # the defect is still completed: the D-23 verdict reads it
-    assert open_scope(sc) == []  # and the pause is not raised again
+    assert open_scope(sc) == [] and len(sc.records()) == before  # the decision stands, nothing was written
     assert recorded_run_verdict(sc.records()).verdict == "FAIL"
 
 
-def test_a_resume_before_the_stored_record_does_not_excuse_the_missing_pause(sc: Scenario):
+def test_a_rerun_after_an_interruption_and_the_operators_resume_of_its_own_pause_does_not_repause(sc: Scenario):
+    """The operator resumed the pause that did land; the defect that did not is still completed, the pause is not."""
     divergent_session(sc)
-    sc.raw(S1, "resume", {"reason": "an earlier, unrelated resume", "cleared_pause_seqs": []})
+    sc.replay(S1, real_sink(sc, S1))
+    (pause,) = [r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]
+    defect = [r for r in sc.records() if r["kind"] == "replay_defect"]
+    clear(sc, pause["seq"])
+    stripped = [r for r in sc.records() if r["kind"] != "replay_defect"]  # the defect write never landed
+    assert len(stripped) == len(sc.records()) - len(defect)
+    sink = Sink()
+    sc.replay(S1, sink, records=stripped)
+    assert sink.defects == [(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused")] and sink.pauses == []
+
+
+def test_every_rerun_after_the_first_completion_writes_nothing(sc: Scenario):
+    """Break-proof: key the held check on anything the first write does not carry and each rerun writes again."""
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    sc.replay(S1, real_sink(sc, S1))
+    settled = len(sc.records())
+    for _ in range(3):
+        again = sc.replay(S1, real_sink(sc, S1))
+        assert again.already_recorded is True and len(sc.records()) == settled
+    assert len(stored(sc, "vm_replay")) == 1 and len(stored(sc, "replay_defect")) == 1
+    assert len([r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]) == 1
+
+
+def planted_fail(sc: Scenario, session: str, base: dict[str, Any], **changes: Any) -> None:
+    """A second FAIL record of the session, as an earlier pass that stopped right after the record would have left it."""
+
+    keep = {k: v for k, v in base.items() if k in SCHEMAS["vm_replay"][0] or k in SCHEMAS["vm_replay"][1]}
+    sc.raw(session, "vm_replay", {**keep, **changes})
+
+
+def test_two_findings_with_the_same_defect_each_keep_their_own_defect_and_pause(sc: Scenario):
+    """Break-proof: key a defect by (code, detail) or a pause by its reason and the second finding is skipped."""
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (first,) = stored(sc, "vm_replay")
+    planted_fail(sc, S1, first, intents_compared=2)  # a differing pass left a second finding with the same reason
+    sc.replay(S1, real_sink(sc, S1))
+    second = stored(sc, "vm_replay")[1]
+    assert sorted(linked(sc, "replay_defect")) == sorted([first["seq"], second["seq"], first["seq"]])  # + the nondeterminism defect
+    divergence_defects = [r for r in stored(sc, "replay_defect") if r["code"] == vm_replay.DIVERGENCE]
+    assert sorted(r["finding_seq"] for r in divergence_defects) == [first["seq"], second["seq"]]
+    divergence_pauses = [r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE]
+    assert sorted(r["finding_seq"] for r in divergence_pauses) == [first["seq"], second["seq"]]
+    settled = len(sc.records())
+    sc.replay(S1, real_sink(sc, S1))
+    assert len(sc.records()) == settled
+
+
+def test_a_stored_fail_is_finished_with_every_write_linked_to_its_own_record(sc: Scenario):
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    bare = [r for r in sc.records() if r["kind"] not in ("replay_defect",) and not (r["kind"] == "pause" and r["event"] == vm_replay.DIVERGENCE)]
+    sink = Sink()
+    again = sc.replay(S1, sink, records=bare)
+    assert again.already_recorded is True and sink.sessions == []
+    assert sink.defects == [(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused")] and len(sink.pauses) == 1
+    assert sink.links == [finding["seq"], finding["seq"]]
+
+
+def test_a_fresh_fail_is_recorded_first_and_its_defect_and_pause_link_to_it(sc: Scenario):
+    divergent_session(sc)
+    sink = Sink()
+    sc.replay(S1, sink)
+    assert len(sink.sessions) == 1 and sink.links == [FIRST_FINDING, FIRST_FINDING]
+    sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    pause = next(r for r in stored(sc, "pause") if r["event"] == vm_replay.DIVERGENCE)
+    defect = stored(sc, "replay_defect")[0]
+    assert finding["seq"] < defect["seq"] < pause["seq"]  # the finding exists before anything it owes
+
+
+def test_a_stored_fail_is_finished_before_a_changed_config_can_refuse_the_replay(sc: Scenario):
+    """Break-proof: validate first and the refusal returns before the missing defect and pause are ever written."""
+    divergent_session(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    assert open_scope(sc) == [] and stored(sc, "replay_defect") == []
+    changed = dataclasses.replace(sc.limits, file_sha256="e" * 64)  # the private config moved since the record landed
+    with pytest.raises(ReplayRefused) as caught:
+        sc.replay(S1, real_sink(sc, S1), limits=changed)
+    assert caught.value.code == vm_replay.LIMITS_MISMATCH  # the refusal is still reported
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")] and len(stored(sc, "replay_defect")) == 1
+    settled = len(sc.records())
+    with pytest.raises(ReplayRefused):
+        sc.replay(S1, real_sink(sc, S1), limits=changed)
+    assert len(sc.records()) == settled
+
+
+def test_the_run_reads_fail_for_both_the_stored_finding_and_the_refusal(sc: Scenario):
+    divergent_session(sc)
     with pytest.raises(Interrupted):
         sc.replay(S1, Cut(real_sink(sc, S1), at="pause_run"))
-    sc.replay(S1, real_sink(sc, S1))
+    changed = dataclasses.replace(sc.limits, file_sha256="e" * 64)
+    run = sc.run(real_sink(sc, S1), limits=changed)
+    assert run.refused == {S1: vm_replay.LIMITS_MISMATCH} and run.verdict == "FAIL"
     assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    stored_run = recorded_run_verdict(sc.records(), run.refused)
+    assert stored_run.verdict == "FAIL" and {vm_replay.SESSION_REFUSED, vm_replay.DIVERGENCE} <= set(stored_run.reasons)
 
 
 def test_replay_session_refuses_a_day_that_is_not_a_decide_day_and_records_nothing(sc: Scenario):
@@ -1917,23 +2059,59 @@ def test_a_stored_record_for_a_non_decide_day_never_makes_an_empty_run_pass(sc: 
     assert run.sessions == ()
 
 
-def test_a_nondeterministic_rerun_that_now_diverges_also_opens_the_divergence_defect_and_pauses(sc: Scenario):
-    """Break-proof: open only the nondeterminism defect and the new divergence is neither recorded as a defect nor paused."""
-    divergent_session(sc)
-    sc.close(S1)
+def stored_pass(sc: Scenario) -> None:
     sc.raw(S1, "vm_replay", {
         "verdict": "PASS", "build_commit": sc.identity.commit, "build_digest": sc.identity.digest, "limits_sha256": FILE_SHA,
         "mint_limits_sha256": sc.mint_sha, "intents_compared": 1, "no_intents": False,
-    })  # an earlier pass said PASS; this pass finds the VM refusing what the Mac admitted
+    })  # an earlier pass said PASS
+
+
+def test_a_nondeterministic_rerun_that_now_diverges_is_a_new_finding_with_its_own_defect_and_pause(sc: Scenario):
+    """Break-proof: write no finding record for it and its defect and pause link to nothing a later resume cannot cover."""
+    divergent_session(sc)
+    sc.close(S1)
+    stored_pass(sc)  # this pass finds the VM refusing what the Mac admitted
     again = sc.replay(S1, real_sink(sc, S1))
     assert again.verdict == "FAIL" and vm_replay.NONDETERMINISTIC in again.defects
-    assert sorted((r["code"], r["detail"]) for r in stored(sc, "replay_defect")) == [
-        (vm_replay.DIVERGENCE, "mac_admitted_vm_refused"), (vm_replay.NONDETERMINISTIC, vm_replay.NONDETERMINISTIC),
-    ]
-    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
-    before = len(sc.records())
+    passed, finding = stored(sc, "vm_replay")
+    assert (passed["verdict"], finding["verdict"]) == ("PASS", "FAIL") and finding["seq"] > passed["seq"]
+    owed = {(r["code"], r["detail"]): r["finding_seq"] for r in stored(sc, "replay_defect")}
+    assert owed == {
+        (vm_replay.DIVERGENCE, "mac_admitted_vm_refused"): finding["seq"],
+        (vm_replay.NONDETERMINISTIC, vm_replay.NONDETERMINISTIC): passed["seq"],
+    }
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")] and linked(sc, "pause") == [finding["seq"]]
+    settled = len(sc.records())
+    for _ in range(2):
+        sc.replay(S1, real_sink(sc, S1))
+        assert len(sc.records()) == settled  # a further rerun finds everything written
+
+
+def test_a_new_divergence_after_a_stored_pass_pauses_despite_an_unrelated_pause_resumed_in_between(sc: Scenario):
+    """The second repro: the stored PASS, some other pause raised and resumed, then a rerun that diverges."""
+    divergent_session(sc)
+    sc.close(S1)
+    stored_pass(sc)
+    clear(sc, unrelated_pause(sc), why="unrelated")
+    again = sc.replay(S1, real_sink(sc, S1))
+    assert again.verdict == "FAIL"
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")], "the fresh divergence never paused the run"
+    assert policy.state_from_records(sc.records()).blocks(policy.STEP_ADMIT, isin=ISIN_A)
+
+
+def test_a_nondeterministic_rerun_interrupted_after_its_finding_is_finished_by_the_next(sc: Scenario):
+    divergent_session(sc)
+    sc.close(S1)
+    stored_pass(sc)
+    with pytest.raises(Interrupted):
+        sc.replay(S1, Cut(real_sink(sc, S1), at="open_defect"))
+    assert len(stored(sc, "vm_replay")) == 2 and open_scope(sc) == []
     sc.replay(S1, real_sink(sc, S1))
-    assert len(sc.records()) == before  # a further rerun finds everything written
+    assert open_scope(sc) == [(vm_replay.DIVERGENCE, "all")]
+    assert {r["code"] for r in stored(sc, "replay_defect")} == {vm_replay.DIVERGENCE, vm_replay.NONDETERMINISTIC}
+    settled = len(sc.records())
+    sc.replay(S1, real_sink(sc, S1))
+    assert len(sc.records()) == settled
 
 
 def test_a_replay_defect_record_alone_fails_the_run_even_with_every_session_passing(sc: Scenario):

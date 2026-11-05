@@ -363,6 +363,68 @@ def test_all_after_a_pass_refuses_when_the_private_config_changed_since(world: W
     assert code == 0 and out["verdict"] == "PASS"
 
 
+class StopsAfterTheRecord:
+    """The process that dies after the ``vm_replay`` record landed and before its defect and pause."""
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+
+    def record_session(self, result: Any) -> int:
+        return self.real.record_session(result)
+
+    def open_defect(self, *args: Any) -> None:
+        raise RuntimeError("stopped")
+
+    def pause_run(self, *args: Any) -> None:
+        raise RuntimeError("stopped")
+
+
+def interrupted_divergence(world: World) -> None:
+    world.sc.intent(S1, "buy", 5000, "100.00")  # Rs 500,000 against the cap, and the Mac admitted it
+    records = world.sc.records(S1)
+    sink = StopsAfterTheRecord(cli.EvidenceReplaySink(world.sc.use(S1)))
+    with pytest.raises(RuntimeError):
+        vm_replay.replay_session(
+            records, run_id=RUN, session_id=S1, limits=cli._replay_limits(world.private),
+            manifest_hashes=dict(world.sc.manifest), vm_source=world.vm, sink=sink,
+        )
+    held = read_records(world.sc.root, RUN)
+    assert [r["kind"] for r in held].count("vm_replay") == 1 and not [r for r in held if r["kind"] in ("replay_defect",)]
+    assert not policy.state_from_records(held).open_pauses
+
+
+@pytest.mark.parametrize("all_sessions", [False, True])
+def test_an_interrupted_fail_is_finished_even_when_the_changed_config_refuses_the_rerun(world: World, tmp_path: Path, all_sessions: bool):
+    """Break-proof: validate before completing and the refused rerun leaves the finding with no defect, no pause."""
+    interrupted_divergence(world)
+    moved = build_private(tmp_path, "moved", cap="12345.67")
+    argv = ["vm-replay", "--root", str(world.sc.root), "--run-id", RUN, "--vm-source", str(world.vm), "--private-dir", str(moved)]
+    code, out = run_cli(argv + (["--all"] if all_sessions else ["--session", DAY1]))
+    assert code == 1
+    if all_sessions:
+        assert out["verdict"] == "FAIL" and out["refused"] == {S1: vm_replay.LIMITS_MISMATCH}
+        assert vm_replay.SESSION_REFUSED in out["reasons"] and vm_replay.DIVERGENCE in out["reasons"]
+    else:
+        assert out == {"refused": vm_replay.LIMITS_MISMATCH}  # the refusal is still the answer
+    records = read_records(world.sc.root, RUN)
+    (finding,) = [r for r in records if r["kind"] == "vm_replay"]
+    assert [r["finding_seq"] for r in records if r["kind"] == "replay_defect"] == [finding["seq"]]
+    state = policy.state_from_records(records)
+    assert [(p.event, p.scope) for p in state.open_pauses] == [(vm_replay.DIVERGENCE, "all")]
+
+
+def test_a_divergence_the_operator_resumed_is_not_paused_again_by_a_cli_rerun(world: World):
+    world.sc.intent(S1, "buy", 5000, "100.00")
+    world.sc.close(S1)
+    assert run_cli(world.argv())[0] == 1
+    policy.resume(world.sc.use(S1), "operator looked at it")  # the real resume
+    before = tree(world.sc.root)
+    code, out = run_cli(world.argv())
+    assert code == 1 and out["verdict"] == "FAIL" and out["already_recorded"] is True
+    assert tree(world.sc.root) == before
+    assert not policy.state_from_records(read_records(world.sc.root, RUN)).open_pauses
+
+
 def test_no_private_dir_refuses_with_no_default(world: World, monkeypatch: pytest.MonkeyPatch):
     decide_day(world)
     monkeypatch.setenv("GROWIN_PRIVATE_DIR", str(world.private))
@@ -468,11 +530,13 @@ def test_the_sink_records_hashes_and_closed_codes_opens_defects_and_pauses_scope
         divergences=(vm_replay.Divergence("intent-0001", "mac_admitted_vm_refused", "admitted", (), ("capital_cap",)),),
         defects=(vm_replay.KILL_SWITCH_IN_VERDICT,),
     )
-    sink.record_session(result)
-    sink.open_defect(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused")
-    sink.pause_run(vm_replay.DIVERGENCE, f"{S1}:intent-0001:mac_admitted_vm_refused")
+    finding = sink.record_session(result)
+    sink.open_defect(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused", finding)
+    sink.pause_run(vm_replay.DIVERGENCE, f"{S1}:intent-0001:mac_admitted_vm_refused", finding)
     records = read_records(world.sc.root, RUN)
     (replay,) = [r for r in records if r["kind"] == "vm_replay"]
+    assert finding == replay["seq"]  # the record's own seq is what the defect and the pause link to
+    assert [r["finding_seq"] for r in records if r["kind"] in ("replay_defect", "pause")] == [finding, finding]
     assert replay["divergence_reasons"] == ["mac_admitted_vm_refused"] and replay["divergent_intent_id"] == "intent-0001"
     assert replay["defects"] == [vm_replay.KILL_SWITCH_IN_VERDICT]
     assert "capital_cap" not in json.dumps(replay)  # the VM's codes are not recorded, only the reason

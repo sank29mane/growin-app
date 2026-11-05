@@ -339,7 +339,7 @@ class EvidenceReplaySink:
     def __init__(self, store: EvidenceStore) -> None:
         self._store = store
 
-    def record_session(self, result: vm_replay.SessionReplay) -> None:
+    def record_session(self, result: vm_replay.SessionReplay) -> int:
         body: dict[str, Any] = {
             "session_id": result.session_id, "verdict": result.verdict, "build_commit": result.build_commit,
             "build_digest": result.build_digest, "limits_sha256": result.limits_sha256,
@@ -351,13 +351,13 @@ class EvidenceReplaySink:
             body["divergent_intent_id"] = result.divergences[0].intent_id
         if result.defects:
             body["defects"] = list(result.defects)
-        self._store.append("vm_replay", body)
+        return int(self._store.append("vm_replay", body)["seq"])  # the finding every defect and pause of it links to
 
-    def open_defect(self, code: str, session_id: str, detail: str) -> None:
-        self._store.append("replay_defect", {"session_id": session_id, "code": code, "detail": detail})
+    def open_defect(self, code: str, session_id: str, detail: str, finding_seq: int) -> None:
+        self._store.append("replay_defect", {"session_id": session_id, "code": code, "detail": detail, "finding_seq": finding_seq})
 
-    def pause_run(self, event: str, reason: str) -> None:
-        policy.raise_event(self._store, event, reason)
+    def pause_run(self, event: str, reason: str, finding_seq: int) -> None:
+        policy.raise_event(self._store, event, reason, finding_seq=finding_seq)
 
 
 def _replay_limits(private_dir: Any) -> vm_replay.ReplayLimits:

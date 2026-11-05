@@ -186,7 +186,7 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     "stop_open_report": ({"as_of_date": "date", "isins": "codes", "buys_blocked": "bool"}, {}),
     "run_ended": ({"event": "code", "reason": "text"}, {}),
     "latch": ({"latch": "code", "scope": "code", "reason": "code"}, {}),
-    "pause": ({"event": "code", "scope": "code", "reason": "text"}, {}),
+    "pause": ({"event": "code", "scope": "code", "reason": "text"}, {"finding_seq": "int"}),
     "abort": ({"event": "code", "reason": "text"}, {}),
     "resume": ({"reason": "text", "cleared_pause_seqs": "ints"}, {}),
     "session_close": ({"outcome": "code"}, {"record_count": "int"}),
@@ -208,7 +208,8 @@ SCHEMAS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
          "mint_limits_sha256": "sha", "intents_compared": "int", "no_intents": "bool"},
         {"divergence_reasons": "codes", "divergent_intent_id": "id", "defects": "codes"},
     ),
-    "replay_defect": ({"code": "code", "detail": "code"}, {}),
+    # ``finding_seq`` is the ``seq`` of the ``vm_replay`` record that owes this defect (and the pause above, when it is the replay's).
+    "replay_defect": ({"code": "code", "detail": "code"}, {"finding_seq": "int"}),
 }
 RECORD_KINDS = frozenset(SCHEMAS)
 # After an abort only these may still be written: a further cause, and the close that prints the witness.
