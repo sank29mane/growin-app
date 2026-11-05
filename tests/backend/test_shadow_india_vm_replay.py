@@ -2010,6 +2010,20 @@ def test_a_stored_fail_is_finished_with_every_write_linked_to_its_own_record(sc:
     assert sink.links == [finding["seq"], finding["seq"]]
 
 
+def test_a_link_from_a_record_written_before_its_finding_does_not_hold_what_the_finding_owes(sc: Scenario):
+    """Terra #646 r3: a defect or pause can only answer a finding that already exists, so one with an earlier seq is not held."""
+    divergent_session(sc)
+    sc.replay(S1, real_sink(sc, S1))
+    (finding,) = stored(sc, "vm_replay")
+    owed = [r for r in sc.records() if r["kind"] == "replay_defect" or (r["kind"] == "pause" and r["event"] == vm_replay.DIVERGENCE)]
+    bare = [r for r in sc.records() if r not in owed]
+    early = [{**r, "seq": finding["seq"] - 1} for r in owed]  # same link, written before the finding it names
+    sink = Sink()
+    sc.replay(S1, sink, records=sorted(bare + early, key=lambda r: r["seq"]))
+    assert sink.defects == [(vm_replay.DIVERGENCE, S1, "mac_admitted_vm_refused")] and len(sink.pauses) == 1
+    assert sink.links == [finding["seq"], finding["seq"]]
+
+
 def test_a_fresh_fail_is_recorded_first_and_its_defect_and_pause_link_to_it(sc: Scenario):
     divergent_session(sc)
     sink = Sink()

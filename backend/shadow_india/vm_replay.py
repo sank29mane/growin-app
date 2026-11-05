@@ -1132,7 +1132,7 @@ def _apply(sink: ReplaySink, session_id: str, action: tuple[str, str, str], find
 def _held_defect(records: Sequence[Mapping[str, Any]], session_id: str, finding_seq: int, code: str) -> bool:
     return any(
         r.get("kind") == "replay_defect" and r.get("session_id") == session_id and r.get("finding_seq") == finding_seq
-        and r.get("code") == code
+        and r.get("code") == code and _seq(r) > finding_seq  # a link only counts from a record written after its finding
         for r in records
     )
 
@@ -1151,7 +1151,8 @@ def _complete_stored(records: Sequence[Mapping[str, Any]], session_id: str, sink
             continue
         finding = _seq(record)
         held_pauses = {
-            r.get("reason") for r in records if r.get("kind") == "pause" and r.get("event") == DIVERGENCE and r.get("finding_seq") == finding
+            r.get("reason") for r in records
+            if r.get("kind") == "pause" and r.get("event") == DIVERGENCE and r.get("finding_seq") == finding and _seq(r) > finding
         }
         written: set[tuple[str, str]] = set()
         owed = _owed(
