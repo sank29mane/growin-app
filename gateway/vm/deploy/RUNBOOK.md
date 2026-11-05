@@ -62,7 +62,7 @@ The last command must print `$SHA` and nothing else. `.gitattributes` makes `git
 file. A line that still reads `$Format:%H$` means the stamp was not applied (a copy that did not come from
 `git archive`): stop, because the VM would then answer `build_unstamped` and no session could record its build.
 
-Write the hash down. The last command must list all three files. If `uv.lock` is missing the
+Write the hash down. The `grep` command (the one before the last) must list all three files. If `uv.lock` is missing the
 lock has not merged yet (plan 61-11 Task 1b waits for your "packages ok" answer): stop, do not
 build a lock by hand on the VM.
 
@@ -295,7 +295,8 @@ growin_cli orders-build
 ```
 
 - It prints `commit` and `digest`. The commit must equal the `$SHA` from section 2; paste the commit into the run log (not the repo) and say "matches: yes" or "matches: no". `orders-build --files` adds the sha256 of every `orders/` file; the replay recomputes them from a checkout of that commit.
-- Exit 1 with `ORDERS_UNAVAILABLE` and reason `build_unstamped` means the archive stamp is missing (section 2). Exit 1 with `NOT_FOUND` and reason `route_unavailable` means the VM runs a build older than this route.
+- Exit 1 with `ORDERS_UNAVAILABLE` and reason `build_unstamped` means the archive stamp is missing (section 2), or, more rarely, the deployed `orders/` tree has no files, more than 64 files, or a file name outside lower-case letters, digits, `_`, `.`, `/` and `-`. Check the stamp first, then `tar -tzf` the bundle for `gateway/vm/gateway_vm/orders/`. Exit 1 with `NOT_FOUND` and reason `route_unavailable` means the VM runs a build older than this route.
+- The VM hashes `orders/` once at start, but it reads `orders/data/nse_trading_holidays.json` and `orders/data/nse_cash_tick_sizes.json` on every order check. Never edit any file under the deployed `gateway_vm/` by hand. Change it in the repo, merge, and redeploy through sections 2 to 5. A hand edit would change live decisions while `orders-build` still reports the old hashes.
 
 Mac value scan, now, while the session is live and before `revoke` (section 10 explains the output). Have
 that day's API_Session code ready for the optional prompt:
