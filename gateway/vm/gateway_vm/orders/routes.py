@@ -14,10 +14,12 @@ constant refusal object and no route here places, changes or withdraws an order.
 
 Order of a Breeze-backed route: bearer check, order configuration ready, body
 validation, the Breeze session (require_active), then the pipeline, whose ports charge
-the relay budget before each Breeze GET. halt, state and audit need only the bearer:
-they never touch Breeze and halt only restricts. key needs the bearer and an active
-session (so an unbound token never answers) and reads one in-memory attribute: no Breeze
-call, kill read, egress check, budget charge or write.
+the relay budget before each Breeze GET. halt, state, audit and key take the bearer of a
+live session and nothing more: session.authorize(token) and its failure come first, before
+the pipeline, so a caller with no relay token bound (never logged in, revoked, past the IST
+deadline, egress-suspended) is answered 503 and reads or writes nothing (64-10, 64-11).
+They never touch Breeze: no Breeze call, egress refresh, budget charge, kill read before
+the gate, and halt only restricts. key reads one in-memory attribute.
 
 If the limits file, the order key or the state directory cannot be trusted at start,
 every order route answers 503 with the reason (config_invalid, state_unreadable) while
@@ -369,7 +371,9 @@ def mount_order_routes(
 
     @app.post(ROUTE_HALT, dependencies=[Depends(require_json), Depends(_no_query)])
     def halt(raw: bytes = Depends(_raw_body), token: str | None = Depends(bearer)):
-        session.authorize(token)
+        authorization = session.authorize(token)
+        if authorization.failure:
+            raise authorization.failure
         order = pipeline()
         if _object(raw):
             raise intent_invalid("bad_body")
@@ -377,7 +381,9 @@ def mount_order_routes(
 
     @app.get(ROUTE_STATE, dependencies=[Depends(_no_query)])
     def state(token: str | None = Depends(bearer)):
-        session.authorize(token)
+        authorization = session.authorize(token)
+        if authorization.failure:
+            raise authorization.failure
         pipeline()
         assert service.store is not None and service.kill is not None and service.alerts is not None
         kill = service.kill.read()
@@ -401,7 +407,9 @@ def mount_order_routes(
 
     @app.get(ROUTE_AUDIT)
     def audit_page(request: Request, token: str | None = Depends(bearer)):
-        session.authorize(token)
+        authorization = session.authorize(token)
+        if authorization.failure:
+            raise authorization.failure
         pipeline()
         after_seq = _audit_query(request)
         assert service.store is not None and service.audit is not None

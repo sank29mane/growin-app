@@ -25,6 +25,7 @@ import india_limits_support as ils
 import relay_orders_support as ros
 from regime_testkit import bound_admit
 from brokers.breeze_gateway import cli as relay_cli
+from brokers.breeze_gateway.errors import NoSession
 from brokers.breeze_gateway.orders import OrdersClient, match_vm_audit
 from execution import (
     AdmissionDecision,
@@ -760,6 +761,42 @@ async def test_a_failed_halt_call_never_undoes_the_local_control(world):
     assert control is not None
     assert world.ledger.get_workspace_control(workspace="india").engaged is True
     assert world.http.count("POST", "/v1/orders/halt") == 1
+
+
+@pytest.mark.asyncio
+async def test_e1_engaging_the_control_with_no_vm_session_is_refused_and_leaves_the_vm_unhalted(world, caplog):
+    """64-11, decision 2: logged out, the VM refuses the halt. The Mac's control stays engaged.
+
+    The cost is stated here on purpose: after the next VM login the VM holds no mac_halt until
+    something halts again (DF-64-11-1).
+    """
+    assert world.vm.revoke(world.token).status_code == 200
+    failures: list[Exception] = []
+    real_halt = world.dispatcher.halt
+
+    def spy():
+        try:
+            return real_halt()
+        except Exception as exc:  # noqa: BLE001 - record, then let the service see it
+            failures.append(exc)
+            raise
+
+    world.dispatcher.halt = spy
+    with caplog.at_level("WARNING"):
+        control = world.service.engage_workspace_control("MANUAL_KILL", workspace="india")
+    assert control is not None  # no exception escaped
+    assert world.ledger.get_workspace_control(workspace="india").engaged is True
+    assert world.http.count("POST", "/v1/orders/halt") == 1
+    # Mac side: exactly one refusal, and it is NO_SESSION.
+    assert len(failures) == 1
+    assert isinstance(failures[0], NoSession) and failures[0].code == "NO_SESSION"
+    # VM side: the request event records the 503 refusal.
+    halts = [e for e in world.vm.events_named("request") if e["route"] == "/v1/orders/halt"]
+    assert halts and (halts[-1]["http"], halts[-1]["result"]) == (503, "rejected")
+    assert any("The relay halt call failed" in record.getMessage() for record in caplog.records)
+    # After a fresh VM login the VM holds no mac_halt: nothing was written while it was refused.
+    fresh = world.vm.login()
+    assert "mac_halt" not in world.vm.state(fresh)["latches"]
 
 
 def test_the_mac_has_no_clear_reset_place_modify_or_cancel(world):

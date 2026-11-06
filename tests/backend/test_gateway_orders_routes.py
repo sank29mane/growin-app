@@ -14,7 +14,9 @@ ONLY vector key, pinned with allow_test_key. No real network, secret, account id
 
 from __future__ import annotations
 
+import ast
 import base64
+import hashlib
 import io
 import json
 import os
@@ -44,6 +46,7 @@ from test_gateway_relay_app import (  # noqa: E402
     EXPECTED_IP,
     FakeClock,
     FakeTransport,
+    OTHER_IP,
     SECRET_KEY,
     USERID,
     Stack,
@@ -66,7 +69,7 @@ from gateway_vm.orders import (  # noqa: E402
 )
 from gateway_vm.orders.alerts import FileAlertPort  # noqa: E402
 from gateway_vm.orders.risk import StopExitAlert  # noqa: E402
-from gateway_vm.orders.routes import OrderSettings, build_order_service  # noqa: E402
+from gateway_vm.orders.routes import AUDIT_PAGE, OrderSettings, build_order_service  # noqa: E402
 from gateway_vm.orders.store import StateStore  # noqa: E402
 from gateway_vm.transport import HttpResponse  # noqa: E402
 
@@ -449,6 +452,12 @@ def code_of(resp) -> tuple[int, str, str]:
     return resp.status_code, err["code"], err["reason"]
 
 
+def refusal_of(resp) -> tuple[int, str | None, str | None]:
+    """code_of for a reply that may not be a refusal: (status, None, None) when it carries no error."""
+    error = resp.json().get("error")
+    return resp.status_code, error and error["code"], error and error["reason"]
+
+
 def assert_orders_envelope(resp) -> None:
     assert resp.headers[contract.HDR_CONTRACT] == ORDERS_CONTRACT
     assert contract.REQUEST_ID_RE.fullmatch(resp.headers[contract.HDR_REQUEST_ID])
@@ -646,11 +655,20 @@ def test_halt_between_mint_and_authorize_blocks_authorize(stack, token):
     assert stack.audit(token)[-1]["decision"] == REFUSED
 
 
-def test_halt_needs_an_empty_object_and_no_breeze_session(stack):
+def test_halt_needs_a_live_session_and_an_empty_object(stack, tmp_path):
     armed = stack.arm().json()  # the relay token exists but the Breeze login never completed
     token = armed["relay_token"]
+    before = tree_snapshot(tmp_path)
+    for body in ({"x": 1}, {}):
+        resp = stack.post("/v1/orders/halt", body, token)
+        assert refusal_of(resp)[:2] == (503, "NO_SESSION"), body
+        assert_orders_envelope(resp)
+    assert tree_snapshot(tmp_path) == before
+    assert durable_audit(stack) == []
+    assert stack.complete(armed["attempt_id"], token).status_code == 200  # the same attempt, now live
     assert stack.post("/v1/orders/halt", {"x": 1}, token).status_code == 422
     assert stack.post("/v1/orders/halt", {}, token).status_code == 200
+    assert [e["decision"] for e in durable_audit(stack)] == ["HALTED"]
 
 
 def test_pilot_ended_refuses_a_buy(stack, token):
@@ -932,16 +950,24 @@ def test_bearer_is_required_on_every_order_route(stack, token):
             assert resp.headers[contract.HDR_CONTRACT] == ORDERS_CONTRACT
 
 
-def test_a_revoked_breeze_session_refuses_mint_and_authorize_but_not_halt_state_or_audit(stack, token):
+def test_a_revoked_session_refuses_every_order_route(stack, token):
     challenge_id, signature = stack.signed(token)
     stack.revoke(token)
     reads = len(stack.transport.requests)
-    assert code_of(stack.mint(token, intent_id="intent-test-0002"))[:2] == (503, "NO_SESSION")
-    assert code_of(stack.authorize(token, challenge_id, signature))[:2] == (503, "NO_SESSION")
+    methods = list(stack.metadata.methods)
+    refused = [
+        stack.mint(token, intent_id="intent-test-0002"),
+        stack.authorize(token, challenge_id, signature),
+        stack.post("/v1/orders/halt", {}, token),
+        stack.get("/v1/orders/state", token),
+        stack.get("/v1/orders/audit", token),
+        stack.get("/v1/orders/key", token),
+    ]
+    for resp in refused:
+        assert refusal_of(resp)[:2] == (503, "NO_SESSION")
+        assert_orders_envelope(resp)
     assert len(stack.transport.requests) == reads  # no Breeze read without a session
-    assert stack.get("/v1/orders/audit", token).status_code == 200
-    assert stack.get("/v1/orders/state", token).status_code == 200
-    assert stack.post("/v1/orders/halt", {}, token).status_code == 200
+    assert stack.metadata.methods == methods  # and no kill read
 
 
 def revoke_on_read(stack: OrderStack, token: str, nth: int) -> list[str]:
@@ -957,8 +983,35 @@ def revoke_on_read(stack: OrderStack, token: str, nth: int) -> list[str]:
     return seen
 
 
+def durable_audit(stack: OrderStack) -> list[dict]:
+    """The durable audit chain, read the way audit_page reads it (routes.py), not through the route.
+
+    Tests that read the chain after a revoke or an egress suspension use this: the route now
+    refuses a caller with no live session (64-11), the chain itself must still be checked.
+    """
+    with stack.service.store.lock():
+        return stack.service.audit.entries_after(0, AUDIT_PAGE)
+
+
+def assert_audit_route_refuses(stack: OrderStack, token: str, code: str) -> None:
+    """64-11: with no live session the audit route itself answers, with the orders contract and no entries."""
+    resp = stack.get("/v1/orders/audit", token)
+    assert refusal_of(resp)[:2] == (503, code)
+    assert_orders_envelope(resp)
+    assert "entries" not in resp.json()
+
+
 def decisions(stack: OrderStack, token: str) -> list[str]:
-    return [entry["decision"] for entry in stack.audit(token)]
+    return [entry["decision"] for entry in durable_audit(stack)]
+
+
+def test_durable_audit_helper_matches_the_audit_route_on_a_live_session(stack, token):
+    """D0: the migrated tests read the chain directly. On a live session that read is the route's own."""
+    assert stack.verify_ok(token).status_code == 200
+    assert stack.post("/v1/orders/halt", {}, token).status_code == 200
+    direct = durable_audit(stack)
+    assert direct == stack.audit(token)
+    assert [e["decision"] for e in direct] == ["CHALLENGED", "VERIFIED_NOT_FORWARDED", "HALTED"]
 
 
 def test_a_session_revoked_during_authorize_stops_the_next_read_and_never_verifies(stack, token):
@@ -967,11 +1020,12 @@ def test_a_session_revoked_during_authorize_stops_the_next_read_and_never_verifi
     resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert len(seen) == 1  # trades, orders, quote and bars never left on the dead session
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     # The intent was consumed before the check. The refusal is the audit line.
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["no_session"]
     assert entries[-1]["route"] == "authorize"
+    assert_audit_route_refuses(stack, token, "NO_SESSION")
 
 
 def test_a_session_revoked_during_mint_stops_the_next_read_and_issues_no_challenge(stack, token):
@@ -979,6 +1033,7 @@ def test_a_session_revoked_during_mint_stops_the_next_read_and_issues_no_challen
     assert code_of(stack.mint(token))[:2] == (503, "NO_SESSION")
     assert len(seen) == 2
     assert decisions(stack, token) == []
+    assert_audit_route_refuses(stack, token, "NO_SESSION")
 
 
 @pytest.mark.parametrize("route", ["mint", "authorize"])
@@ -992,7 +1047,7 @@ def test_a_session_revoked_during_the_last_read_is_caught_before_the_decision(st
         resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert len(seen) == 5  # every read ran; only the final decision was left to stop
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     if route == "mint":
         assert len(entries) == before  # the intent was not consumed, so nothing is recorded
     else:
@@ -1000,6 +1055,7 @@ def test_a_session_revoked_during_the_last_read_is_caught_before_the_decision(st
         assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
         assert entries[-1]["codes"] == ["no_session"]
         assert "VERIFIED_NOT_FORWARDED" not in [e["decision"] for e in entries]
+    assert_audit_route_refuses(stack, token, "NO_SESSION")
 
 
 def call_while_recheck_is_paused(stack: OrderStack, token: str, call, disturb=None):
@@ -1052,7 +1108,7 @@ def test_a_session_revoked_after_the_authorize_recheck_returns_is_not_verified(s
         stack, token, lambda: stack.authorize(token, challenge_id, signature)
     )
     assert code_of(resp)[:2] == (503, "NO_SESSION")
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == [
         "CHALLENGED",
         "VERIFIED_NOT_FORWARDED",
@@ -1061,19 +1117,21 @@ def test_a_session_revoked_after_the_authorize_recheck_returns_is_not_verified(s
     assert entries[-1]["codes"] == ["no_session"]
     assert entries[-1]["route"] == "authorize"
     assert stack.service.pipeline._forward.calls == 0
+    assert_audit_route_refuses(stack, token, "NO_SESSION")
 
 
 def test_a_session_revoked_after_the_mint_recheck_returns_issues_no_challenge(stack, token):
     resp = call_while_recheck_is_paused(stack, token, lambda: stack.mint(token))
     assert code_of(resp)[:2] == (503, "NO_SESSION")
     assert "challenge_id" not in resp.json()
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["no_session"]
     assert entries[-1]["route"] == "intents"
     epoch = int(stack.clock.now_utc().timestamp())
     assert stack.service.pipeline._challenges.live_count(epoch) == 0
     assert stack.service.pipeline._forward.calls == 0
+    assert_audit_route_refuses(stack, token, "NO_SESSION")
 
 
 # ----------------------------------------------- audit carries the failure's own code
@@ -1103,7 +1161,7 @@ def egress_drift_on_read(stack: OrderStack, nth: int) -> list[str]:
 
 def assert_chain_verifies(stack: OrderStack, token: str) -> None:
     seq, _head = stack.service.pipeline._audit.verify()
-    assert seq == len(stack.audit(token))
+    assert seq == len(durable_audit(stack))
 
 
 def test_budget_refusal_during_the_authorize_check_is_audited_as_budget_exhausted(stack, token):
@@ -1129,11 +1187,12 @@ def test_egress_mismatch_during_the_authorize_check_is_audited_as_egress_mismatc
     resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
     assert len(seen) == nth
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["egress_mismatch"]
     assert entries[-1]["route"] == "authorize"
     assert_chain_verifies(stack, token)
+    assert_audit_route_refuses(stack, token, "EGRESS_MISMATCH")
 
 
 def test_egress_mismatch_after_the_authorize_recheck_returns_is_audited_as_egress_mismatch(stack, token):
@@ -1145,11 +1204,12 @@ def test_egress_mismatch_after_the_authorize_recheck_returns_is_audited_as_egres
         disturb=lambda: drift_egress(stack),
     )
     assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "VERIFIED_NOT_FORWARDED", "REFUSED"]
     assert entries[-1]["codes"] == ["egress_mismatch"]
     assert stack.service.pipeline._forward.calls == 0
     assert_chain_verifies(stack, token)
+    assert_audit_route_refuses(stack, token, "EGRESS_MISMATCH")
 
 
 def test_egress_mismatch_after_the_mint_recheck_returns_is_audited_as_egress_mismatch(stack, token):
@@ -1158,11 +1218,12 @@ def test_egress_mismatch_after_the_mint_recheck_returns_is_audited_as_egress_mis
     )
     assert code_of(resp)[:2] == (503, "EGRESS_MISMATCH")
     assert "challenge_id" not in resp.json()
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["egress_mismatch"]
     assert entries[-1]["route"] == "intents"
     assert_chain_verifies(stack, token)
+    assert_audit_route_refuses(stack, token, "EGRESS_MISMATCH")
 
 
 def test_a_real_session_death_during_the_check_is_still_audited_as_no_session(stack, token):
@@ -1170,10 +1231,11 @@ def test_a_real_session_death_during_the_check_is_still_audited_as_no_session(st
     revoke_on_read(stack, token, 1)
     resp = stack.authorize(token, challenge_id, signature)
     assert code_of(resp)[:2] == (503, "NO_SESSION")
-    entries = stack.audit(token)
+    entries = durable_audit(stack)
     assert [e["decision"] for e in entries] == ["CHALLENGED", "REFUSED"]
     assert entries[-1]["codes"] == ["no_session"]
     assert_chain_verifies(stack, token)
+    assert_audit_route_refuses(stack, token, "NO_SESSION")
 
 
 def test_security_master_fetch_revalidates_the_session_before_the_download(stack, token):
@@ -1200,6 +1262,7 @@ def test_security_master_fetch_revalidates_the_session_before_the_download(stack
     assert stack.transport.master_requests() == []
     assert stack.budget.kinds.count("security_master") == 0
     assert decisions(stack, token) == []
+    assert_audit_route_refuses(stack, token, "NO_SESSION")
 
 
 def test_contract_mismatch_both_ways(stack, token):
@@ -1474,3 +1537,425 @@ def test_on_disk_state_is_only_the_expected_files_and_holds_no_secret(stack, tok
 
 def alerts_logged(stack, token) -> int:
     return stack.state(token)["alerts_logged"]
+
+
+# ------------------------------------------- 64-11: halt, state and audit need a live session
+#
+# Before 64-11 these three answered a caller while no relay token was bound (never logged in,
+# revoked, past the IST deadline, egress-suspended), and halt persisted a latch and a HALTED
+# audit entry. They now run the gate GET /v1/orders/key runs: session.authorize(token), then the
+# failure, before pipeline() and before anything else.
+
+KEY_ROUTE = ("GET", "/v1/orders/key")
+THREE = (
+    ("POST", "/v1/orders/halt"),
+    ("GET", "/v1/orders/state"),
+    ("GET", "/v1/orders/audit"),
+)
+RANDOM_BEARER = "Qm9ndXNOb3RCb3VuZEFueXdoZXJlMDEyMzQ1Njc4OWE"  # a 43-char token-shaped string, bound to nothing
+assert len(RANDOM_BEARER) == 43
+LEAK_KEYS = ("mac_halt", "kill", "latches", "entries")
+ROUTES_SRC = ROOT / "gateway" / "vm" / "gateway_vm" / "orders" / "routes.py"
+
+# condition -> (HTTP, code, body reason, event result, event reason). The key route gives the same tuple.
+REFUSALS = {
+    "N1_never_logged_in": (503, "NO_SESSION", None, "rejected", None),
+    "N2_revoked": (503, "NO_SESSION", None, "rejected", None),
+    "N3_past_the_deadline": (503, "SESSION_EXPIRED", "deadline", "rejected", "deadline"),
+    "N4_egress_suspended": (503, "EGRESS_MISMATCH", "egress_mismatch", "rejected", "egress_mismatch"),
+}
+NAMES = list(REFUSALS)
+
+
+def route_call(stack: OrderStack, route: tuple[str, str], bearer):
+    method, path = route
+    return stack.post(path, {}, bearer) if method == "POST" else stack.get(path, bearer)
+
+
+def put_in_condition(stack: OrderStack, name: str, *, arm: bool = True) -> list:
+    """Drive a fresh stack into the named condition. Returns the bearers a caller could send."""
+    if name == "N1_never_logged_in":
+        bearers: list = [None, RANDOM_BEARER]
+        if arm:
+            bearers.append(stack.arm().json()["relay_token"])  # arm-only: never completed
+        return bearers
+    token = stack.login()
+    if name == "N2_revoked":
+        assert stack.revoke(token).status_code == 200
+    elif name == "N3_past_the_deadline":
+        stack.clock.advance(15 * 3600)  # login 10:00 IST, midnight IST is the deadline
+    elif name == "N4_egress_suspended":
+        stack.clock.advance(301)
+        stack.transport.echo_ip = OTHER_IP
+        assert code_of(stack.bars(token))[:2] == (503, "EGRESS_MISMATCH")  # a data route suspends it
+    else:  # pragma: no cover
+        raise AssertionError(name)
+    return [token, None]
+
+
+def assert_closed(resp, name: str) -> None:
+    status, code, reason, _result, _event_reason = REFUSALS[name]
+    assert refusal_of(resp) == (status, code, reason)
+    assert_orders_envelope(resp)
+    body = resp.json()
+    assert not set(body) & set(LEAK_KEYS), body
+    assert not any(f'"{key}"' in resp.text for key in LEAK_KEYS), resp.text
+
+
+def tree_snapshot(root: Path) -> dict:
+    """Name, size, mtime_ns and sha256 of every file under root (directories by name)."""
+    snapshot: dict = {}
+    for path in sorted(root.rglob("*")):
+        key = str(path.relative_to(root))
+        if path.is_dir():
+            snapshot[key] = "dir"
+            continue
+        info = path.stat()
+        snapshot[key] = (info.st_size, info.st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+    return snapshot
+
+
+def install_audit_spy(stack: OrderStack) -> list:
+    """Record every entries_after call on the live AuditLog instance, then delegate."""
+    calls: list = []
+    original = stack.service.audit.entries_after
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    stack.service.audit.entries_after = spy
+    return calls
+
+
+# N1 to N4: the refusal tuple for each of the three
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_n1_to_n4_the_three_refuse_a_caller_with_no_live_session(stack, name):
+    bearers = put_in_condition(stack, name)
+    for route in THREE:
+        for bearer in bearers:
+            assert_closed(route_call(stack, route, bearer), name)
+    if name == "N3_past_the_deadline":
+        assert len(stack.events_named("session_expired")) == 1
+
+
+# N5: a refused halt writes nothing
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_n5_a_refused_halt_writes_nothing(stack, tmp_path, name):
+    bearers = put_in_condition(stack, name)
+    files = tree_snapshot(tmp_path)
+    chain = durable_audit(stack)
+    verified = stack.service.audit.verify()
+    for bearer in bearers:
+        assert_closed(stack.post("/v1/orders/halt", {}, bearer), name)
+    assert tree_snapshot(tmp_path) == files
+    assert "mac_halt" not in StateStore(stack.state_dir).load().latch_names()
+    assert durable_audit(stack) == chain
+    assert stack.service.audit.verify() == verified
+    assert "HALTED" not in decisions(stack, "unused")
+    if name in ("N1_never_logged_in", "N2_revoked"):
+        if name == "N1_never_logged_in":
+            stack.cold_restart()  # an arm is pending: a restart clears it before the real login
+        fresh = stack.login()
+        minted = stack.mint(fresh)
+        assert minted.status_code == 200, minted.text  # not refused mac_halt
+        assert "mac_halt" not in stack.state(fresh)["latches"]
+
+
+# N6: refused reads read nothing
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_n6_a_refused_read_reads_nothing(stack, name):
+    bearers = put_in_condition(stack, name, arm=False)
+    requests = list(stack.transport.requests)
+    methods = list(stack.metadata.methods)
+    calls = install_audit_spy(stack)
+    for bearer in bearers:
+        assert_closed(stack.get("/v1/orders/state", bearer), name)
+        assert_closed(stack.get("/v1/orders/audit", bearer), name)
+    assert calls == []  # the audit file was never read
+    assert stack.metadata.methods == methods  # and neither was the kill flag
+    assert stack.transport.requests == requests  # no Breeze call, no egress refresh
+    if name in ("N1_never_logged_in", "N2_revoked"):
+        # Positive controls: the same observations do see a live read.
+        fresh = stack.login()
+        assert stack.get("/v1/orders/audit", fresh).status_code == 200
+        assert len(calls) == 1
+        assert stack.get("/v1/orders/state", fresh).status_code == 200
+        assert stack.metadata.methods == methods + ["GET"]
+
+
+# N7: a live session behaves exactly as before
+
+
+def test_n7_with_a_live_session_the_three_behave_as_before(stack, token):
+    calls = install_audit_spy(stack)
+    methods = list(stack.metadata.methods)
+    state = stack.get("/v1/orders/state", token)
+    assert state.status_code == 200
+    assert set(state.json()) == {
+        "contract",
+        "kill",
+        "latches",
+        "drawdown",
+        "peak_date",
+        "last_evaluated_session",
+        "alerts_logged",
+    }
+    assert state.json()["kill"] == "enabled" and state.json()["latches"] == []
+    assert stack.metadata.methods == methods + ["GET"]  # one kill read: the control for N6
+    audit = stack.get("/v1/orders/audit", token)
+    assert audit.status_code == 200 and audit.json() == {"contract": ORDERS_CONTRACT, "entries": []}
+    assert len(calls) == 1  # one audit read: the control for N6
+    halted = stack.post("/v1/orders/halt", {}, token)
+    assert halted.status_code == 200 and halted.json() == {"contract": ORDERS_CONTRACT, "mac_halt": True}
+    assert [e["decision"] for e in durable_audit(stack)] == ["HALTED"]
+    assert "mac_halt" in stack.state(token)["latches"]
+    # Egress evidence older than EGRESS_MAX_AGE_S: the three do not refresh it, so no request leaves.
+    stack.clock.advance(301)
+    requests = list(stack.transport.requests)
+    assert stack.get("/v1/orders/state", token).status_code == 200
+    assert stack.get("/v1/orders/audit", token).status_code == 200
+    assert stack.post("/v1/orders/halt", {}, token).status_code == 200
+    assert stack.transport.requests == requests
+
+
+# N8: no session wins over config_invalid
+
+
+def test_n8_no_session_is_answered_before_a_misconfigured_pipeline(tmp_path, metadata):
+    built = OrderStack(tmp_path, metadata, key=False)
+    for route in THREE:
+        for bearer in (None, RANDOM_BEARER):
+            assert_closed(route_call(built, route, bearer), "N1_never_logged_in")
+    token = built.login()
+    for route in THREE:
+        resp = route_call(built, route, token)
+        assert code_of(resp) == (503, "ORDERS_UNAVAILABLE", "config_invalid"), route
+        assert_orders_envelope(resp)
+    assert built.transport.non_get() == [] and metadata.methods == []
+
+
+# N9: the gate runs before the halt body check
+
+
+def test_n9_the_halt_gate_runs_before_the_body_check(stack):
+    resp = stack.post("/v1/orders/halt", {"x": 1}, None)
+    assert refusal_of(resp)[:2] == (503, "NO_SESSION")
+    token = stack.login()
+    assert stack.post("/v1/orders/halt", {"x": 1}, token).status_code == 422
+    assert durable_audit(stack) == []
+
+
+# N10: re-login
+
+
+def test_n10_after_a_revoke_and_a_new_login_only_the_new_bearer_answers(stack, token):
+    assert stack.revoke(token).status_code == 200
+    fresh = stack.login()
+    assert fresh != token
+    for route in THREE:
+        old = route_call(stack, route, token)
+        assert refusal_of(old)[:2] == (401, "UNAUTHORIZED")
+        assert_orders_envelope(old)
+    for route in THREE:
+        assert route_call(stack, route, fresh).status_code == 200
+
+
+# N11: static scan. Each gated handler opens with authorize, then the failure gate.
+
+GATED_ROUTES = {
+    "ROUTE_HALT": "halt",
+    "ROUTE_STATE": "state",
+    "ROUTE_AUDIT": "audit_page",
+    "ROUTE_KEY": "current_key",
+}
+
+
+def _is_failure(node, var: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "failure"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == var
+    )
+
+
+def _is_authorize_call(node) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "authorize"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "session"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "token"
+        and not node.keywords
+    )
+
+
+def gate_violations(source: str) -> list[str]:
+    """Violations as "<handler>: <what>". Handlers are selected by route constant, never by name."""
+    tree = ast.parse(source)
+    mounts = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "mount_order_routes"]
+    if len(mounts) != 1:
+        return ["mapping: mount_order_routes is not defined exactly once"]
+    selected: dict[str, list[ast.FunctionDef]] = {}
+    for node in mounts[0].body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for decorator in node.decorator_list:
+            if (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr in ("post", "get")
+                and isinstance(decorator.func.value, ast.Name)
+                and decorator.func.value.id == "app"
+                and decorator.args
+                and isinstance(decorator.args[0], ast.Name)
+                and decorator.args[0].id in GATED_ROUTES
+            ):
+                selected.setdefault(decorator.args[0].id, []).append(node)
+    found = {const: [fn.name for fn in fns] for const, fns in selected.items()}
+    if found != {const: [name] for const, name in GATED_ROUTES.items()}:
+        return [f"mapping: selected {found}, expected {GATED_ROUTES}"]
+    out: list[str] = []
+    for const, (fn,) in selected.items():
+        first = fn.body[0]
+        if not (
+            isinstance(first, ast.Assign)
+            and len(first.targets) == 1
+            and isinstance(first.targets[0], ast.Name)
+            and _is_authorize_call(first.value)
+        ):
+            out.append(f"{fn.name}: first statement is not '<n> = session.authorize(token)'")
+            continue
+        var = first.targets[0].id
+        second = fn.body[1] if len(fn.body) > 1 else None
+        if not (
+            isinstance(second, ast.If)
+            and _is_failure(second.test, var)
+            and not second.orelse
+            and len(second.body) == 1
+            and isinstance(second.body[0], ast.Raise)
+            and _is_failure(second.body[0].exc, var)
+        ):
+            out.append(f"{fn.name}: second statement is not 'if {var}.failure: raise {var}.failure'")
+    return out
+
+
+_GATE = (
+    "        authorization = session.authorize(token)\n"
+    "        if authorization.failure:\n"
+    "            raise authorization.failure\n"
+)
+_BARE = "        session.authorize(token)\n"
+_HALT_HEAD = "        order = pipeline()\n"
+_HALT_OBJECT = '        if _object(raw):\n            raise intent_invalid("bad_body")\n'
+_STATE_HEAD = "        pipeline()\n"
+_STATE_ASSERT = "        assert service.store is not None and service.kill is not None and service.alerts is not None\n"
+_STATE_KILL = "        kill = service.kill.read()\n"
+_AUDIT_HEAD = "        pipeline()\n"
+_AUDIT_QUERY = "        after_seq = _audit_query(request)\n"
+
+# name -> (handler, anchor, planted)
+PLANTS = {
+    "halt_bare": ("halt", _GATE + _HALT_HEAD, _BARE + _HALT_HEAD),
+    "state_bare": ("state", _GATE + _STATE_HEAD + _STATE_ASSERT, _BARE + _STATE_HEAD + _STATE_ASSERT),
+    "audit_bare": ("audit_page", _GATE + _AUDIT_HEAD + _AUDIT_QUERY, _BARE + _AUDIT_HEAD + _AUDIT_QUERY),
+    "halt_after_pipeline": ("halt", _GATE + _HALT_HEAD, _HALT_HEAD + _GATE),
+    "state_after_pipeline": (
+        "state",
+        _GATE + _STATE_HEAD + _STATE_ASSERT,
+        _STATE_HEAD + _GATE + _STATE_ASSERT,
+    ),
+    "audit_after_pipeline": (
+        "audit_page",
+        _GATE + _AUDIT_HEAD + _AUDIT_QUERY,
+        _AUDIT_HEAD + _GATE + _AUDIT_QUERY,
+    ),
+    "halt_after_object_check": (
+        "halt",
+        _GATE + _HALT_HEAD + _HALT_OBJECT,
+        _HALT_HEAD + _HALT_OBJECT + _GATE,
+    ),
+    "state_after_kill_read": (
+        "state",
+        _GATE + _STATE_HEAD + _STATE_ASSERT + _STATE_KILL,
+        _STATE_HEAD + _STATE_ASSERT + _STATE_KILL + _GATE,
+    ),
+    "audit_after_query": (
+        "audit_page",
+        _GATE + _AUDIT_HEAD + _AUDIT_QUERY,
+        _AUDIT_HEAD + _AUDIT_QUERY + _GATE,
+    ),
+}
+
+
+def test_n11_every_gated_handler_opens_with_authorize_then_the_failure_gate():
+    assert gate_violations(ROUTES_SRC.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize("plant", list(PLANTS))
+def test_n11_a_planted_weakening_names_its_handler(plant):
+    handler, anchor, planted = PLANTS[plant]
+    source = ROUTES_SRC.read_text(encoding="utf-8")
+    assert source.count(anchor) == 1, "the plant's anchor must occur exactly once"
+    assert planted != anchor
+
+    def named(found: list[str]) -> set[str]:
+        return {v.split(":")[0] for v in found}
+
+    baseline = named(gate_violations(source))  # empty while the gates are in place
+    found = gate_violations(source.replace(anchor, planted))
+    assert named(found) - baseline == {handler}, found  # the scan names the planted handler, and only it
+
+
+def test_n11_renaming_audit_page_turns_the_exact_mapping_red():
+    # A scan keyed on a handler named `audit` would select nothing and pass; this proves it does not.
+    source = ROUTES_SRC.read_text(encoding="utf-8")
+    anchor = "    def audit_page(request: Request"
+    assert source.count(anchor) == 1
+    planted = anchor.replace("audit_page", "audit_view")
+    assert planted != anchor
+    found = gate_violations(source.replace(anchor, planted))
+    assert [v.split(":")[0] for v in found] == ["mapping"], found
+
+
+# N12: the same refusal, event and hygiene as the key route
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_n12_the_three_match_the_key_route_event_for_event(stack, name):
+    status, code, reason, result, event_reason = REFUSALS[name]
+    bearers = put_in_condition(stack, name)
+    texts: list[str] = []
+    for bearer in bearers:
+        key_resp = route_call(stack, KEY_ROUTE, bearer)
+        key_events = stack.events_named("request")
+        key_event = key_events[-1]
+        assert key_event["route"] == KEY_ROUTE[1]
+        key_tuple = (key_event["http"], key_event["result"], key_event.get("reason"))
+        assert key_tuple == (status, result, event_reason)
+        assert refusal_of(key_resp) == (status, code, reason)
+        texts.append(key_resp.text)
+        for route in THREE:
+            seen = len(stack.events_named("request"))
+            resp = route_call(stack, route, bearer)
+            events = stack.events_named("request")
+            assert len(events) == seen + 1  # exactly one request event per call
+            event = events[-1]
+            assert event["route"] == route[1]  # the request path, not "other"
+            assert (event["http"], event["result"], event.get("reason")) == key_tuple
+            assert refusal_of(resp) == refusal_of(key_resp) == (status, code, reason)
+            texts.append(resp.text)
+    secrets = [b for b in bearers if b] + [APP_KEY, SECRET_KEY, EXPECTED_IP, *secret_forms()]
+    for text in [stack.sink.getvalue(), *texts]:
+        for secret in secrets:
+            assert secret not in text
